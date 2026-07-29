@@ -78,8 +78,14 @@ const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS |
   .map((origin) => origin.trim())
   .filter(Boolean);
 const llmProvider = String(process.env.LLM_PROVIDER || (process.env.GROQ_API_KEY ? 'groq' : 'gemini')).toLowerCase();
-const geminiPlanModel = process.env.GEMINI_PLAN_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-const geminiCodeModel = process.env.GEMINI_CODE_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-pro';
+const defaultGeminiModel = 'gemini-3-flash-preview';
+const legacyGeminiModels = new Set(['gemini-2.5-flash', 'gemini-2.5-pro']);
+const resolveGeminiModel = (model) => {
+  const requestedModel = String(model || defaultGeminiModel).trim();
+  return legacyGeminiModels.has(requestedModel) ? defaultGeminiModel : requestedModel;
+};
+const geminiPlanModel = resolveGeminiModel(process.env.GEMINI_PLAN_MODEL || process.env.GEMINI_MODEL);
+const geminiCodeModel = resolveGeminiModel(process.env.GEMINI_CODE_MODEL || process.env.GEMINI_MODEL);
 const groqPlanModel = process.env.GROQ_PLAN_MODEL || 'openai/gpt-oss-120b';
 const groqCodeModel = process.env.GROQ_CODE_MODEL || 'qwen/qwen3-32b';
 const planModel = llmProvider === 'groq' ? groqPlanModel : geminiPlanModel;
