@@ -35,11 +35,14 @@ Railway production değişkeni:
 
 ```env
 AUTH_REDIRECT_URL=https://karatahta.ethosoft.org/
+GOOGLE_OAUTH_ENABLED=true
 ```
 
 Google giriş butonu backend'deki `/api/auth/oauth/google` endpointinden
 Supabase'in güvenli yönlendirme adresini alır. OAuth dönüşündeki kullanıcı,
 mevcut profil ve ders geçmişi sistemiyle aynı kullanıcı akışına girer.
+`GOOGLE_OAUTH_ENABLED` değerini yalnızca Google provider Supabase'de
+etkinleştirildikten sonra `true` yapın.
 
 ## 2. Supabase Custom SMTP
 

@@ -93,6 +93,7 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const authRequired = String(process.env.AUTH_REQUIRED || 'true').toLowerCase() !== 'false';
 const authRedirectUrl = String(process.env.AUTH_REDIRECT_URL || '').trim();
+const googleOAuthEnabled = String(process.env.GOOGLE_OAUTH_ENABLED || 'false').toLowerCase() === 'true';
 const signedVideoUrlTtlSeconds = process.env.SUPABASE_SIGNED_URL_TTL_SECONDS || 3600;
 const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
@@ -1793,7 +1794,8 @@ app.get('/api/config', async (_req, res, next) => {
       mediaStorageProvider,
       hasRailwayBucket: railwayMediaConfigured,
       authRequired,
-      authRedirectConfigured: Boolean(authRedirectUrl)
+      authRedirectConfigured: Boolean(authRedirectUrl),
+      googleOAuthEnabled
     });
   } catch (error) {
     next(error);
@@ -1839,6 +1841,9 @@ app.post('/api/auth/login', async (req, res, next) => {
 
 app.get('/api/auth/oauth/google', async (_req, res, next) => {
   try {
+    if (!googleOAuthEnabled) {
+      return res.status(503).json({ error: 'Google ile giris henuz etkin degil.' });
+    }
     const url = await createOAuthSignInUrl({
       provider: 'google',
       redirectTo: authCallbackUrl('oauth')
