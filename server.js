@@ -22,6 +22,7 @@ import {
   createLiveBoardNdjsonParser
 } from './services/liveBoard.js';
 import { LiveManimPool } from './services/liveManimStream.js';
+import { safeJsonParse } from './services/llmJson.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
 import {
   buildPlannedSpeech,
@@ -670,62 +671,12 @@ async function withRetry(label, task, retries = 2) {
   throw lastError;
 }
 
-function safeJsonParse(text) {
-  const trimmed = text.trim();
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    const jsonText = extractFirstJsonObject(trimmed);
-    if (jsonText) {
-      return JSON.parse(jsonText);
+function parseLlmJson(text, label) {
+  return safeJsonParse(text, {
+    onRepair: (details) => {
+      logInfo(`${label}: bozuk JSON otomatik onarildi`, details);
     }
-    throw new Error('LLM yaniti gecerli JSON olarak okunamadi.');
-  }
-}
-
-function extractFirstJsonObject(text) {
-  const start = text.indexOf('{');
-  if (start === -1) {
-    return null;
-  }
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-
-  for (let index = start; index < text.length; index += 1) {
-    const char = text[index];
-
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-
-    if (char === '\\' && inString) {
-      escaped = true;
-      continue;
-    }
-
-    if (char === '"') {
-      inString = !inString;
-      continue;
-    }
-
-    if (inString) {
-      continue;
-    }
-
-    if (char === '{') {
-      depth += 1;
-    } else if (char === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        return text.slice(start, index + 1);
-      }
-    }
-  }
-
-  return null;
+  });
 }
 
 function stripCodeFence(text) {
@@ -816,7 +767,7 @@ Ek not: ${note || 'Yok'}`;
     }
   });
 
-  const plan = safeJsonParse(response.text || '');
+  const plan = parseLlmJson(response.text || '', 'Soru fotografi plani');
   logInfo('Soru fotografi cozum plani tamamlandi', {
     ms: Date.now() - started,
     model: usedModel,
@@ -1306,7 +1257,7 @@ async function createSpeechScript(segment) {
     temperature: 0.45
   });
 
-  const speech = safeJsonParse(responseText || '');
+  const speech = parseLlmJson(responseText || '', `${segment.id}: speech`);
   if (!speech || typeof speech.speech_text !== 'string' || !speech.speech_text.trim()) {
     const error = new Error(`${segment.id}: Gemini gecerli bir speech_text dondurmedi.`);
     error.statusCode = 502;
@@ -2300,7 +2251,7 @@ ZORUNLU:
       temperature: 0.7
     });
 
-    const plan = safeJsonParse(responseText || '');
+    const plan = parseLlmJson(responseText || '', 'Ders plani');
     logInfo('Plan uretimi tamamlandi', {
       topic: plan.topic || topic,
       segments: Array.isArray(plan.segments) ? plan.segments.length : 0
