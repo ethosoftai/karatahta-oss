@@ -1797,53 +1797,79 @@ async function generateProgressiveLessonPlan(job, input, plannerPrompt) {
       current: `${segmentCount} bölümlük ders taslağı ve ilk gerçek segment hazırlanıyor.`,
       message: `0/${segmentCount} segment planlandı.`
     });
-    const outlineResult = await generateLlmText({
-      label: 'Gemini plan taslağı',
-      model: planModel,
-      systemInstruction: `${plannerPrompt}
+    const outlineSystemInstruction = `${plannerPrompt}
 
 Bu aşamada kısa ders iskeletini ve ilk oynatılacak segmentin eksiksiz ayrıntısını birlikte üret.
 Tam olarak ${segmentCount} bölüm başlığı ve her bölümün tek cümlelik öğrenme hedefini üret.
 first_segment alanında ilk bölümün yaklaşık ${segmentDurations[0]} saniyelik doğal Türkçe narration metnini ve 4-6 sade görsel aksiyonunu eksiksiz ver.
 İlk narration doğrudan konuya girsin; selamlama, hazırlık veya "dersimize başlıyoruz" cümlesi kullanma.
-Yalnızca geçerli JSON döndür.`,
-      userText: JSON.stringify({
-        ...input,
-        target_segment_count: segmentCount,
-        output_schema: {
-          topic: 'string',
-          core_insight: 'string',
-          hook: { question: 'string' },
-          analogy: { everyday_scenario: 'string', mapping: 'string' },
-          learning_objectives: ['string'],
-          common_misconceptions: ['string'],
-          first_segment: {
-            id: 'segment-1',
-            title: 'string',
-            duration_seconds: segmentDurations[0],
-            learning_objective: 'string',
-            narration: `${segmentDurations[0]} saniyeye sığan yaklaşık ${Math.round(segmentDurations[0] * 2.2)} kelimelik doğal Türkçe anlatım`,
-            animation: {
-              description: 'string',
-              sequence: ['4-6 kısa ve render edilmesi kolay gerçek ders görseli']
-            }
-          },
-          segments: Array.from({ length: segmentCount }, (_, index) => ({
-            index,
-            title: 'string',
-            learning_objective: 'string',
-            role: 'Bu bölümün ders akışındaki görevi',
-            duration_seconds: segmentDurations[index]
-          }))
-        }
-      }, null, 2),
+Yalnızca geçerli JSON döndür. JSON string alanlarındaki satır sonlarını \\n olarak escape et.`;
+    const outlineUserText = JSON.stringify({
+      ...input,
+      target_segment_count: segmentCount,
+      output_schema: {
+        topic: 'string',
+        core_insight: 'string',
+        hook: { question: 'string' },
+        analogy: { everyday_scenario: 'string', mapping: 'string' },
+        learning_objectives: ['string'],
+        common_misconceptions: ['string'],
+        first_segment: {
+          id: 'segment-1',
+          title: 'string',
+          duration_seconds: segmentDurations[0],
+          learning_objective: 'string',
+          narration: `${segmentDurations[0]} saniyeye sığan yaklaşık ${Math.round(segmentDurations[0] * 2.2)} kelimelik doğal Türkçe anlatım`,
+          animation: {
+            description: 'string',
+            sequence: ['4-6 kısa ve render edilmesi kolay gerçek ders görseli']
+          }
+        },
+        segments: Array.from({ length: segmentCount }, (_, index) => ({
+          index,
+          title: 'string',
+          learning_objective: 'string',
+          role: 'Bu bölümün ders akışındaki görevi',
+          duration_seconds: segmentDurations[index]
+        }))
+      }
+    }, null, 2);
+    let outlineResult = await generateLlmText({
+      label: 'Gemini plan taslağı',
+      model: planModel,
+      systemInstruction: outlineSystemInstruction,
+      userText: outlineUserText,
       json: true,
-      temperature: 0.4,
+      temperature: 0.35,
       maxCompletionTokens: 4800,
       withMetadata: true
     });
+    let parsedOutline;
+    try {
+      parsedOutline = parseLlmJson(outlineResult.text, 'Ders taslağı');
+    } catch (parseError) {
+      logInfo('Gemini plan taslağı: geçersiz JSON, tek sefer yeniden deneniyor', {
+        model: outlineResult.model,
+        chars: outlineResult.text.length,
+        cause: parseError.cause?.message || parseError.message,
+        responseTail: outlineResult.text.slice(-500)
+      });
+      outlineResult = await generateLlmText({
+        label: 'Gemini plan taslağı JSON retry',
+        model: outlineResult.model,
+        systemInstruction: `${outlineSystemInstruction}
+
+ÖNCEKİ CEVAP JSON doğrulamasından geçemedi. Bu tekrar denemesinde hiçbir alanı yarım bırakma; kapanış parantezlerini eksiksiz yaz.`,
+        userText: outlineUserText,
+        json: true,
+        temperature: 0.15,
+        maxCompletionTokens: 4800,
+        withMetadata: true
+      });
+      parsedOutline = parseLlmJson(outlineResult.text, 'Ders taslağı JSON retry');
+    }
     const outline = normalizeOutline(
-      parseLlmJson(outlineResult.text, 'Ders taslağı'),
+      parsedOutline,
       input,
       segmentCount
     );
@@ -2186,6 +2212,7 @@ async function runLiveManimPreview(job) {
     });
     updateJob(job, { current: 'Canli Manim dersi tamamlandi.' });
   } catch (error) {
+    job._liveManimSession?.abort(error);
     job.liveManim.status = 'failed';
     job.liveManim.error = error.message || 'Canli Manim yayini basarisiz oldu.';
     logInfo(`Job ${job.id}: canli Manim hata verdi`, {

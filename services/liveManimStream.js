@@ -97,6 +97,13 @@ class LiveManimSession extends EventEmitter {
     this.send({ type: 'finish' });
   }
 
+  abort(error = new Error('Live Manim oturumu iptal edildi.')) {
+    if (!this.done && !this.failed) {
+      this.fail(error);
+    }
+    this.worker.recycle();
+  }
+
   handleVideoChunk(chunk) {
     const payload = Buffer.from(chunk);
     if (!this.hasClientConnected && this.cachedBytes < 32 * 1024 * 1024) {
@@ -249,6 +256,15 @@ class WarmLiveManimWorker {
       outputPath: request.outputPath
     });
     request.resolve(this.session);
+  }
+
+  recycle() {
+    if (this.process.exitCode !== null || this.process.killed) return;
+    this.process.kill('SIGTERM');
+    const forceKill = setTimeout(() => {
+      if (this.process.exitCode === null) this.process.kill('SIGKILL');
+    }, 1500);
+    forceKill.unref();
   }
 
   shutdown() {
