@@ -1,38 +1,29 @@
-# Kara Tahta Auth e-posta kurulumu
+# Kara Tahta kimlik doğrulama kurulumu
 
-## 1. hosting/cPanel üzerinde posta hesabı
+Kara Tahta, Supabase Auth üzerinden iki giriş yöntemi kullanır:
 
-1. cPanel'de **Email Accounts** bölümünü açın.
-2. `no-reply@ethosoft.org` hesabını oluşturup güçlü ve benzersiz bir parola belirleyin.
-3. Hesabın yanındaki **Connect Devices / Set Up Mail Client** sayfasını açın.
-4. Burada gösterilen kesin **Outgoing Server (SMTP)**, port ve güvenlik tipini not edin.
-   Genellikle tam kullanıcı adı `no-reply@ethosoft.org`, port `465` (SSL/TLS) veya
-   `587` (STARTTLS) olur. Sunucu adını tahmin etmeyin; cPanel'de yazanı kullanın.
-5. **Email Deliverability** ekranında SPF ve DKIM kayıtlarının geçerli olduğunu
-   doğrulayın. Eksikse cPanel'in **Repair** seçeneğini kullanın. DMARC kaydını da
-   DNS/Zone Editor üzerinden ekleyin.
-6. hosting desteğine hesabın saatlik/günlük gönderim sınırını sorun.
+- Google OAuth
+- E-posta ve şifre
 
-SMTP parolasını `.env`, frontend veya GitHub'a yazmayın.
+E-posta doğrulaması ile şifre yenileme mesajları mevcut Supabase Custom SMTP
+ayarları üzerinden gönderilmeye devam eder. Resend veya Send Email Hook
+kullanılmaz.
 
-## 2. Supabase Custom SMTP
+## 1. Google OAuth
 
-Supabase Dashboard'da **Authentication → Emails → SMTP Settings** bölümünü açın
-ve Custom SMTP'yi etkinleştirin:
+Google Cloud Console'da bir **Web application** OAuth istemcisi oluşturun.
 
-- Sender name: `Kara Tahta`
-- Sender email: `no-reply@ethosoft.org`
-- Host: cPanel **Outgoing Server** değeri
-- Port: cPanel'de verilen `465` veya `587`
-- Username: `no-reply@ethosoft.org`
-- Password: cPanel'de oluşturduğunuz posta parolası
+Authorized redirect URI:
 
-Ayarı kaydedip test e-postası gönderin. `465` seçildiyse SSL/TLS, `587`
-seçildiyse STARTTLS kullanın.
+```text
+https://<PROJECT_REF>.supabase.co/auth/v1/callback
+```
 
-## 3. URL ayarları
+Oluşan Client ID ve Client Secret değerlerini Supabase Dashboard'da
+**Authentication → Sign In / Providers → Google** bölümüne girip Google
+sağlayıcısını etkinleştirin.
 
-Supabase Dashboard'da **Authentication → URL Configuration**:
+Supabase **Authentication → URL Configuration**:
 
 - Site URL: `https://karatahta.ethosoft.org`
 - Redirect URLs:
@@ -40,20 +31,32 @@ Supabase Dashboard'da **Authentication → URL Configuration**:
   - `http://localhost:3001/**`
   - `http://127.0.0.1:3001/**`
 
-Railway backend ortam değişkeni:
+Railway production değişkeni:
 
 ```env
 AUTH_REDIRECT_URL=https://karatahta.ethosoft.org/
 ```
 
-## 4. Markalı şablonlar
+Google giriş butonu backend'deki `/api/auth/oauth/google` endpointinden
+Supabase'in güvenli yönlendirme adresini alır. OAuth dönüşündeki kullanıcı,
+mevcut profil ve ders geçmişi sistemiyle aynı kullanıcı akışına girer.
 
-Supabase Dashboard'da **Authentication → Emails → Email Templates** bölümünde:
+## 2. Supabase Custom SMTP
 
-- Confirm signup subject: `Kara Tahta hesabını doğrula`
-- Confirm signup body: `supabase/email-templates/confirmation.html`
-- Reset password subject: `Kara Tahta şifreni yenile`
-- Reset password body: `supabase/email-templates/recovery.html`
+Supabase Dashboard'da **Authentication → Emails → SMTP Settings** bölümünde
+mevcut hosting SMTP ayarları kullanılabilir:
 
-HTML içindeki `{{ .ConfirmationURL }}` Supabase tarafından tek kullanımlık güvenli
-bağlantıyla değiştirilir. Bu ifadeyi kaldırmayın veya değiştirmeyin.
+- Sender name: `Kara Tahta`
+- Sender email: `no-reply@karatahta.ethosoft.org`
+- Host: `mail.karatahta.ethosoft.org`
+- Port: `587`
+- Username: `no-reply@karatahta.ethosoft.org`
+- Password: cPanel'deki posta hesabının parolası
+
+E-posta gönderilemezse hosting/cPanel **Email Deliverability** ekranından SPF,
+DKIM ve DMARC durumlarını kontrol edin. SMTP parolasını `.env`, frontend veya
+GitHub'a yazmayın.
+
+E-posta ile kayıt ve şifre yenileme ekranları, mesajın gelen kutusunda
+görünmemesi halinde spam veya gereksiz klasörünün kontrol edilmesini kullanıcıya
+hatırlatır.
