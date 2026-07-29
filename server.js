@@ -28,7 +28,6 @@ import {
   buildPlannedSpeech,
   resolveStreamingSegmentCount
 } from './services/streamingPipeline.js';
-import { buildSilentWav } from './services/wavAudio.js';
 import {
   buildBurnSubtitleArgs,
   buildConcatArgs,
@@ -158,7 +157,6 @@ const liveManimFragmentSeconds = Math.max(
   2,
   Math.min(10, Number(process.env.LIVE_MANIM_FRAGMENT_SECONDS || 5))
 );
-const liveManimIntroSeconds = 8;
 const manimRenderFps = 60;
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
@@ -1641,9 +1639,10 @@ async function createVideoJob({ plan, lessonId, userId, total, initialSegments =
       generatedActions: 0,
       renderedActions: 0,
       failedActions: 0,
-      introDurationSeconds: liveManimIntroSeconds,
-      introHasSpeech: null,
       startedAt: null,
+      firstContentReadyAt: null,
+      firstContentSeconds: null,
+      promptToFirstContentMs: null,
       completedAt: null,
       durationSeconds: null,
       bytes: 0,
@@ -1664,8 +1663,14 @@ async function createVideoJob({ plan, lessonId, userId, total, initialSegments =
     _segmentDeferred: Array.from({ length: segmentTotal }, () => createDeferred()),
     _segmentReady: new Array(segmentTotal).fill(false),
     _audioDeferred: Array.from({ length: segmentTotal }, () => createDeferred()),
-    _liveManimSession: null
+    _liveManimSession: null,
+    _livePreviewReady: createDeferred(),
+    _livePreviewReadyResolved: false
   };
+  if (!job.liveManimEnabled) {
+    job._livePreviewReadyResolved = true;
+    job._livePreviewReady.resolve({ reason: 'disabled' });
+  }
   if (job.liveManim.streamUrl) {
     job.liveManim.streamUrl = job.liveManim.streamUrl.replace('__JOB_ID__', job.id);
   }
@@ -1909,142 +1914,58 @@ Başka segment, markdown veya açıklama ekleme.`,
   }
 }
 
-function buildLiveIntroCommands(topic) {
-  const cleanTopic = String(topic || 'Yeni ders').trim().slice(0, 120);
-  return [
-    {
-      id: 'kara-intro-title',
-      type: 'title',
-      at_percent: 0,
-      duration_ms: 650,
-      text: cleanTopic,
-      x: 50,
-      y: 20,
-      color: '#f8fafc',
-      font_size: 6.8
-    },
-    {
-      id: 'kara-intro-subtitle',
-      type: 'write',
-      at_percent: 20,
-      duration_ms: 550,
-      text: 'Kara Tahta dersi hazırlanıyor',
-      x: 28,
-      y: 46,
-      color: '#86efac',
-      font_size: 4.3
-    },
-    {
-      id: 'kara-intro-line',
-      type: 'line',
-      at_percent: 48,
-      duration_ms: 550,
-      x: 24,
-      y: 62,
-      x2: 76,
-      y2: 62,
-      color: '#93c5fd',
-      stroke_width: 0.9
-    },
-    {
-      id: 'kara-intro-status',
-      type: 'write',
-      at_percent: 76,
-      duration_ms: 600,
-      text: 'Plan • Ses • Animasyon',
-      x: 31,
-      y: 76,
-      color: '#fde68a',
-      font_size: 3.8
-    },
-    {
-      id: 'kara-intro-hold',
-      type: 'wait',
-      at_percent: 92,
-      duration_ms: 650,
-      text: '',
-      x: 50,
-      y: 50,
-      color: '#f8fafc'
-    }
-  ];
-}
-
-async function createLiveIntroAudio(job, outputDir) {
-  const introAudioPath = path.join(
-    outputDir,
-    `${sanitizeSegmentId(job.id)}-intro.wav`
+function markLivePreviewReady(job, details = {}) {
+  if (job._livePreviewReadyResolved) return;
+  job._livePreviewReadyResolved = true;
+  const readyAt = new Date();
+  const promptToFirstContentMs = Math.max(
+    0,
+    readyAt.getTime() - new Date(job.startedAt).getTime()
   );
-  const introText = `${String(job.plan.topic || 'Yeni ders').trim()}. Dersimize başlıyoruz.`;
-  const ttsPromise = synthesizeSpeech(introText, `${job.id}-intro`);
-  let timeout;
-
-  try {
-    const introTts = await Promise.race([
-      ttsPromise,
-      new Promise((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error('Açılış TTS beş saniyede hazır olmadı.')),
-          5000
-        );
-      })
-    ]);
-    clearTimeout(timeout);
-    const sourcePath = resolveRenderRelative(introTts.audioRelativePath);
-    const padded = await runCommand('ffmpeg', [
-      '-y',
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-i',
-      sourcePath,
-      '-af',
-      'apad',
-      '-t',
-      String(liveManimIntroSeconds),
-      '-ar',
-      '48000',
-      '-ac',
-      '1',
-      '-c:a',
-      'pcm_s16le',
-      introAudioPath
-    ], { timeoutMs: 30000 });
-    await fs.unlink(sourcePath).catch(() => {});
-    if (padded.code !== 0) {
-      throw new Error(`Açılış sesi hazırlanamadı: ${padded.stderr.slice(-500)}`);
-    }
-    job.liveManim.introHasSpeech = true;
-    return introAudioPath;
-  } catch (error) {
-    clearTimeout(timeout);
-    void ttsPromise.then((lateTts) => (
-      fs.unlink(resolveRenderRelative(lateTts.audioRelativePath)).catch(() => {})
-    )).catch(() => {});
-    await fs.writeFile(introAudioPath, buildSilentWav({
-      durationSeconds: liveManimIntroSeconds
-    }));
-    job.liveManim.introHasSpeech = false;
-    logInfo(`Job ${job.id}: sesli açılış fallback`, { error: error.message });
-    return introAudioPath;
-  }
+  job.liveManim.firstContentReadyAt = readyAt.toISOString();
+  job.liveManim.firstContentSeconds = Number(details.timelineSeconds || 0) || null;
+  job.liveManim.promptToFirstContentMs = promptToFirstContentMs;
+  job._livePreviewReady.resolve({
+    reason: details.reason || 'first_real_fragment',
+    promptToFirstContentMs
+  });
+  logInfo(`Job ${job.id}: ilk gerçek canlı ders parçası hazır`, {
+    promptToFirstContentMs,
+    timelineSeconds: job.liveManim.firstContentSeconds,
+    reason: details.reason || 'first_real_fragment'
+  });
 }
 
 async function runLiveManimPreview(job) {
-  if (!liveBoardEnabled || !liveManimEnabled || !job.total) return;
+  if (!liveBoardEnabled || !liveManimEnabled || !job.total) {
+    markLivePreviewReady(job, { reason: 'disabled' });
+    return;
+  }
 
   const outputDir = path.join(rendersDir, 'live-manim');
   const outputPath = path.join(outputDir, `${sanitizeSegmentId(job.id)}.mp4`);
-  let introAudioPath = null;
-  const introDurationSeconds = liveManimIntroSeconds;
   job.liveManim.status = 'waiting_worker';
   updateJob(job, { current: 'Canli Manim motoru hazirlaniyor...' });
 
   try {
     await fs.mkdir(outputDir, { recursive: true });
-    introAudioPath = await createLiveIntroAudio(job, outputDir);
     const session = await liveManimPool.acquire({ jobId: job.id, outputPath });
     job._liveManimSession = session;
+    let mp4ProbeTail = Buffer.alloc(0);
+    session.on('video', (chunk) => {
+      if (job._livePreviewReadyResolved) return;
+      const probe = Buffer.concat([mp4ProbeTail, Buffer.from(chunk)]);
+      if (probe.indexOf(Buffer.from('moof')) !== -1) {
+        markLivePreviewReady(job, {
+          timelineSeconds: liveManimFragmentSeconds,
+          reason: 'first_real_mp4_fragment'
+        });
+        updateJob(job, {
+          current: `İlk gerçek ${liveManimFragmentSeconds} saniyelik ders parçası yayında.`
+        });
+      }
+      mp4ProbeTail = probe.subarray(Math.max(0, probe.length - 7));
+    });
     session.on('event', (event) => {
       if (event.event === 'stream_started') {
         job.liveManim.status = 'streaming';
@@ -2073,19 +1994,8 @@ async function runLiveManimPreview(job) {
       preset: liveManimPreset,
       fragmentSeconds: liveManimFragmentSeconds
     });
-    session.beginSegment({
-      segmentId: 'kara-intro',
-      audioPath: introAudioPath,
-      durationSeconds: introDurationSeconds
-    });
-    for (const command of buildLiveIntroCommands(job.plan.topic)) {
-      session.action(command);
-      job.liveManim.generatedActions += 1;
-    }
     updateJob(job, {
-      current: job.liveManim.introHasSpeech
-        ? 'Konuya özel sesli açılış yayına hazırlanıyor.'
-        : 'Konuya özel açılış yayına hazırlanıyor.'
+      current: 'İlk gerçek ders anlatımı ve çizimleri hazırlanıyor.'
     });
 
     let preferredModel = null;
@@ -2120,23 +2030,25 @@ async function runLiveManimPreview(job) {
           current: `${segment.id}: ${segmentState.liveManim.commandCount} Manim aksiyonu yayina girdi.`
         });
       };
-      appendCommand({
-        id: `${segment.id}-transition`,
-        type: 'clear',
-        at_percent: 0,
-        duration_ms: 350,
-        color: '#f8fafc',
-        text: '',
-        x: 50,
-        y: 50,
-        x2: 50,
-        y2: 50,
-        width: 1,
-        height: 1,
-        radius: 1,
-        font_size: 4,
-        stroke_width: 0.7
-      });
+      if (index > 0) {
+        appendCommand({
+          id: `${segment.id}-transition`,
+          type: 'clear',
+          at_percent: 0,
+          duration_ms: 350,
+          color: '#f8fafc',
+          text: '',
+          x: 50,
+          y: 50,
+          x2: 50,
+          y2: 50,
+          width: 1,
+          height: 1,
+          radius: 1,
+          font_size: 4,
+          stroke_width: 0.7
+        });
+      }
 
       try {
         const result = await streamLiveBoardCommands(segment, appendCommand, preferredModel);
@@ -2163,14 +2075,17 @@ async function runLiveManimPreview(job) {
     job.liveManim.bytes = result.bytes;
     job.liveManim.videoUrl = `/renders/${relativePath}`;
     session.releaseCachedChunks();
+    markLivePreviewReady(job, {
+      timelineSeconds: actualDuration,
+      reason: 'live_stream_completed'
+    });
     updateJob(job, { current: 'Canli Manim dersi tamamlandi.' });
   } catch (error) {
     job.liveManim.status = 'failed';
     job.liveManim.error = error.message || 'Canli Manim yayini basarisiz oldu.';
     logInfo(`Job ${job.id}: canli Manim hata verdi`, { error: job.liveManim.error });
+    markLivePreviewReady(job, { reason: 'live_stream_failed' });
     updateJob(job, { current: 'Canli Manim kullanilamadi; parca video akisi devam ediyor.' });
-  } finally {
-    if (introAudioPath) await fs.unlink(introAudioPath).catch(() => {});
   }
 }
 
@@ -2349,6 +2264,23 @@ async function runFullVideoJob(job) {
         throw prepared.error;
       }
 
+      if (index === 0 && job.liveManimEnabled && !job._livePreviewReadyResolved) {
+        updateJob(job, {
+          current: `İlk gerçek ${liveManimFragmentSeconds} saniyelik canlı ders parçasına öncelik veriliyor...`,
+          message: 'Canlı başlangıç hazırlanırken ağır final renderı kısa süre bekletiliyor.'
+        });
+        let releaseWait;
+        const maxPriorityWait = new Promise((resolve) => {
+          releaseWait = setTimeout(() => resolve({ reason: 'priority_wait_timeout' }), 15000);
+        });
+        const liveStart = await Promise.race([
+          job._livePreviewReady.promise,
+          maxPriorityWait
+        ]);
+        clearTimeout(releaseWait);
+        logInfo(`Job ${job.id}: final render bekleme sonucu`, liveStart);
+      }
+
       segmentState.status = 'render';
       updateJob(job, {
         current: `${prepared.segment.id}: sirali render ediliyor...`,
@@ -2361,7 +2293,7 @@ async function runFullVideoJob(job) {
         audioRelativePath: prepared.tts.audioRelativePath,
         speechText: prepared.speech.speech_text,
         quality: streamManimQuality,
-        postprocessPreset: 'medium',
+        postprocessPreset: 'veryfast',
         postprocessCrf: 20
       }));
       const uploadedVideo = await persist(`${prepared.segment.id}/video-upload`, () => (
