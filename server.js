@@ -16,6 +16,11 @@ import {
   runGeminiModelRoute
 } from './services/geminiRouter.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
+import {
+  buildFallbackLiveBoardCommands,
+  buildLiveBoardPrompt,
+  createLiveBoardNdjsonParser
+} from './services/liveBoard.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
 import {
   buildPlannedSpeech,
@@ -135,6 +140,8 @@ const groqBaseUrl = process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1
 const manimQuality = process.env.MANIM_QUALITY || '-qm';
 const streamManimQuality = process.env.STREAM_MANIM_QUALITY || '-ql';
 const streamSegmentSeconds = Math.max(10, Math.min(30, Number(process.env.STREAM_SEGMENT_SECONDS || 20)));
+const liveBoardEnabled = String(process.env.LIVE_BOARD_ENABLED || 'true').toLowerCase() !== 'false';
+const liveBoardModel = resolveGeminiModel(process.env.LIVE_BOARD_MODEL || geminiCodeModel);
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
 const mathTexAvailable = mathTexMode === '1' || mathTexMode === 'true' || (mathTexMode === 'auto' && Boolean(miktexBin));
@@ -545,6 +552,56 @@ async function generateLlmText({
   const text = response.text || '';
   logInfo(`${label || 'Gemini'}: yanit geldi`, { model: usedModel, ms: Date.now() - started, chars: text.length });
   return text;
+}
+
+async function streamLiveBoardCommands(segment, onCommand) {
+  const gemini = requireGemini();
+  const candidateModels = [...new Set([liveBoardModel, ...geminiFallbackModels])];
+  let lastError = null;
+
+  for (const candidateModel of candidateModels) {
+    let emitted = 0;
+    const parser = createLiveBoardNdjsonParser((command) => {
+      emitted += 1;
+      onCommand(command);
+    });
+
+    try {
+      logInfo(`${segment.id}: canli tahta Gemini akisi basladi`, { model: candidateModel });
+      const responseStream = await withRetry('Gemini canli tahta', () => (
+        gemini.models.generateContentStream({
+          model: candidateModel,
+          contents: [{ role: 'user', parts: [{ text: buildLiveBoardPrompt(segment) }] }],
+          config: {
+            temperature: 0.45,
+            maxOutputTokens: 3200
+          }
+        })
+      ));
+      for await (const chunk of responseStream) {
+        parser.push(chunk.text || '');
+      }
+      parser.finish();
+      if (!emitted) {
+        throw new Error('Gemini canli tahta icin gecerli NDJSON komutu dondurmedi.');
+      }
+      logInfo(`${segment.id}: canli tahta Gemini akisi tamamlandi`, {
+        model: candidateModel,
+        commands: emitted
+      });
+      return { model: candidateModel, commands: emitted };
+    } catch (error) {
+      lastError = error;
+      logInfo(`${segment.id}: canli tahta model fallback`, {
+        failedModel: candidateModel,
+        emitted,
+        error: String(error?.message || error).slice(0, 240)
+      });
+      if (emitted) return { model: candidateModel, commands: emitted, partial: true };
+    }
+  }
+
+  throw lastError || new Error('Canli tahta komutlari uretilemedi.');
 }
 
 function requireTts() {
@@ -1518,6 +1575,43 @@ function updateJob(job, patch) {
   }));
 }
 
+async function runLiveBoardPreview(job) {
+  const segment = job.plan.segments[0];
+  const segmentState = job.segments[0];
+  if (!liveBoardEnabled || !segment || !segmentState) return;
+
+  segmentState.liveBoard = {
+    status: 'streaming',
+    model: liveBoardModel,
+    commands: [],
+    error: null
+  };
+  updateJob(job, { current: `${segment.id}: Gemini canli tahta komutlarini yaziyor...` });
+
+  const appendCommand = (command) => {
+    if (segmentState.liveBoard.commands.some((item) => item.id === command.id)) return;
+    segmentState.liveBoard.commands.push(command);
+    updateJob(job, {
+      current: `${segment.id}: canli tahta komutu ${segmentState.liveBoard.commands.length} hazir.`
+    });
+  };
+
+  try {
+    const result = await streamLiveBoardCommands(segment, appendCommand);
+    segmentState.liveBoard.status = 'ready';
+    segmentState.liveBoard.model = result.model;
+    updateJob(job, {
+      current: `${segment.id}: canli tahta akisi hazir (${result.commands} komut).`
+    });
+  } catch (error) {
+    logInfo(`${segment.id}: canli tahta fallback kullaniliyor`, { error: error.message });
+    for (const command of buildFallbackLiveBoardCommands(segment)) appendCommand(command);
+    segmentState.liveBoard.status = 'fallback';
+    segmentState.liveBoard.error = error.message;
+    updateJob(job, { current: `${segment.id}: hizli canli tahta akisi hazir.` });
+  }
+}
+
 async function runFullVideoJob(job) {
   try {
     logInfo(`Job ${job.id}: tam ders uretimi basladi`, {
@@ -1530,6 +1624,9 @@ async function runFullVideoJob(job) {
     updateJob(job, {
       status: 'running',
       message: 'Segment pipeline basladi.'
+    });
+    void runLiveBoardPreview(job).catch((error) => {
+      logInfo(`Job ${job.id}: canli tahta beklenmeyen hata`, { error: error.message });
     });
 
     const videoPaths = new Array(job.plan.segments.length);
@@ -1577,7 +1674,16 @@ async function runFullVideoJob(job) {
             ? `${segment.id}: ses ve Manim kodu paralel uretiliyor...`
             : `${segment.id}: ses uretiliyor; Manim kodu ilk segmentten sonra baslayacak...`
         });
-        const ttsPromise = limitTts(() => synthesizeSpeech(speech.speech_text, segment.id));
+        const ttsPromise = limitTts(() => synthesizeSpeech(speech.speech_text, segment.id))
+          .then((tts) => {
+            segmentState.tts = {
+              audioUrl: tts.audioUrl,
+              durationSeconds: tts.durationSeconds,
+              voiceName: tts.voiceName
+            };
+            updateJob(job, { current: `${segment.id}: canli anlatim sesi hazir.` });
+            return tts;
+          });
         const codePromise = (async () => {
           if (index > 0) {
             await firstReadyToRender;
@@ -1636,12 +1742,6 @@ async function runFullVideoJob(job) {
               })
             : null
         ));
-        segmentState.tts = {
-          audioUrl: tts.audioUrl,
-          durationSeconds: tts.durationSeconds,
-          voiceName: tts.voiceName
-        };
-
         segmentState.status = 'ready_to_render';
         updateJob(job, { current: `${segment.id}: render sirasini bekliyor...` });
         if (index === 0) {
@@ -1831,6 +1931,8 @@ app.get('/api/config', async (_req, res, next) => {
       manimQuality,
       streamManimQuality,
       streamSegmentSeconds,
+      liveBoardEnabled,
+      liveBoardModel,
       mathTexAvailable,
       miktexBin,
       speechVolume,
