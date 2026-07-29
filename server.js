@@ -25,6 +25,7 @@ import {
 } from './services/videoPostprocess.js';
 import {
   appendGenerationEvent,
+  createOAuthSignInUrl,
   createGenerationJob,
   createLesson,
   extensionFromContentType,
@@ -1831,6 +1832,18 @@ app.post('/api/auth/login', async (req, res, next) => {
     }
     const result = await signInWithPassword({ email, password });
     res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/auth/oauth/google', async (_req, res, next) => {
+  try {
+    const url = await createOAuthSignInUrl({
+      provider: 'google',
+      redirectTo: authCallbackUrl('oauth')
+    });
+    res.json({ url });
   } catch (error) {
     next(error);
   }

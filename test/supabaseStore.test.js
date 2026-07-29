@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { authUserFromClaims, normalizeSignedUrlTtlSeconds } from '../services/supabaseStore.js';
+import {
+  authUserFromClaims,
+  createOAuthSignInUrl,
+  normalizeSignedUrlTtlSeconds
+} from '../services/supabaseStore.js';
 
 test('signed URL süresini varsayılan, alt ve üst sınırlarda normalize eder', () => {
   assert.equal(normalizeSignedUrlTtlSeconds(undefined), 3600);
@@ -21,4 +25,42 @@ test('doğrulanmış JWT claimlerini profil kullanıcısına dönüştürür', (
     user_metadata: { display_name: 'Kara' }
   });
   assert.equal(authUserFromClaims({ email: 'missing-sub@example.com' }), null);
+});
+
+test('Google OAuth için sabit sağlayıcı ve güvenli dönüş adresi kullanır', async () => {
+  let request;
+  const url = await createOAuthSignInUrl({
+    provider: 'google',
+    redirectTo: 'https://karatahta.ethosoft.org/?auth=oauth',
+    authClient: {
+      auth: {
+        signInWithOAuth: async (options) => {
+          request = options;
+          return {
+            data: { url: 'https://project.supabase.co/auth/v1/authorize?provider=google' },
+            error: null
+          };
+        }
+      }
+    }
+  });
+
+  assert.equal(url, 'https://project.supabase.co/auth/v1/authorize?provider=google');
+  assert.deepEqual(request, {
+    provider: 'google',
+    options: {
+      skipBrowserRedirect: true,
+      redirectTo: 'https://karatahta.ethosoft.org/?auth=oauth'
+    }
+  });
+});
+
+test('desteklenmeyen OAuth sağlayıcısını reddeder', async () => {
+  await assert.rejects(
+    createOAuthSignInUrl({
+      provider: 'github',
+      authClient: { auth: {} }
+    }),
+    (error) => error.statusCode === 400
+  );
 });

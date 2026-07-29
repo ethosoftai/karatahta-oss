@@ -199,6 +199,35 @@ export async function signInWithPassword({ email, password }) {
   return { session: data.session, user: data.user, profile };
 }
 
+export async function createOAuthSignInUrl({
+  provider = 'google',
+  redirectTo,
+  authClient = supabaseAuth
+}) {
+  if (!authClient) {
+    throw new Error('Supabase auth ayarlari eksik.');
+  }
+  if (provider !== 'google') {
+    const providerError = new Error('Desteklenmeyen OAuth saglayicisi.');
+    providerError.statusCode = 400;
+    throw providerError;
+  }
+  const { data, error } = await authClient.auth.signInWithOAuth({
+    provider,
+    options: {
+      skipBrowserRedirect: true,
+      ...(redirectTo ? { redirectTo } : {})
+    }
+  });
+  if (error) throw error;
+  if (!data?.url) {
+    const oauthError = new Error('Google giris adresi olusturulamadi.');
+    oauthError.statusCode = 502;
+    throw oauthError;
+  }
+  return data.url;
+}
+
 export async function refreshAuthSession(refreshToken) {
   if (!supabaseAuth) {
     throw new Error('Supabase auth ayarlari eksik.');
