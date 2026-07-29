@@ -28,6 +28,7 @@ import {
   getLessonForUser,
   getLessonDetailForUser,
   refreshAuthSession,
+  requestPasswordReset,
   getSegment,
   saveAttachment,
   saveChatMessage,
@@ -42,6 +43,7 @@ import {
   signInWithPassword,
   signUpWithPassword,
   supabaseConfigured,
+  updatePasswordWithAccessToken,
   updateGenerationJob,
   updateLesson,
   updateSegment
@@ -82,11 +84,21 @@ setGlobalDispatcher(new Agent({
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const authRequired = String(process.env.AUTH_REQUIRED || 'true').toLowerCase() !== 'false';
+const authRedirectUrl = String(process.env.AUTH_REDIRECT_URL || '').trim();
 const signedVideoUrlTtlSeconds = process.env.SUPABASE_SIGNED_URL_TTL_SECONDS || 3600;
 const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+
+function authCallbackUrl(flow) {
+  if (!authRedirectUrl) {
+    return undefined;
+  }
+  const url = new URL(authRedirectUrl);
+  url.searchParams.set('auth', flow);
+  return url.toString();
+}
 const llmProvider = String(process.env.LLM_PROVIDER || (process.env.GROQ_API_KEY ? 'groq' : 'gemini')).toLowerCase();
 const defaultGeminiModel = 'gemini-3-flash-preview';
 const legacyGeminiModels = new Set(['gemini-2.5-flash', 'gemini-2.5-pro']);
@@ -1762,7 +1774,8 @@ app.get('/api/config', async (_req, res, next) => {
       hasSupabase: supabaseConfigured,
       mediaStorageProvider,
       hasRailwayBucket: railwayMediaConfigured,
-      authRequired
+      authRequired,
+      authRedirectConfigured: Boolean(authRedirectUrl)
     });
   } catch (error) {
     next(error);
@@ -1777,10 +1790,15 @@ app.post('/api/auth/signup', async (req, res, next) => {
     if (!email || !password) {
       return res.status(400).json({ error: 'E-posta ve sifre gerekli.' });
     }
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Sifre en az 6 karakter olmali.' });
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Sifre en az 8 karakter olmali.' });
     }
-    const result = await signUpWithPassword({ email, password, displayName });
+    const result = await signUpWithPassword({
+      email,
+      password,
+      displayName,
+      emailRedirectTo: authCallbackUrl('confirmed')
+    });
     res.json(result);
   } catch (error) {
     next(error);
@@ -1809,6 +1827,42 @@ app.post('/api/auth/refresh', async (req, res, next) => {
     }
     const result = await refreshAuthSession(refreshToken);
     res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/password-reset', async (req, res, next) => {
+  try {
+    const email = String(req.body.email || '').trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ error: 'E-posta gerekli.' });
+    }
+    await requestPasswordReset({
+      email,
+      redirectTo: authCallbackUrl('recovery')
+    });
+    res.json({
+      ok: true,
+      message: 'Hesap bulunuyorsa sifre yenileme baglantisi e-postaya gonderildi.'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/password-update', async (req, res, next) => {
+  try {
+    const accessToken = bearerTokenFromRequest(req);
+    const password = String(req.body.password || '');
+    if (!accessToken) {
+      return res.status(401).json({ error: 'Sifre yenileme oturumu gecersiz.' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Yeni sifre en az 8 karakter olmali.' });
+    }
+    const result = await updatePasswordWithAccessToken({ accessToken, password });
+    res.json({ ok: true, user: result.user });
   } catch (error) {
     next(error);
   }

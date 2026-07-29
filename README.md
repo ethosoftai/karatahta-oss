@@ -119,6 +119,9 @@ sistem.md
 Deployment ayrıntıları için [DEPLOYMENT.md](./DEPLOYMENT.md), Supabase için
 [SUPABASE_SETUP.md](./SUPABASE_SETUP.md) dosyasına bakın.
 
+Supabase doğrulama/şifre yenileme e-postaları ve hosting SMTP kurulumu için
+[AUTH_EMAIL_SETUP.md](./AUTH_EMAIL_SETUP.md) dosyasına bakın.
+
 ## Güvenlik
 
 - `.env`, API anahtarları ve credential JSON dosyaları GitHub'a gönderilmez.

@@ -119,7 +119,7 @@ export async function getProfileForAccessToken(accessToken) {
   return upsertProfileFromAuthUser(data.user);
 }
 
-export async function signUpWithPassword({ email, password, displayName }) {
+export async function signUpWithPassword({ email, password, displayName, emailRedirectTo }) {
   if (!supabaseAuth) {
     throw new Error('Supabase auth ayarlari eksik.');
   }
@@ -129,7 +129,8 @@ export async function signUpWithPassword({ email, password, displayName }) {
     options: {
       data: {
         display_name: displayName || email.split('@')[0]
-      }
+      },
+      ...(emailRedirectTo ? { emailRedirectTo } : {})
     }
   });
   if (error) throw error;
@@ -155,6 +156,36 @@ export async function refreshAuthSession(refreshToken) {
   if (error) throw error;
   const profile = data.user ? await upsertProfileFromAuthUser(data.user) : null;
   return { session: data.session, user: data.user, profile };
+}
+
+export async function requestPasswordReset({ email, redirectTo }) {
+  if (!supabaseAuth) {
+    throw new Error('Supabase auth ayarlari eksik.');
+  }
+  const { error } = await supabaseAuth.auth.resetPasswordForEmail(email, {
+    ...(redirectTo ? { redirectTo } : {})
+  });
+  if (error) throw error;
+}
+
+export async function updatePasswordWithAccessToken({ accessToken, password }) {
+  if (!supabaseUrl || !publishableKey) {
+    throw new Error('Supabase auth ayarlari eksik.');
+  }
+  const userClient = createClient(supabaseUrl, publishableKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`
+      }
+    }
+  });
+  const { data, error } = await userClient.auth.updateUser({ password });
+  if (error) throw error;
+  return { user: data.user };
 }
 
 function dataUrlToBuffer(dataUrl) {
