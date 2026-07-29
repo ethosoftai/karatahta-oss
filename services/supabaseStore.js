@@ -439,6 +439,36 @@ export async function uploadDataUrl({ bucket, dataUrl, storagePath, contentType 
   return uploadBuffer(bucket, storagePath, dataUrlToBuffer(dataUrl), contentType);
 }
 
+export function normalizeSignedUrlTtlSeconds(value, fallback = 3600) {
+  const parsed = Number(value);
+  const seconds = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+  return Math.min(86400, Math.max(60, seconds));
+}
+
+export async function createStorageSignedUrl({
+  bucket,
+  storagePath,
+  expiresInSeconds = 3600
+}) {
+  if (!bucket || !storagePath) {
+    throw new Error('Signed URL icin bucket ve storage path gerekli.');
+  }
+  const client = requireSupabase();
+  const ttlSeconds = normalizeSignedUrlTtlSeconds(expiresInSeconds);
+  const { data, error } = await client.storage
+    .from(bucket)
+    .createSignedUrl(storagePath, ttlSeconds);
+  if (error) throw error;
+  if (!data?.signedUrl) {
+    throw new Error('Supabase signed video URL dondurmedi.');
+  }
+  return {
+    signedUrl: data.signedUrl,
+    expiresInSeconds: ttlSeconds,
+    expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString()
+  };
+}
+
 export function storagePathFor({ userId = devUserId, lessonId, segmentKey, kind, fileName }) {
   const parts = ['users', userId, 'lessons', lessonId];
   if (segmentKey) {

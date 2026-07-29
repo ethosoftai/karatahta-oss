@@ -11,6 +11,7 @@ SUPABASE_PUBLISHABLE_KEY=
 SUPABASE_SECRET_KEY=
 SUPABASE_DB_URL=
 SUPABASE_STORAGE_PUBLIC=false
+SUPABASE_SIGNED_URL_TTL_SECONDS=3600
 ```
 
 Yeni Supabase projelerinde `sb_publishable_...` ve `sb_secret_...` anahtarlarını
@@ -38,6 +39,9 @@ Supabase Dashboard içindeki SQL Editor'da aşağıdaki dosyaları sırasıyla
 
 Uygulama veritabanına yalnız backend secret key ile erişir. Frontend'e
 Supabase secret key verilmez.
+
+Private videolar, ders sahibine backend üzerinden kısa ömürlü signed URL ile
+sunulur. `SUPABASE_SIGNED_URL_TTL_SECONDS` varsayılan olarak 3600 saniyedir.
 
 Alternatif olarak database connection string'i `.env` içindeki
 `SUPABASE_DB_URL` değerine ekleyip şu komutu çalıştırın:

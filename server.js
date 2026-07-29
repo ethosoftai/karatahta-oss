@@ -21,6 +21,7 @@ import {
   appendGenerationEvent,
   createGenerationJob,
   createLesson,
+  createStorageSignedUrl,
   extensionFromContentType,
   fileNameFromLocalPath,
   getProfileForAccessToken,
@@ -77,6 +78,7 @@ setGlobalDispatcher(new Agent({
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const authRequired = String(process.env.AUTH_REQUIRED || 'true').toLowerCase() !== 'false';
+const signedVideoUrlTtlSeconds = process.env.SUPABASE_SIGNED_URL_TTL_SECONDS || 3600;
 const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
   .map((origin) => origin.trim())
@@ -1839,6 +1841,36 @@ app.get('/api/lessons/:id', async (req, res, next) => {
       return res.status(404).json({ error: 'Ders bulunamadi.' });
     }
     res.json(detail);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/lessons/:id/video-url', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const detail = await getLessonDetailForUser({
+      lessonId: req.params.id,
+      userId: userContext.profileId
+    });
+    if (!detail) {
+      return res.status(404).json({ error: 'Ders bulunamadi.' });
+    }
+    const storagePath = detail.video?.video_storage_path;
+    if (!storagePath) {
+      return res.status(404).json({ error: 'Bu ders icin kalici video kaydi bulunamadi.' });
+    }
+    const signed = await createStorageSignedUrl({
+      bucket: 'videos',
+      storagePath,
+      expiresInSeconds: signedVideoUrlTtlSeconds
+    });
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({
+      videoUrl: signed.signedUrl,
+      expiresInSeconds: signed.expiresInSeconds,
+      expiresAt: signed.expiresAt
+    });
   } catch (error) {
     next(error);
   }
