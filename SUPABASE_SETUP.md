@@ -7,15 +7,19 @@ local/in-memory geliştirme modunda çalışabilir.
 
 ```env
 SUPABASE_URL=
-SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_PUBLISHABLE_KEY=
+SUPABASE_SECRET_KEY=
 SUPABASE_DB_URL=
 SUPABASE_STORAGE_PUBLIC=false
-DEV_USER_ID=
 ```
 
-`SUPABASE_SERVICE_ROLE_KEY` ve database parolası yalnız backend ortamında
-tutulmalıdır; frontend'e veya GitHub'a gönderilmemelidir.
+Yeni Supabase projelerinde `sb_publishable_...` ve `sb_secret_...` anahtarlarını
+kullanın. Eski projelerde `SUPABASE_ANON_KEY` ve
+`SUPABASE_SERVICE_ROLE_KEY` isimleri de desteklenir.
+
+`SUPABASE_SECRET_KEY`, legacy `service_role` anahtarı ve database parolası
+yalnız backend/Railway ortamında tutulmalıdır; frontend'e veya GitHub'a
+gönderilmemelidir.
 
 ## Migration sırası
 
@@ -24,6 +28,16 @@ Supabase Dashboard içindeki SQL Editor'da aşağıdaki dosyaları sırasıyla
 
 1. `migrations/001_kara_memory.sql`
 2. `migrations/002_auth_profiles.sql`
+3. `migrations/003_security_and_storage.sql`
+
+Üçüncü migration:
+
+- bütün uygulama tablolarında RLS'yi etkinleştirir,
+- doğrudan anon/authenticated tablo erişimini kapalı bırakır,
+- `videos`, `audio` ve `attachments` private bucket'larını oluşturur.
+
+Uygulama veritabanına yalnız backend secret key ile erişir. Frontend'e
+Supabase secret key verilmez.
 
 Alternatif olarak database connection string'i `.env` içindeki
 `SUPABASE_DB_URL` değerine ekleyip şu komutu çalıştırın:
@@ -44,8 +58,11 @@ Local geliştirmede authentication'ı atlamak için:
 
 ```env
 AUTH_REQUIRED=false
-DEV_USER_ID=
+DEV_USER_ID=00000000-0000-4000-8000-000000000001
 ```
+
+`DEV_USER_ID` yalnız `AUTH_REQUIRED=false` modunda gereklidir. Production'da
+`AUTH_REQUIRED=true` kullanırken boş bırakılmalıdır.
 
 ## Kontrol
 

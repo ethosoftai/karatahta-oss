@@ -3,16 +3,16 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const anonKey = process.env.SUPABASE_ANON_KEY;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY;
+const secretKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const devUserId = process.env.DEV_USER_ID;
 const storagePublic = String(process.env.SUPABASE_STORAGE_PUBLIC || 'false').toLowerCase() === 'true';
 
-export const supabaseConfigured = Boolean(supabaseUrl && serviceRoleKey && devUserId);
-export const supabaseAuthConfigured = Boolean(supabaseUrl && anonKey);
+export const supabaseConfigured = Boolean(supabaseUrl && secretKey);
+export const supabaseAuthConfigured = Boolean(supabaseUrl && publishableKey);
 
 export const supabase = supabaseConfigured
-  ? createClient(supabaseUrl, serviceRoleKey, {
+  ? createClient(supabaseUrl, secretKey, {
       auth: {
         persistSession: false,
         autoRefreshToken: false
@@ -21,7 +21,7 @@ export const supabase = supabaseConfigured
   : null;
 
 const supabaseAuth = supabaseAuthConfigured
-  ? createClient(supabaseUrl, anonKey, {
+  ? createClient(supabaseUrl, publishableKey, {
       auth: {
         persistSession: false,
         autoRefreshToken: false
@@ -39,6 +39,9 @@ function requireSupabase() {
 }
 
 async function ensureDevProfile() {
+  if (!devUserId) {
+    throw new Error('AUTH_REQUIRED=false icin DEV_USER_ID gerekli.');
+  }
   if (devProfileReady) {
     return;
   }

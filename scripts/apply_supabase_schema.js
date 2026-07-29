@@ -32,7 +32,8 @@ function getConnectionString() {
 async function main() {
   const migrationFiles = [
     '001_kara_memory.sql',
-    '002_auth_profiles.sql'
+    '002_auth_profiles.sql',
+    '003_security_and_storage.sql'
   ];
   const client = new Client({
     connectionString: getConnectionString(),
