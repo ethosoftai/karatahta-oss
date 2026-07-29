@@ -1642,6 +1642,7 @@ async function createVideoJob({ plan, lessonId, userId, total, initialSegments =
       renderedActions: 0,
       failedActions: 0,
       introDurationSeconds: liveManimIntroSeconds,
+      introHasSpeech: null,
       startedAt: null,
       completedAt: null,
       durationSeconds: null,
@@ -1969,21 +1970,79 @@ function buildLiveIntroCommands(topic) {
   ];
 }
 
+async function createLiveIntroAudio(job, outputDir) {
+  const introAudioPath = path.join(
+    outputDir,
+    `${sanitizeSegmentId(job.id)}-intro.wav`
+  );
+  const introText = `${String(job.plan.topic || 'Yeni ders').trim()}. Dersimize başlıyoruz.`;
+  const ttsPromise = synthesizeSpeech(introText, `${job.id}-intro`);
+  let timeout;
+
+  try {
+    const introTts = await Promise.race([
+      ttsPromise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('Açılış TTS beş saniyede hazır olmadı.')),
+          5000
+        );
+      })
+    ]);
+    clearTimeout(timeout);
+    const sourcePath = resolveRenderRelative(introTts.audioRelativePath);
+    const padded = await runCommand('ffmpeg', [
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      sourcePath,
+      '-af',
+      'apad',
+      '-t',
+      String(liveManimIntroSeconds),
+      '-ar',
+      '48000',
+      '-ac',
+      '1',
+      '-c:a',
+      'pcm_s16le',
+      introAudioPath
+    ], { timeoutMs: 30000 });
+    await fs.unlink(sourcePath).catch(() => {});
+    if (padded.code !== 0) {
+      throw new Error(`Açılış sesi hazırlanamadı: ${padded.stderr.slice(-500)}`);
+    }
+    job.liveManim.introHasSpeech = true;
+    return introAudioPath;
+  } catch (error) {
+    clearTimeout(timeout);
+    void ttsPromise.then((lateTts) => (
+      fs.unlink(resolveRenderRelative(lateTts.audioRelativePath)).catch(() => {})
+    )).catch(() => {});
+    await fs.writeFile(introAudioPath, buildSilentWav({
+      durationSeconds: liveManimIntroSeconds
+    }));
+    job.liveManim.introHasSpeech = false;
+    logInfo(`Job ${job.id}: sesli açılış fallback`, { error: error.message });
+    return introAudioPath;
+  }
+}
+
 async function runLiveManimPreview(job) {
   if (!liveBoardEnabled || !liveManimEnabled || !job.total) return;
 
   const outputDir = path.join(rendersDir, 'live-manim');
   const outputPath = path.join(outputDir, `${sanitizeSegmentId(job.id)}.mp4`);
-  const introAudioPath = path.join(outputDir, `${sanitizeSegmentId(job.id)}-intro.wav`);
+  let introAudioPath = null;
   const introDurationSeconds = liveManimIntroSeconds;
   job.liveManim.status = 'waiting_worker';
   updateJob(job, { current: 'Canli Manim motoru hazirlaniyor...' });
 
   try {
     await fs.mkdir(outputDir, { recursive: true });
-    await fs.writeFile(introAudioPath, buildSilentWav({
-      durationSeconds: introDurationSeconds
-    }));
+    introAudioPath = await createLiveIntroAudio(job, outputDir);
     const session = await liveManimPool.acquire({ jobId: job.id, outputPath });
     job._liveManimSession = session;
     session.on('event', (event) => {
@@ -2024,7 +2083,9 @@ async function runLiveManimPreview(job) {
       job.liveManim.generatedActions += 1;
     }
     updateJob(job, {
-      current: 'Konuya özel açılış yayına hazırlanıyor.'
+      current: job.liveManim.introHasSpeech
+        ? 'Konuya özel sesli açılış yayına hazırlanıyor.'
+        : 'Konuya özel açılış yayına hazırlanıyor.'
     });
 
     let preferredModel = null;
@@ -2109,7 +2170,7 @@ async function runLiveManimPreview(job) {
     logInfo(`Job ${job.id}: canli Manim hata verdi`, { error: job.liveManim.error });
     updateJob(job, { current: 'Canli Manim kullanilamadi; parca video akisi devam ediyor.' });
   } finally {
-    await fs.unlink(introAudioPath).catch(() => {});
+    if (introAudioPath) await fs.unlink(introAudioPath).catch(() => {});
   }
 }
 
