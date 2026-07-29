@@ -2,8 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildAvailableGeminiModelRoute,
   buildGeminiModelRoute,
   isGeminiFailoverError,
+  markGeminiModelFailure,
+  resetGeminiModelCooldowns,
   runGeminiModelRoute
 } from '../services/geminiRouter.js';
 
@@ -15,6 +18,7 @@ test('model rotasi birincil modeli basa alir ve tekrarları temizler', () => {
 });
 
 test('429 kota hatasinda siradaki modele gecer', async () => {
+  resetGeminiModelCooldowns();
   const attempts = [];
   const result = await runGeminiModelRoute({
     primaryModel: 'gemini-a',
@@ -35,6 +39,23 @@ test('429 kota hatasinda siradaki modele gecer', async () => {
   assert.equal(result.response.text, 'ok');
 });
 
+test('kota hatası alan modeli sonraki isteklerde cooldown süresince atlar', () => {
+  resetGeminiModelCooldowns();
+  const error = new Error('RESOURCE_EXHAUSTED: quota exceeded');
+  error.status = 429;
+  markGeminiModelFailure('gemini-a', error, 1000);
+
+  assert.deepEqual(
+    buildAvailableGeminiModelRoute('gemini-a', ['gemini-b'], 2000),
+    ['gemini-b']
+  );
+  assert.deepEqual(
+    buildAvailableGeminiModelRoute('gemini-a', ['gemini-b'], 700000),
+    ['gemini-a', 'gemini-b']
+  );
+  resetGeminiModelCooldowns();
+});
+
 test('404 ve 503 model erisilebilirlik hatalari fallback icin uygundur', () => {
   assert.equal(isGeminiFailoverError({ status: 404 }), true);
   assert.equal(isGeminiFailoverError({ code: 503 }), true);
@@ -42,6 +63,7 @@ test('404 ve 503 model erisilebilirlik hatalari fallback icin uygundur', () => {
 });
 
 test('gecersiz istek hatasinda baska modele gecmez', async () => {
+  resetGeminiModelCooldowns();
   const attempts = [];
   await assert.rejects(
     runGeminiModelRoute({

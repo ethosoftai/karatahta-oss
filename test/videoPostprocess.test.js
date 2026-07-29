@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildBurnSubtitleArgs,
+  buildCanonicalRemuxArgs,
   buildConcatArgs,
   buildMuxArgs,
   buildTimedSubtitleSrt,
@@ -30,6 +31,20 @@ test('final MP4 birleştirmesinde hızlı başlatma metadata bayrağını kullan
     outputPath: '/tmp/final.mp4'
   });
   assert.deepEqual(args.slice(-3), ['-movflags', '+faststart', '/tmp/final.mp4']);
+});
+
+test('canlı fragmented MP4 dosyasını yeniden encode etmeden final videoya çevirir', () => {
+  const args = buildCanonicalRemuxArgs({
+    inputPath: '/tmp/live.mp4',
+    outputPath: '/tmp/final.mp4'
+  });
+
+  assert.deepEqual(args.slice(args.indexOf('-c'), args.indexOf('-c') + 2), ['-c', 'copy']);
+  assert.deepEqual(args.slice(-3), ['-movflags', '+faststart', '/tmp/final.mp4']);
+  assert.deepEqual(args.slice(args.indexOf('-map'), args.indexOf('-c')), [
+    '-map', '0:v:0',
+    '-map', '0:a:0?'
+  ]);
 });
 
 test('canlı yayın post-process adımı hızlı encoder ayarını kullanabilir', () => {

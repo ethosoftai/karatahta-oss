@@ -1,7 +1,6 @@
 import 'dotenv/config';
 
 import { GoogleGenAI } from '@google/genai';
-import textToSpeech from '@google-cloud/text-to-speech';
 import express from 'express';
 import { Agent, setGlobalDispatcher } from 'undici';
 import { spawn } from 'node:child_process';
@@ -12,7 +11,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import {
+  buildAvailableGeminiModelRoute,
   DEFAULT_GEMINI_FALLBACK_MODELS,
+  isGeminiFailoverError,
+  markGeminiModelFailure,
+  markGeminiModelSuccess,
   runGeminiModelRoute
 } from './services/geminiRouter.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
@@ -31,6 +34,7 @@ import {
 } from './services/streamingPipeline.js';
 import {
   buildBurnSubtitleArgs,
+  buildCanonicalRemuxArgs,
   buildConcatArgs,
   buildMuxArgs,
   buildTimedSubtitleSrt
@@ -189,13 +193,10 @@ const googleTtsSpeakingRate = Number(process.env.GOOGLE_TTS_SPEAKING_RATE || 0.9
 const ttsProvider = String(process.env.TTS_PROVIDER || 'edge').toLowerCase();
 const edgeTtsVoice = process.env.EDGE_TTS_VOICE || 'tr-TR-AhmetNeural';
 const edgeTtsRate = process.env.EDGE_TTS_RATE || '+0%';
-const ttsClient = googleCredentialsPath
-  ? new textToSpeech.TextToSpeechClient({ keyFilename: googleCredentialsPath })
-  : googleCredentialsJson
-    ? new textToSpeech.TextToSpeechClient({ credentials: JSON.parse(googleCredentialsJson) })
-    : googleTtsApiKey
-      ? new textToSpeech.TextToSpeechClient({ apiKey: googleTtsApiKey })
-      : null;
+const hasGoogleTtsCredentials = Boolean(
+  googleCredentialsPath || googleCredentialsJson || googleTtsApiKey
+);
+let googleTtsClientPromise = null;
 
 const publicDir = path.resolve(__dirname, '../frontend/public');
 const rendersDir = path.join(__dirname, 'renders');
@@ -597,11 +598,10 @@ async function generateLlmText({
 
 async function streamLiveBoardCommands(segment, onCommand, preferredModel = null) {
   const gemini = requireGemini();
-  const candidateModels = [...new Set([
-    preferredModel,
-    liveBoardModel,
-    ...geminiFallbackModels
-  ].filter(Boolean))];
+  const candidateModels = buildAvailableGeminiModelRoute(
+    preferredModel || liveBoardModel,
+    [liveBoardModel, ...geminiFallbackModels]
+  );
   let lastError = null;
 
   for (const candidateModel of candidateModels) {
@@ -634,9 +634,13 @@ async function streamLiveBoardCommands(segment, onCommand, preferredModel = null
         model: candidateModel,
         commands: emitted
       });
+      markGeminiModelSuccess(candidateModel);
       return { model: candidateModel, commands: emitted };
     } catch (error) {
       lastError = error;
+      if (isGeminiFailoverError(error)) {
+        markGeminiModelFailure(candidateModel, error);
+      }
       logInfo(`${segment.id}: canli tahta model fallback`, {
         failedModel: candidateModel,
         emitted,
@@ -649,14 +653,30 @@ async function streamLiveBoardCommands(segment, onCommand, preferredModel = null
   throw lastError || new Error('Canli tahta komutlari uretilemedi.');
 }
 
-function requireTts() {
-  if (!ttsClient || (!googleCredentialsPath && !googleCredentialsJson && !googleTtsApiKey)) {
+async function requireTts() {
+  if (!hasGoogleTtsCredentials) {
     const error = new Error('.env icinde GOOGLE_TTS_API_KEY, GOOGLE_APPLICATION_CREDENTIALS veya GOOGLE_APPLICATION_CREDENTIALS_JSON eksik.');
     error.statusCode = 400;
     throw error;
   }
 
-  return ttsClient;
+  if (!googleTtsClientPromise) {
+    googleTtsClientPromise = import('@google-cloud/text-to-speech')
+      .then(({ default: textToSpeech }) => (
+        googleCredentialsPath
+          ? new textToSpeech.TextToSpeechClient({ keyFilename: googleCredentialsPath })
+          : googleCredentialsJson
+            ? new textToSpeech.TextToSpeechClient({
+                credentials: JSON.parse(googleCredentialsJson)
+              })
+            : new textToSpeech.TextToSpeechClient({ apiKey: googleTtsApiKey })
+      ))
+      .catch((error) => {
+        googleTtsClientPromise = null;
+        throw error;
+      });
+  }
+  return googleTtsClientPromise;
 }
 
 function sleep(ms) {
@@ -1235,6 +1255,86 @@ async function concatVideos(videoRelativePaths) {
   return payload;
 }
 
+async function canonicalizeLiveManimVideo(job, liveResult) {
+  const inputPath = liveResult?.outputPath;
+  if (!inputPath) {
+    throw new Error('Canli Manim final dosyasi bulunamadi.');
+  }
+
+  const workDir = path.join(
+    rendersDir,
+    `${Date.now()}-${randomUUID().slice(0, 8)}-live-final`
+  );
+  const outputPath = path.join(workDir, 'full-video.mp4');
+  await fs.mkdir(workDir, { recursive: true });
+
+  const startedAt = Date.now();
+  const remux = await runCommand(
+    'ffmpeg',
+    buildCanonicalRemuxArgs({ inputPath, outputPath }),
+    { timeoutMs: 120000 }
+  );
+  if (remux.code !== 0) {
+    const error = new Error('Canli Manim videosu final MP4 dosyasina donusturulemedi.');
+    error.stdout = remux.stdout;
+    error.stderr = remux.stderr;
+    throw error;
+  }
+
+  const relativePath = path.relative(rendersDir, outputPath).replaceAll(path.sep, '/');
+  const durationSeconds = await getMediaDurationSeconds(outputPath).catch(
+    () => liveResult.durationSeconds || null
+  );
+  const payload = {
+    videoUrl: `/renders/${relativePath}`,
+    videoRelativePath: relativePath,
+    durationSeconds,
+    source: 'live_manim',
+    remuxMs: Date.now() - startedAt,
+    stdout: remux.stdout,
+    stderr: remux.stderr
+  };
+  logInfo(`Job ${job.id}: canlı yayın kanonik final videoya dönüştürüldü`, {
+    durationSeconds,
+    remuxMs: payload.remuxMs,
+    videoUrl: payload.videoUrl
+  });
+  return payload;
+}
+
+async function persistFinalLessonVideo(job, finalVideo, segmentRenderIds = []) {
+  const uploadedFinalVideo = await persist('final-video/upload', () => (
+    job.lessonId
+      ? uploadRenderRelative({
+          bucket: 'videos',
+          userId: job.userId,
+          lessonId: job.lessonId,
+          kind: 'final',
+          relativePath: finalVideo.videoRelativePath,
+          contentType: 'video/mp4'
+        })
+      : null
+  ));
+  await persist('final-video/db', async () => {
+    if (!job.lessonId) return null;
+    const durationSeconds = finalVideo.durationSeconds
+      || (finalVideo.videoRelativePath
+        ? await getMediaDurationSeconds(
+            resolveRenderRelative(finalVideo.videoRelativePath)
+          ).catch(() => null)
+        : null);
+    await updateLesson(job.lessonId, { status: 'done' });
+    return saveLessonVideo({
+      lessonId: job.lessonId,
+      videoStoragePath: uploadedFinalVideo?.storagePath || null,
+      localVideoPath: finalVideo.videoRelativePath,
+      durationSeconds,
+      segmentRenderIds
+    });
+  });
+  return uploadedFinalVideo;
+}
+
 async function createSpeechScript(segment) {
   logInfo(`${segment?.id || 'segment'}: speech metni hazirlaniyor`);
   if (!segment) {
@@ -1324,7 +1424,7 @@ async function synthesizeSpeech(text, segmentId) {
   }
 
   logInfo(`${segmentId}: Google TTS basladi`);
-  const client = requireTts();
+  const client = await requireTts();
   if (googleCredentialsPath) {
     try {
       await fs.access(googleCredentialsPath);
@@ -1663,6 +1763,8 @@ async function createVideoJob({
       firstContentDeadlineMet: null,
       completedAt: null,
       durationSeconds: null,
+      renderWallMs: null,
+      productionRealtimeFactor: null,
       bytes: 0,
       videoUrl: null,
       error: null
@@ -2039,7 +2141,7 @@ async function runLiveManimPreview(job) {
   if (!liveBoardEnabled || !liveManimEnabled || !job.total) {
     markLivePreviewReady(job, { reason: 'disabled' });
     markLivePreviewFinished(job, { reason: 'disabled' });
-    return;
+    return { ok: false, reason: 'disabled' };
   }
 
   const outputDir = path.join(rendersDir, 'live-manim');
@@ -2099,6 +2201,7 @@ async function runLiveManimPreview(job) {
       preset: liveManimPreset,
       fragmentSeconds: liveManimFragmentSeconds
     });
+    const liveRenderStartedAt = Date.now();
     updateJob(job, {
       current: 'İlk gerçek ders anlatımı ve çizimleri hazırlanıyor.'
     });
@@ -2146,9 +2249,14 @@ async function runLiveManimPreview(job) {
         session.action(command);
         segmentState.liveManim.commandCount += 1;
         job.liveManim.generatedActions += 1;
-        updateJob(job, {
-          current: `${segment.id}: ${segmentState.liveManim.commandCount} Manim aksiyonu yayina girdi.`
-        });
+        if (
+          segmentState.liveManim.commandCount === 1
+          || segmentState.liveManim.commandCount % 4 === 0
+        ) {
+          updateJob(job, {
+            current: `${segment.id}: ${segmentState.liveManim.commandCount} Manim aksiyonu yayina girdi.`
+          });
+        }
       };
       commandSink = appendCommand;
       if (index > 0) {
@@ -2188,6 +2296,9 @@ async function runLiveManimPreview(job) {
         segmentState.liveManim.status = 'fallback';
         segmentState.liveManim.error = error.message;
       }
+      updateJob(job, {
+        current: `${segment.id}: ${segmentState.liveManim.commandCount} canlı aksiyon hazır.`
+      });
     }
 
     job.liveManim.status = 'finishing';
@@ -2199,6 +2310,10 @@ async function runLiveManimPreview(job) {
     job.liveManim.status = 'done';
     job.liveManim.completedAt = new Date().toISOString();
     job.liveManim.durationSeconds = actualDuration;
+    job.liveManim.renderWallMs = Date.now() - liveRenderStartedAt;
+    job.liveManim.productionRealtimeFactor = actualDuration > 0
+      ? Number((actualDuration / (job.liveManim.renderWallMs / 1000)).toFixed(3))
+      : null;
     job.liveManim.bytes = result.bytes;
     job.liveManim.videoUrl = `/renders/${relativePath}`;
     session.releaseCachedChunks();
@@ -2211,6 +2326,15 @@ async function runLiveManimPreview(job) {
       durationSeconds: actualDuration
     });
     updateJob(job, { current: 'Canli Manim dersi tamamlandi.' });
+    return {
+      ok: true,
+      reason: 'live_stream_completed',
+      outputPath: result.outputPath,
+      durationSeconds: actualDuration,
+      bytes: result.bytes,
+      renderWallMs: job.liveManim.renderWallMs,
+      productionRealtimeFactor: job.liveManim.productionRealtimeFactor
+    };
   } catch (error) {
     job._liveManimSession?.abort(error);
     job.liveManim.status = 'failed';
@@ -2222,6 +2346,11 @@ async function runLiveManimPreview(job) {
     markLivePreviewReady(job, { reason: 'live_stream_failed' });
     markLivePreviewFinished(job, { reason: 'live_stream_failed' });
     updateJob(job, { current: 'Canli Manim kullanilamadi; parca video akisi devam ediyor.' });
+    return {
+      ok: false,
+      reason: 'live_stream_failed',
+      error
+    };
   }
 }
 
@@ -2238,18 +2367,10 @@ async function runFullVideoJob(job) {
       status: 'running',
       message: 'Segment pipeline basladi.'
     });
-    void runLiveManimPreview(job).catch((error) => {
-      logInfo(`Job ${job.id}: canli Manim beklenmeyen hata`, { error: error.message });
-    });
-
-    const videoPaths = new Array(job.total);
+    const livePreviewPromise = runLiveManimPreview(job);
     let firstParallelStartedResolve = null;
     const firstParallelStarted = new Promise((resolve) => {
       firstParallelStartedResolve = resolve;
-    });
-    let firstReadyToRenderResolve = null;
-    const firstReadyToRender = new Promise((resolve) => {
-      firstReadyToRenderResolve = resolve;
     });
     const prepareSegment = (index) => (async () => {
       const segmentState = job.segments[index];
@@ -2289,11 +2410,11 @@ async function runFullVideoJob(job) {
           Math.round(Number(speech.estimated_seconds || segment.duration_seconds || 70))
         );
 
-        segmentState.status = index === 0 ? 'tts_code' : 'tts';
+        segmentState.status = 'tts';
         updateJob(job, {
           current: index === 0
             ? `${segment.id}: ses ve canlı ders görselleri paralel üretiliyor...`
-            : `${segment.id}: ses üretiliyor; arşiv Manim kodu canlı dersten sonra başlayacak...`
+            : `${segment.id}: ses canlı yayın için hazırlanıyor...`
         });
         const ttsPromise = limitTts(() => synthesizeSpeech(speech.speech_text, segment.id))
           .then((tts) => {
@@ -2306,45 +2427,12 @@ async function runFullVideoJob(job) {
             updateJob(job, { current: `${segment.id}: canli anlatim sesi hazir.` });
             return tts;
           });
-        const codePromise = (async () => {
-          if (index === 0 && job.liveManimEnabled) {
-            await job._livePreviewFinished.promise;
-            updateJob(job, {
-              current: `${segment.id}: canlı ders önde; arşiv Manim kodu şimdi hazırlanıyor...`
-            });
-          }
-          if (index > 0) {
-            await firstReadyToRender;
-            segmentState.status = 'code';
-            updateJob(job, { current: `${segment.id}: Manim kodu uretiliyor...` });
-          }
-          return limitCode(() => createManimCode({
-            animation: segment.animation,
-            durationSeconds: estimatedDuration,
-            speech: {
-              speech_text: speech.speech_text,
-              duration_seconds: estimatedDuration,
-              cue_plan: speech.cue_plan || []
-            },
-            segmentId: segment.id
-          }));
-        })();
         if (index === 0) {
-          logInfo(`Job ${job.id}: ilk segment TTS kuyruğa girdi; arşiv kodu canlı yayını bekliyor`);
+          logInfo(`Job ${job.id}: ilk segment TTS kuyruğa girdi`);
           firstParallelStartedResolve();
         }
 
-        const [tts, code] = await Promise.all([ttsPromise, codePromise]);
-        const manimCode = await persist(`${segment.id}/manim-code`, () => (
-          dbSegment?.id
-            ? saveManimCode({
-                segmentId: dbSegment.id,
-                provider: llmProvider,
-                model: codeModel,
-                code
-              })
-            : null
-        ));
+        const tts = await ttsPromise;
         const uploadedAudio = await persist(`${segment.id}/audio-upload`, () => (
           job.lessonId
             ? uploadRenderRelative({
@@ -2370,18 +2458,21 @@ async function runFullVideoJob(job) {
               })
             : null
         ));
-        segmentState.status = 'ready_to_render';
-        updateJob(job, { current: `${segment.id}: render sirasini bekliyor...` });
-        if (index === 0) {
-          logInfo(`Job ${job.id}: ilk segment render icin hazir; diger Manim kodlari baslayabilir`);
-          firstReadyToRenderResolve();
-        }
-        return { ok: true, segment, dbSegment, speech, manimCode, code, tts, uploadedAudio };
+        segmentState.status = 'ready_for_live';
+        updateJob(job, { current: `${segment.id}: canlı yayın için hazır.` });
+        return {
+          ok: true,
+          segment,
+          dbSegment,
+          speech,
+          estimatedDuration,
+          tts,
+          uploadedAudio
+        };
       } catch (error) {
         job._audioDeferred[index].reject(error);
         if (index === 0) {
           firstParallelStartedResolve();
-          firstReadyToRenderResolve();
         }
         logInfo(`${segment.id}: segment hazirlanamadi`, { error: error.message });
         segmentState.status = 'failed';
@@ -2401,20 +2492,112 @@ async function runFullVideoJob(job) {
       preparationTasks[index] = prepareSegment(index);
     }
 
-    for (let index = 0; index < preparationTasks.length; index += 1) {
-      const prepared = await preparationTasks[index];
-      const segmentState = job.segments[index];
+    const preparedSegments = await Promise.all(preparationTasks);
+    const failedPreparation = preparedSegments.find((prepared) => !prepared.ok);
+    if (failedPreparation) {
+      throw failedPreparation.error;
+    }
 
-      if (!prepared.ok) {
-        throw prepared.error;
+    let liveResult = await livePreviewPromise;
+    if (liveResult.ok) {
+      updateJob(job, {
+        status: 'finalizing',
+        current: 'Canlı yayın indirme ve geçmiş için hazırlanıyor...',
+        message: 'Gösterilen video final dosyaya dönüştürülüyor.'
+      });
+      try {
+        const canonicalVideo = await canonicalizeLiveManimVideo(job, liveResult);
+        const uploadedFinalVideo = await persistFinalLessonVideo(job, canonicalVideo);
+        await Promise.all(preparedSegments.map((prepared) => (
+          persist(`${prepared.segment.id}/canonical-status`, () => (
+            prepared.dbSegment?.id
+              ? updateSegment(prepared.dbSegment.id, { status: 'done' })
+              : null
+          ))
+        )));
+        for (const segmentState of job.segments) {
+          segmentState.status = 'done';
+        }
+        preparedSegments.forEach((prepared, index) => {
+          job.segments[index].durationSeconds = prepared.tts.durationSeconds;
+        });
+        job.progress = job.total;
+        updateJob(job, {
+          status: 'done',
+          current: 'Tamamlandi.',
+          message: 'Canlı gösterilen ders final video olarak kaydedildi.',
+          completedAt: new Date().toISOString(),
+          result: {
+            ...canonicalVideo,
+            videoStoragePath: uploadedFinalVideo?.storagePath || null
+          }
+        });
+        logInfo(`Job ${job.id}: canlı ders ikinci render olmadan tamamlandı`, {
+          videoUrl: canonicalVideo.videoUrl,
+          remuxMs: canonicalVideo.remuxMs,
+          renderWallMs: liveResult.renderWallMs,
+          productionRealtimeFactor: liveResult.productionRealtimeFactor
+        });
+        return;
+      } catch (error) {
+        liveResult = {
+          ok: false,
+          reason: 'canonicalization_failed',
+          error
+        };
+        logInfo(`Job ${job.id}: canlı final dönüşümü başarısız; arşiv fallback başlıyor`, {
+          error: error.message
+        });
       }
+    }
 
+    updateJob(job, {
+      status: 'running',
+      current: 'Canlı yayın kullanılamadı; arşiv renderı hazırlanıyor...',
+      message: 'Yedek segment üretimi başladı.'
+    });
+
+    const codeTasks = preparedSegments.map(async (prepared, index) => {
+      const segmentState = job.segments[index];
+      segmentState.status = 'code';
+      updateJob(job, { current: `${prepared.segment.id}: yedek Manim kodu uretiliyor...` });
+      const code = await limitCode(() => createManimCode({
+        animation: prepared.segment.animation,
+        durationSeconds: prepared.estimatedDuration,
+        speech: {
+          speech_text: prepared.speech.speech_text,
+          duration_seconds: prepared.estimatedDuration,
+          cue_plan: prepared.speech.cue_plan || []
+        },
+        segmentId: prepared.segment.id
+      }));
+      const manimCode = await persist(`${prepared.segment.id}/manim-code`, () => (
+        prepared.dbSegment?.id
+          ? saveManimCode({
+              segmentId: prepared.dbSegment.id,
+              provider: llmProvider,
+              model: codeModel,
+              code
+            })
+          : null
+      ));
+      return { ...prepared, code, manimCode };
+    }).map((task) => task.then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
+    ));
+
+    const videoPaths = new Array(job.total);
+    for (let index = 0; index < codeTasks.length; index += 1) {
+      const codeOutcome = await codeTasks[index];
+      if (!codeOutcome.ok) throw codeOutcome.error;
+      const prepared = codeOutcome.value;
+      const segmentState = job.segments[index];
       segmentState.status = 'render';
       updateJob(job, {
-        current: `${prepared.segment.id}: sirali render ediliyor...`,
-        message: `Render sirasi: ${index + 1}/${job.total}`
+        current: `${prepared.segment.id}: yedek video render ediliyor...`,
+        message: `Yedek render sirasi: ${index + 1}/${job.total}`
       });
-
       const render = await limitRender(() => renderManimVideo({
         code: prepared.code,
         segmentId: prepared.segment.id,
@@ -2453,7 +2636,6 @@ async function runFullVideoJob(job) {
           stderr: render.stderr
         });
       });
-
       segmentState.status = 'done';
       segmentState.videoUrl = render.videoUrl;
       segmentState.videoRelativePath = render.videoRelativePath;
@@ -2464,52 +2646,38 @@ async function runFullVideoJob(job) {
       videoPaths[index] = render.videoRelativePath;
       job.progress += 1;
       updateJob(job, {
-        message: `${job.progress}/${job.total} segment tamamlandi.`,
-        current: `${prepared.segment.id}: tamamlandi.`
+        message: `${job.progress}/${job.total} yedek segment tamamlandi.`,
+        current: `${prepared.segment.id}: yedek video tamamlandi.`
       });
     }
 
     updateJob(job, {
       status: 'concat',
-      current: 'Segment videolari birlestiriliyor...',
-      message: 'Final video hazirlaniyor.'
+      current: 'Yedek segment videolari birlestiriliyor...',
+      message: 'Yedek final video hazirlaniyor.'
     });
-
     const concat = await concatVideos(videoPaths);
-    const uploadedFinalVideo = await persist('final-video/upload', () => (
-      job.lessonId
-        ? uploadRenderRelative({
-            bucket: 'videos',
-            userId: job.userId,
-            lessonId: job.lessonId,
-            kind: 'final',
-            relativePath: concat.videoRelativePath,
-            contentType: 'video/mp4'
-          })
-        : null
-    ));
-    await persist('final-video/db', async () => {
-      if (!job.lessonId) return null;
-      const durationSeconds = concat.videoRelativePath
-        ? await getMediaDurationSeconds(resolveRenderRelative(concat.videoRelativePath)).catch(() => null)
-        : null;
-      await updateLesson(job.lessonId, { status: 'done' });
-      return saveLessonVideo({
-        lessonId: job.lessonId,
-        videoStoragePath: uploadedFinalVideo?.storagePath || null,
-        localVideoPath: concat.videoRelativePath,
-        durationSeconds,
-        segmentRenderIds: job.segments.map((segment) => segment.dbRenderId).filter(Boolean)
-      });
-    });
+    const uploadedFinalVideo = await persistFinalLessonVideo(
+      job,
+      concat,
+      job.segments.map((segment) => segment.dbRenderId).filter(Boolean)
+    );
     updateJob(job, {
       status: 'done',
       current: 'Tamamlandi.',
-      message: 'Tam ders videosu hazir.',
+      message: 'Yedek tam ders videosu hazir.',
       completedAt: new Date().toISOString(),
-      result: concat
+      result: {
+        ...concat,
+        source: 'archive_fallback',
+        fallbackReason: liveResult.reason,
+        videoStoragePath: uploadedFinalVideo?.storagePath || null
+      }
     });
-    logInfo(`Job ${job.id}: tam ders uretimi bitti`, { videoUrl: concat.videoUrl });
+    logInfo(`Job ${job.id}: yedek tam ders uretimi bitti`, {
+      videoUrl: concat.videoUrl,
+      fallbackReason: liveResult.reason
+    });
   } catch (error) {
     logInfo(`Job ${job.id}: tam ders uretimi hata verdi`, { error: error.message });
     await persist('lesson/status-failed', () => (
@@ -2552,9 +2720,9 @@ app.get('/api/config', async (_req, res, next) => {
       hasApiKey: Boolean(apiKey),
       hasGeminiApiKey: Boolean(geminiApiKey),
       hasGroqApiKey: Boolean(groqApiKey),
-      hasTtsCredentials: Boolean(googleCredentialsPath),
-      ttsProvider: 'Google Cloud',
-      ttsVoice: googleTtsVoice,
+      hasTtsCredentials: ttsProvider === 'edge' || hasGoogleTtsCredentials,
+      ttsProvider: ttsProvider === 'edge' ? 'Edge TTS' : 'Google Cloud',
+      ttsVoice: ttsProvider === 'edge' ? edgeTtsVoice : googleTtsVoice,
       ttsVoiceId: null,
       manimFont,
       manimQuality,
@@ -2569,6 +2737,7 @@ app.get('/api/config', async (_req, res, next) => {
       liveManimCrf,
       liveManimPreset,
       liveManimFragmentSeconds,
+      canonicalLiveFinal: true,
       mathTexAvailable,
       miktexBin,
       speechVolume,

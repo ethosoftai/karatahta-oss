@@ -79,3 +79,15 @@ export function buildConcatArgs({ listPath, outputPath }) {
     outputPath
   ];
 }
+
+export function buildCanonicalRemuxArgs({ inputPath, outputPath }) {
+  return [
+    '-y',
+    '-i', inputPath,
+    '-map', '0:v:0',
+    '-map', '0:a:0?',
+    '-c', 'copy',
+    '-movflags', '+faststart',
+    outputPath
+  ];
+}

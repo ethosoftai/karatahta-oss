@@ -31,6 +31,20 @@ function parseJsonLines(onMessage) {
   };
 }
 
+function waitForDrainOrClose(stream) {
+  return new Promise((resolve) => {
+    const done = () => {
+      stream.off('drain', done);
+      stream.off('close', done);
+      stream.off('error', done);
+      resolve();
+    };
+    stream.once('drain', done);
+    stream.once('close', done);
+    stream.once('error', done);
+  });
+}
+
 export function buildLiveManimStartMessage(settings = {}) {
   return {
     type: 'start',
@@ -61,7 +75,11 @@ class LiveManimSession extends EventEmitter {
     this.error = null;
     this.videoEnded = false;
     this.finishedPayload = null;
+    this.backpressurePromise = null;
     this.fileStream = createWriteStream(outputPath);
+    this.fileStream.once('error', (error) => {
+      this.fail(new Error(`Canli Manim dosyasi yazilamadi: ${error.message}`));
+    });
     this.completion = new Promise((resolve, reject) => {
       this.resolveCompletion = resolve;
       this.rejectCompletion = reject;
@@ -111,9 +129,27 @@ class LiveManimSession extends EventEmitter {
       this.cachedBytes += payload.length;
     }
     this.bytes += payload.length;
-    this.fileStream.write(payload);
+    const blockedStreams = [];
+    if (!this.fileStream.write(payload)) blockedStreams.push(this.fileStream);
     for (const client of this.clients) {
-      if (!client.writableEnded) client.write(payload);
+      if (client.writableEnded) continue;
+      try {
+        if (!client.write(payload)) blockedStreams.push(client);
+      } catch {
+        this.clients.delete(client);
+      }
+    }
+    if (blockedStreams.length && !this.backpressurePromise) {
+      const videoSource = this.worker.process.stdio[3];
+      videoSource.pause();
+      this.backpressurePromise = Promise.all(
+        blockedStreams.map(waitForDrainOrClose)
+      ).finally(() => {
+        this.backpressurePromise = null;
+        if (!this.done && !this.failed && !videoSource.destroyed) {
+          videoSource.resume();
+        }
+      });
     }
     this.emit('video', payload);
   }
