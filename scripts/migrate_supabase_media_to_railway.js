@@ -36,10 +36,16 @@ const locations = [
   { table: 'lesson_videos', column: 'video_storage_path', bucket: 'videos' },
   { table: 'attachments', column: 'storage_path', bucket: 'attachments' }
 ];
+const mediaBucketNames = ['videos', 'audio', 'attachments'];
 
 const copiedSources = new Map();
 let migratedReferences = 0;
 let skippedReferences = 0;
+const { data: currentBuckets, error: listBucketsError } = await supabase.storage.listBuckets();
+if (listBucketsError) throw listBucketsError;
+const existingMediaBuckets = mediaBucketNames.filter((name) => (
+  (currentBuckets || []).some((bucket) => bucket.name === name)
+));
 
 async function listAllObjects(bucket, prefix = '') {
   const objects = [];
@@ -91,7 +97,7 @@ async function copySourceObject(bucket, sourcePath) {
   return uploaded;
 }
 
-for (const bucket of ['videos', 'audio', 'attachments']) {
+for (const bucket of existingMediaBuckets) {
   const objectPaths = await listAllObjects(bucket);
   for (const objectPath of objectPaths) {
     await copySourceObject(bucket, objectPath);
@@ -150,17 +156,26 @@ for (const location of locations) {
 let deletedSources = 0;
 let deletedBuckets = 0;
 if (deleteSource) {
-  for (const bucket of ['videos', 'audio', 'attachments']) {
+  for (const bucket of existingMediaBuckets) {
     const { error } = await supabase.storage.emptyBucket(bucket);
     if (error) throw error;
   }
   deletedSources = copiedSources.size;
 }
 
-if (deleteBuckets) {
-  for (const bucket of ['videos', 'audio', 'attachments']) {
+async function deleteBucketWithRetry(bucket) {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
     const { error } = await supabase.storage.deleteBucket(bucket);
-    if (error) throw error;
+    if (!error) return;
+    const isStillEmptying = String(error.statusCode || error.status) === '409';
+    if (!isStillEmptying || attempt === 5) throw error;
+    await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+  }
+}
+
+if (deleteBuckets) {
+  for (const bucket of existingMediaBuckets) {
+    await deleteBucketWithRetry(bucket);
     deletedBuckets += 1;
   }
 }
