@@ -11,6 +11,10 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
+import {
+  DEFAULT_GEMINI_FALLBACK_MODELS,
+  runGeminiModelRoute
+} from './services/geminiRouter.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
 import { buildBurnSubtitleArgs, buildMuxArgs, buildTimedSubtitleSrt } from './services/videoPostprocess.js';
 import {
@@ -86,6 +90,12 @@ const resolveGeminiModel = (model) => {
 };
 const geminiPlanModel = resolveGeminiModel(process.env.GEMINI_PLAN_MODEL || process.env.GEMINI_MODEL);
 const geminiCodeModel = resolveGeminiModel(process.env.GEMINI_CODE_MODEL || process.env.GEMINI_MODEL);
+const geminiFallbackModels = String(
+  process.env.GEMINI_FALLBACK_MODELS || DEFAULT_GEMINI_FALLBACK_MODELS.join(',')
+)
+  .split(',')
+  .map(resolveGeminiModel)
+  .filter(Boolean);
 const groqPlanModel = process.env.GROQ_PLAN_MODEL || 'openai/gpt-oss-120b';
 const groqCodeModel = process.env.GROQ_CODE_MODEL || 'qwen/qwen3-32b';
 const planModel = llmProvider === 'groq' ? groqPlanModel : geminiPlanModel;
@@ -387,6 +397,26 @@ function requireGroq() {
   return groqApiKey;
 }
 
+async function generateGeminiContent({ label = 'Gemini', model, contents, config }) {
+  const gemini = requireGemini();
+  return runGeminiModelRoute({
+    primaryModel: model,
+    fallbackModels: geminiFallbackModels,
+    generate: (candidateModel) => withRetry(label, () => gemini.models.generateContent({
+      model: candidateModel,
+      contents,
+      config
+    })),
+    onModelFailure: ({ model: failedModel, nextModel, error }) => {
+      logInfo(`${label}: model fallback`, {
+        failedModel,
+        nextModel,
+        reason: String(error?.message || error?.status || 'unknown').slice(0, 240)
+      });
+    }
+  });
+}
+
 async function generateLlmText({
   label,
   model,
@@ -447,20 +477,19 @@ async function generateLlmText({
     return text;
   }
 
-  const gemini = requireGemini();
-  const response = await withRetry(label || 'Gemini', () => gemini.models.generateContent({
-      model,
-      contents: [{ role: 'user', parts: [{ text: userText }] }],
-      config: {
-        ...(systemInstruction ? { systemInstruction } : {}),
-        ...(json ? { responseMimeType: 'application/json' } : {}),
-        temperature
-      }
-    })
-  );
+  const { response, model: usedModel } = await generateGeminiContent({
+    label: label || 'Gemini',
+    model,
+    contents: [{ role: 'user', parts: [{ text: userText }] }],
+    config: {
+      ...(systemInstruction ? { systemInstruction } : {}),
+      ...(json ? { responseMimeType: 'application/json' } : {}),
+      temperature
+    }
+  });
 
   const text = response.text || '';
-  logInfo(`${label || 'Gemini'}: yanit geldi`, { model, ms: Date.now() - started, chars: text.length });
+  logInfo(`${label || 'Gemini'}: yanit geldi`, { model: usedModel, ms: Date.now() - started, chars: text.length });
   return text;
 }
 
@@ -592,7 +621,6 @@ function normalizeImagePayload(image) {
 }
 
 async function createQuestionSolutionPlan({ image, studentLevel = 'beginner', note = '' }) {
-  const gemini = requireGemini();
   const normalizedImage = normalizeImagePayload(image);
   const prompt = `Bu gorselde bir ogrencinin test kitabindan cozemedigi soru var.
 
@@ -640,25 +668,25 @@ Ek not: ${note || 'Yok'}`;
 
   logInfo('Soru fotografi icin Gemini cozum plani basladi', { model: geminiPlanModel });
   const started = Date.now();
-  const response = await withRetry('Gemini', () => gemini.models.generateContent({
-      model: geminiPlanModel,
-      contents: [{
-        role: 'user',
-        parts: [
-          { text: prompt },
-          { inlineData: normalizedImage }
-        ]
-      }],
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.35
-      }
-    })
-  );
+  const { response, model: usedModel } = await generateGeminiContent({
+    model: geminiPlanModel,
+    contents: [{
+      role: 'user',
+      parts: [
+        { text: prompt },
+        { inlineData: normalizedImage }
+      ]
+    }],
+    config: {
+      responseMimeType: 'application/json',
+      temperature: 0.35
+    }
+  });
 
   const plan = safeJsonParse(response.text || '');
   logInfo('Soru fotografi cozum plani tamamlandi', {
     ms: Date.now() - started,
+    model: usedModel,
     topic: plan.topic,
     segments: Array.isArray(plan.segments) ? plan.segments.length : 0
   });
@@ -674,7 +702,6 @@ async function answerKaraQuestion({
   lessonPlan = null,
   chatHistory = []
 }) {
-  const gemini = requireGemini();
   const normalizedFrame = normalizeImagePayload(frame);
   const safeHistory = Array.isArray(chatHistory)
     ? chatHistory.slice(-12).map((message) => ({
@@ -716,24 +743,24 @@ ${String(question || '').trim()}`;
   });
 
   const started = Date.now();
-  const response = await withRetry('Gemini', () => gemini.models.generateContent({
-      model: geminiPlanModel,
-      contents: [{
-        role: 'user',
-        parts: [
-          { text: prompt },
-          { inlineData: normalizedFrame }
-        ]
-      }],
-      config: {
-        temperature: 0.35
-      }
-    })
-  );
+  const { response, model: usedModel } = await generateGeminiContent({
+    model: geminiPlanModel,
+    contents: [{
+      role: 'user',
+      parts: [
+        { text: prompt },
+        { inlineData: normalizedFrame }
+      ]
+    }],
+    config: {
+      temperature: 0.35
+    }
+  });
 
   const answer = String(response.text || '').trim();
   logInfo('Kara soru-cevap Gemini yaniti geldi', {
     ms: Date.now() - started,
+    model: usedModel,
     chars: answer.length
   });
 
@@ -1704,6 +1731,7 @@ app.get('/api/config', async (_req, res, next) => {
       llmProvider,
       planModel,
       codeModel,
+      geminiFallbackModels,
       hasApiKey: Boolean(apiKey),
       hasGeminiApiKey: Boolean(geminiApiKey),
       hasGroqApiKey: Boolean(groqApiKey),
@@ -2200,6 +2228,7 @@ app.listen(port, () => {
     provider: llmProvider,
     planModel,
     codeModel,
+    geminiFallbackModels,
     quality: manimQuality
   });
 });
