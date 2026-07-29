@@ -1,54 +1,36 @@
 # Kara Tahta Auth e-posta kurulumu
 
-Production auth e-postaları Supabase SMTP tarafından değil, Railway backend'deki
-imzalı Send Email Hook üzerinden Resend API ile gönderilir.
+## 1. hosting/cPanel üzerinde posta hesabı
 
-```text
-Supabase Auth
-  → Standard Webhooks imzalı POST
-  → /api/auth/hooks/send-email
-  → Resend API
-  → kullanıcı
-```
+1. cPanel'de **Email Accounts** bölümünü açın.
+2. `no-reply@ethosoft.org` hesabını oluşturup güçlü ve benzersiz bir parola belirleyin.
+3. Hesabın yanındaki **Connect Devices / Set Up Mail Client** sayfasını açın.
+4. Burada gösterilen kesin **Outgoing Server (SMTP)**, port ve güvenlik tipini not edin.
+   Genellikle tam kullanıcı adı `no-reply@ethosoft.org`, port `465` (SSL/TLS) veya
+   `587` (STARTTLS) olur. Sunucu adını tahmin etmeyin; cPanel'de yazanı kullanın.
+5. **Email Deliverability** ekranında SPF ve DKIM kayıtlarının geçerli olduğunu
+   doğrulayın. Eksikse cPanel'in **Repair** seçeneğini kullanın. DMARC kaydını da
+   DNS/Zone Editor üzerinden ekleyin.
+6. hosting desteğine hesabın saatlik/günlük gönderim sınırını sorun.
 
-## 1. Resend domain ve API anahtarı
+SMTP parolasını `.env`, frontend veya GitHub'a yazmayın.
 
-1. Resend'de `karatahta.ethosoft.org` gönderen domainini ekleyin.
-2. Resend'in verdiği SPF ve DKIM DNS kayıtlarını Zone Editor'a ekleyin.
-3. Domain doğrulandıktan sonra yalnızca gönderim yetkili bir API anahtarı oluşturun.
-4. API anahtarını GitHub'a veya frontend'e yazmayın.
+## 2. Supabase Custom SMTP
 
-## 2. Railway değişkenleri
+Supabase Dashboard'da **Authentication → Emails → SMTP Settings** bölümünü açın
+ve Custom SMTP'yi etkinleştirin:
 
-`karatahta-backend` production servisinde:
+- Sender name: `Kara Tahta`
+- Sender email: `no-reply@ethosoft.org`
+- Host: cPanel **Outgoing Server** değeri
+- Port: cPanel'de verilen `465` veya `587`
+- Username: `no-reply@ethosoft.org`
+- Password: cPanel'de oluşturduğunuz posta parolası
 
-```env
-RESEND_API_KEY=re_...
-AUTH_EMAIL_FROM=Kara Tahta <no-reply@karatahta.ethosoft.org>
-AUTH_EMAIL_REPLY_TO=no-reply@karatahta.ethosoft.org
-SEND_EMAIL_HOOK_SECRET=v1,whsec_...
-AUTH_REDIRECT_URL=https://karatahta.ethosoft.org/
-```
+Ayarı kaydedip test e-postası gönderin. `465` seçildiyse SSL/TLS, `587`
+seçildiyse STARTTLS kullanın.
 
-`SEND_EMAIL_HOOK_SECRET`, Supabase hook oluşturulurken üretilen değerle birebir
-aynı olmalıdır.
-
-## 3. Supabase Send Email Hook
-
-Supabase Dashboard'da **Authentication → Hooks → Send Email**:
-
-- Hook type: `HTTPS`
-- URL:
-  `https://api.example.com/api/auth/hooks/send-email`
-- Secret: **Generate Secret**
-
-Üretilen secret'ı önce Railway'e `SEND_EMAIL_HOOK_SECRET` olarak kaydedin.
-Railway deployment başarıyla tamamlandıktan sonra hook'u etkinleştirin.
-
-Hook etkin olduğunda Supabase Custom SMTP kullanılmaz. Email provider ayarı açık
-kalmalıdır; aksi halde e-posta ile kayıt özelliği de kapanır.
-
-## 4. URL ayarları
+## 3. URL ayarları
 
 Supabase Dashboard'da **Authentication → URL Configuration**:
 
@@ -58,11 +40,20 @@ Supabase Dashboard'da **Authentication → URL Configuration**:
   - `http://localhost:3001/**`
   - `http://127.0.0.1:3001/**`
 
-## 5. Güvenlik ve teslimat
+Railway backend ortam değişkeni:
 
-- Hook gövdesi, Supabase Standard Webhooks imzası doğrulanmadan işlenmez.
-- Resend tekrar denemelerinde aynı mailin iki kez gönderilmesini önlemek için
-  webhook kimliği idempotency anahtarı olarak kullanılır.
-- E-posta adresi, OTP ve token değerleri uygulama loglarına yazılmaz.
-- Signup, recovery, magic link, invite, secure email change ve reauthentication
-  akışları için ayrı Türkçe HTML ve düz metin şablonları kullanılır.
+```env
+AUTH_REDIRECT_URL=https://karatahta.ethosoft.org/
+```
+
+## 4. Markalı şablonlar
+
+Supabase Dashboard'da **Authentication → Emails → Email Templates** bölümünde:
+
+- Confirm signup subject: `Kara Tahta hesabını doğrula`
+- Confirm signup body: `supabase/email-templates/confirmation.html`
+- Reset password subject: `Kara Tahta şifreni yenile`
+- Reset password body: `supabase/email-templates/recovery.html`
+
+HTML içindeki `{{ .ConfirmationURL }}` Supabase tarafından tek kullanımlık güvenli
+bağlantıyla değiştirilir. Bu ifadeyi kaldırmayın veya değiştirmeyin.
