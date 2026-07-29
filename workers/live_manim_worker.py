@@ -479,7 +479,18 @@ def main() -> None:
             elif message_type == "action":
                 if not session:
                     raise RuntimeError("Start message is required before action.")
-                session.execute(message.get("command") or {})
+                command = message.get("command") or {}
+                try:
+                    session.execute(command)
+                except Exception as action_error:
+                    emit(
+                        "action_error",
+                        action_id=safe_text(command.get("id"), 80),
+                        action_type=safe_text(command.get("type"), 24),
+                        message=str(action_error),
+                        traceback=traceback.format_exc(limit=8),
+                    )
+                    continue
             elif message_type == "finish":
                 if session:
                     session.finish()

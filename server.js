@@ -158,6 +158,7 @@ const liveManimFragmentSeconds = Math.max(
   2,
   Math.min(10, Number(process.env.LIVE_MANIM_FRAGMENT_SECONDS || 5))
 );
+const liveManimIntroSeconds = 8;
 const manimRenderFps = 60;
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
@@ -1639,6 +1640,8 @@ async function createVideoJob({ plan, lessonId, userId, total, initialSegments =
         : null,
       generatedActions: 0,
       renderedActions: 0,
+      failedActions: 0,
+      introDurationSeconds: liveManimIntroSeconds,
       startedAt: null,
       completedAt: null,
       durationSeconds: null,
@@ -1972,7 +1975,7 @@ async function runLiveManimPreview(job) {
   const outputDir = path.join(rendersDir, 'live-manim');
   const outputPath = path.join(outputDir, `${sanitizeSegmentId(job.id)}.mp4`);
   const introAudioPath = path.join(outputDir, `${sanitizeSegmentId(job.id)}-intro.wav`);
-  const introDurationSeconds = 8;
+  const introDurationSeconds = liveManimIntroSeconds;
   job.liveManim.status = 'waiting_worker';
   updateJob(job, { current: 'Canli Manim motoru hazirlaniyor...' });
 
@@ -1990,6 +1993,13 @@ async function runLiveManimPreview(job) {
         updateJob(job, { current: 'Canli Manim yayini basladi.' });
       } else if (event.event === 'action_completed') {
         job.liveManim.renderedActions += 1;
+      } else if (event.event === 'action_error') {
+        job.liveManim.failedActions += 1;
+        logInfo(`Job ${job.id}: Live Manim aksiyonu atlandi`, {
+          actionId: event.action_id,
+          actionType: event.action_type,
+          error: event.message
+        });
       }
     });
     session.on('log', (message) => {

@@ -71,7 +71,7 @@ class LiveManimSession extends EventEmitter {
 
   send(message) {
     if (this.done || this.failed || !this.worker.process.stdin.writable) {
-      throw new Error('Live Manim worker artik komut kabul etmiyor.');
+      throw this.error || new Error('Live Manim worker artik komut kabul etmiyor.');
     }
     this.worker.process.stdin.write(`${JSON.stringify(message)}\n`);
   }
