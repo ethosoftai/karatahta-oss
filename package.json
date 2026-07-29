@@ -1,0 +1,21 @@
+{
+  "name": "kara-tahta-gemini-manim",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test",
+    "supabase:schema": "node scripts/apply_supabase_schema.js"
+  },
+  "dependencies": {
+    "@google-cloud/text-to-speech": "^6.4.1",
+    "@google/genai": "^1.35.0",
+    "@supabase/supabase-js": "^2.108.2",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "pg": "^8.22.0",
+    "undici": "^8.5.0"
+  }
+}
