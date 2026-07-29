@@ -53,3 +53,15 @@ export function buildBurnSubtitleArgs({ inputPath, subtitlePath, outputPath }) {
   const style = 'FontName=Noto Sans,FontSize=19,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=28';
   return ['-y', '-i', inputPath, '-vf', `subtitles='${escapeSubtitlePath(subtitlePath)}':force_style='${style}'`, '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'copy', '-movflags', '+faststart', outputPath];
 }
+
+export function buildConcatArgs({ listPath, outputPath }) {
+  return [
+    '-y',
+    '-f', 'concat',
+    '-safe', '0',
+    '-i', listPath,
+    '-c', 'copy',
+    '-movflags', '+faststart',
+    outputPath
+  ];
+}

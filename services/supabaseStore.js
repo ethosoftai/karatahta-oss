@@ -7,6 +7,10 @@ const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPAB
 const secretKey = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const devUserId = process.env.DEV_USER_ID;
 const storagePublic = String(process.env.SUPABASE_STORAGE_PUBLIC || 'false').toLowerCase() === 'true';
+const requestedProfileCacheTtlMs = Number(process.env.AUTH_PROFILE_CACHE_TTL_MS || 300000);
+const profileCacheTtlMs = Number.isFinite(requestedProfileCacheTtlMs)
+  ? Math.max(30000, requestedProfileCacheTtlMs)
+  : 300000;
 
 export const supabaseConfigured = Boolean(supabaseUrl && secretKey);
 export const supabaseAuthConfigured = Boolean(supabaseUrl && publishableKey);
@@ -30,6 +34,7 @@ const supabaseAuth = supabaseAuthConfigured
   : null;
 
 let devProfileReady = false;
+const profileCache = new Map();
 
 function requireSupabase() {
   if (!supabaseConfigured || !supabase) {
@@ -64,6 +69,34 @@ function displayNameFromAuthUser(user, fallbackEmail) {
     || fallbackEmail?.split('@')[0]
     || user?.email?.split('@')[0]
     || 'Kara Tahta Kullanıcısı';
+}
+
+function cacheProfile(authUserId, profile) {
+  if (!authUserId || !profile) return profile;
+  profileCache.set(authUserId, {
+    profile,
+    expiresAt: Date.now() + profileCacheTtlMs
+  });
+  return profile;
+}
+
+function cachedProfile(authUserId) {
+  const cached = profileCache.get(authUserId);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    profileCache.delete(authUserId);
+    return null;
+  }
+  return cached.profile;
+}
+
+export function authUserFromClaims(claims) {
+  if (!claims?.sub) return null;
+  return {
+    id: claims.sub,
+    email: claims.email || null,
+    user_metadata: claims.user_metadata || claims.raw_user_meta_data || {}
+  };
 }
 
 export async function upsertProfileFromAuthUser(user) {
@@ -103,20 +136,38 @@ export async function upsertProfileFromAuthUser(user) {
     error = fallback.error;
   }
   if (error) throw error;
-  return data;
+  return cacheProfile(user.id, data);
 }
 
 export async function getProfileForAccessToken(accessToken) {
   if (!supabaseAuth) {
     throw new Error('Supabase auth ayarlari eksik.');
   }
-  const { data, error } = await supabaseAuth.auth.getUser(accessToken);
-  if (error || !data?.user) {
+  const { data, error } = await supabaseAuth.auth.getClaims(accessToken);
+  const authUser = authUserFromClaims(data?.claims);
+  if (error || !authUser) {
     const authError = new Error('Oturum gecersiz veya suresi dolmus.');
     authError.statusCode = 401;
     throw authError;
   }
-  return upsertProfileFromAuthUser(data.user);
+
+  const cached = cachedProfile(authUser.id);
+  if (cached) {
+    return cached;
+  }
+
+  const client = requireSupabase();
+  const profileResult = await client
+    .from('profiles')
+    .select('*')
+    .eq('auth_user_id', authUser.id)
+    .maybeSingle();
+  if (profileResult.error) throw profileResult.error;
+  if (profileResult.data) {
+    return cacheProfile(authUser.id, profileResult.data);
+  }
+
+  return upsertProfileFromAuthUser(authUser);
 }
 
 export async function signUpWithPassword({ email, password, displayName, emailRedirectTo }) {
@@ -318,17 +369,22 @@ export async function listLessonsForUser({ userId, limit = 30 }) {
   }));
 }
 
-export async function getLessonDetailForUser({ lessonId, userId }) {
-  const lesson = await getLessonForUser({ lessonId, userId });
-  if (!lesson) return null;
-
+export async function getLessonDetailForUser({ lessonId, userId, messageLimit = 50 }) {
+  if (!lessonId || !userId) return null;
   const client = requireSupabase();
   const [
+    lessonResult,
     planResult,
     segmentsResult,
     videoResult,
     chatResult
   ] = await Promise.all([
+    client
+      .from('lessons')
+      .select('*')
+      .eq('id', lessonId)
+      .eq('user_id', userId)
+      .maybeSingle(),
     client
       .from('lesson_plans')
       .select('*')
@@ -356,9 +412,10 @@ export async function getLessonDetailForUser({ lessonId, userId }) {
       .maybeSingle()
   ]);
 
-  for (const result of [planResult, segmentsResult, videoResult, chatResult]) {
+  for (const result of [lessonResult, planResult, segmentsResult, videoResult, chatResult]) {
     if (result.error) throw result.error;
   }
+  if (!lessonResult.data) return null;
 
   let messages = [];
   if (chatResult.data?.id) {
@@ -366,18 +423,46 @@ export async function getLessonDetailForUser({ lessonId, userId }) {
       .from('chat_messages')
       .select('*')
       .eq('chat_id', chatResult.data.id)
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: false })
+      .limit(Math.max(1, Math.min(100, Number(messageLimit) || 50)));
     if (messagesResult.error) throw messagesResult.error;
-    messages = messagesResult.data || [];
+    messages = [...(messagesResult.data || [])].reverse();
   }
 
   return {
-    lesson,
+    lesson: lessonResult.data,
     plan: planResult.data?.plan_json || null,
     segments: segmentsResult.data || [],
     video: videoResult.data || null,
     chat: chatResult.data || null,
     messages
+  };
+}
+
+export async function getLessonVideoForUser({ lessonId, userId }) {
+  if (!lessonId || !userId) return null;
+  const client = requireSupabase();
+  const [lessonResult, videoResult] = await Promise.all([
+    client
+      .from('lessons')
+      .select('id')
+      .eq('id', lessonId)
+      .eq('user_id', userId)
+      .maybeSingle(),
+    client
+      .from('lesson_videos')
+      .select('*')
+      .eq('lesson_id', lessonId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+  ]);
+  if (lessonResult.error) throw lessonResult.error;
+  if (videoResult.error) throw videoResult.error;
+  if (!lessonResult.data) return null;
+  return {
+    lesson: lessonResult.data,
+    video: videoResult.data || null
   };
 }
 

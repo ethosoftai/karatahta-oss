@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTimedSubtitleSrt, calculateVideoStretchFactor } from '../services/videoPostprocess.js';
+import {
+  buildConcatArgs,
+  buildTimedSubtitleSrt,
+  calculateVideoStretchFactor
+} from '../services/videoPostprocess.js';
 
 test('video süresini ses süresine eşitleyen katsayıyı hesaplar', () => {
   assert.equal(calculateVideoStretchFactor(72.966667, 91.536), 91.536 / 72.966667);
@@ -16,4 +20,12 @@ test('konuşma metnini tüm ses süresine yayılan SRT bloklarına dönüştür�
 
 test('geçersiz süreleri reddeder', () => {
   assert.throws(() => calculateVideoStretchFactor(0, 10), /pozitif/);
+});
+
+test('final MP4 birleştirmesinde hızlı başlatma metadata bayrağını kullanır', () => {
+  const args = buildConcatArgs({
+    listPath: '/tmp/concat.txt',
+    outputPath: '/tmp/final.mp4'
+  });
+  assert.deepEqual(args.slice(-3), ['-movflags', '+faststart', '/tmp/final.mp4']);
 });

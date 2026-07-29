@@ -15,8 +15,14 @@ import {
   DEFAULT_GEMINI_FALLBACK_MODELS,
   runGeminiModelRoute
 } from './services/geminiRouter.js';
+import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
-import { buildBurnSubtitleArgs, buildMuxArgs, buildTimedSubtitleSrt } from './services/videoPostprocess.js';
+import {
+  buildBurnSubtitleArgs,
+  buildConcatArgs,
+  buildMuxArgs,
+  buildTimedSubtitleSrt
+} from './services/videoPostprocess.js';
 import {
   appendGenerationEvent,
   createGenerationJob,
@@ -27,6 +33,7 @@ import {
   getOrCreateChat,
   getLessonForUser,
   getLessonDetailForUser,
+  getLessonVideoForUser,
   refreshAuthSession,
   requestPasswordReset,
   getSegment,
@@ -275,6 +282,27 @@ async function requireOwnedLesson(lessonId, userContext) {
     throw error;
   }
   return lesson;
+}
+
+async function createVideoAccessPayload(video) {
+  const storagePath = video?.video_storage_path;
+  if (!storagePath) {
+    return {
+      videoUrl: null,
+      videoUrlExpiresInSeconds: null,
+      videoUrlExpiresAt: null
+    };
+  }
+  const signed = await createStorageSignedUrl({
+    bucket: 'videos',
+    storagePath,
+    expiresInSeconds: signedVideoUrlTtlSeconds
+  });
+  return {
+    videoUrl: signed.signedUrl,
+    videoUrlExpiresInSeconds: signed.expiresInSeconds,
+    videoUrlExpiresAt: signed.expiresAt
+  };
 }
 
 app.use((req, res, next) => {
@@ -721,13 +749,8 @@ async function answerKaraQuestion({
   chatHistory = []
 }) {
   const normalizedFrame = normalizeImagePayload(frame);
-  const safeHistory = Array.isArray(chatHistory)
-    ? chatHistory.slice(-12).map((message) => ({
-        role: message.role === 'assistant' ? 'assistant' : 'user',
-        timestamp: String(message.timestamp || ''),
-        content: String(message.content || '').slice(0, 3000)
-      }))
-    : [];
+  const safeHistory = compactChatHistory(chatHistory);
+  const compactLessonPlan = compactLessonPlanContext(lessonPlan);
 
   const prompt = `Sen Kara Tahta icindeki "Kara" adli egitim asistanisin.
 
@@ -746,7 +769,7 @@ Ders basligi: ${lessonTitle || 'Bilinmiyor'}
 Timestamp: ${timestampLabel} (${Number(timestampSeconds || 0).toFixed(1)} saniye)
 
 Cikarilan ders plani:
-${lessonPlan ? JSON.stringify(lessonPlan, null, 2).slice(0, 12000) : 'Yok'}
+${compactLessonPlan ? JSON.stringify(compactLessonPlan, null, 2) : 'Yok'}
 
 Onceki konusmalar:
 ${safeHistory.length ? JSON.stringify(safeHistory, null, 2) : 'Yok'}
@@ -782,7 +805,7 @@ ${String(question || '').trim()}`;
     chars: answer.length
   });
 
-  return { answer };
+  return { answer, model: usedModel };
 }
 
 function toPlainTextFromTex(value) {
@@ -1031,6 +1054,7 @@ async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
         '-t', ffmpegSeconds(targetDuration),
         '-c:v', 'copy',
         '-c:a', 'aac',
+        '-movflags', '+faststart',
         outputPath
       ],
       { timeoutMs: 180000 }
@@ -1122,14 +1146,7 @@ async function concatVideos(videoRelativePaths) {
 
   const result = await runCommand(
     'ffmpeg',
-    [
-      '-y',
-      '-f', 'concat',
-      '-safe', '0',
-      '-i', listPath,
-      '-c', 'copy',
-      outputPath
-    ],
+    buildConcatArgs({ listPath, outputPath }),
     { timeoutMs: 180000 }
   );
 
@@ -1900,7 +1917,12 @@ app.get('/api/lessons/:id', async (req, res, next) => {
     if (!detail) {
       return res.status(404).json({ error: 'Ders bulunamadi.' });
     }
-    res.json(detail);
+    const videoAccess = await createVideoAccessPayload(detail.video);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({
+      ...detail,
+      ...videoAccess
+    });
   } catch (error) {
     next(error);
   }
@@ -1909,27 +1931,22 @@ app.get('/api/lessons/:id', async (req, res, next) => {
 app.get('/api/lessons/:id/video-url', async (req, res, next) => {
   try {
     const userContext = await resolveRequestUser(req);
-    const detail = await getLessonDetailForUser({
+    const result = await getLessonVideoForUser({
       lessonId: req.params.id,
       userId: userContext.profileId
     });
-    if (!detail) {
+    if (!result) {
       return res.status(404).json({ error: 'Ders bulunamadi.' });
     }
-    const storagePath = detail.video?.video_storage_path;
-    if (!storagePath) {
+    if (!result.video?.video_storage_path) {
       return res.status(404).json({ error: 'Bu ders icin kalici video kaydi bulunamadi.' });
     }
-    const signed = await createStorageSignedUrl({
-      bucket: 'videos',
-      storagePath,
-      expiresInSeconds: signedVideoUrlTtlSeconds
-    });
+    const videoAccess = await createVideoAccessPayload(result.video);
     res.setHeader('Cache-Control', 'private, no-store');
     res.json({
-      videoUrl: signed.signedUrl,
-      expiresInSeconds: signed.expiresInSeconds,
-      expiresAt: signed.expiresAt
+      videoUrl: videoAccess.videoUrl,
+      expiresInSeconds: videoAccess.videoUrlExpiresInSeconds,
+      expiresAt: videoAccess.videoUrlExpiresAt
     });
   } catch (error) {
     next(error);
@@ -2101,10 +2118,20 @@ app.post('/api/ask-kara', async (req, res, next) => {
     }
     const lessonId = req.body.lesson_id || req.body.lesson_plan?._lesson_id || null;
     await requireOwnedLesson(lessonId, userContext);
-    const chat = await persist('kara-chat/get-or-create', () => (
+
+    const answerPromise = answerKaraQuestion({
+      question,
+      frame: req.body.frame,
+      timestampSeconds: req.body.timestamp_seconds,
+      timestampLabel: req.body.timestamp_label,
+      lessonTitle: req.body.lesson_title,
+      lessonPlan: req.body.lesson_plan,
+      chatHistory: req.body.chat_history
+    });
+    const chatPromise = persist('kara-chat/get-or-create', () => (
       lessonId ? getOrCreateChat({ userId: userContext.profileId, lessonId }) : null
     ));
-    const frameAttachment = await persist('kara-chat/frame', async () => {
+    const frameAttachmentPromise = persist('kara-chat/frame', async () => {
       if (!lessonId || !req.body.frame?.data) return null;
       const mimeType = req.body.frame.mimeType || req.body.frame.mime_type || 'image/jpeg';
       const storagePath = storagePathFor({
@@ -2132,50 +2159,52 @@ app.post('/api/ask-kara', async (req, res, next) => {
         }
       });
     });
-    await persist('kara-chat/user-message', () => (
-      chat?.id
-        ? saveChatMessage({
-            chatId: chat.id,
-            role: 'user',
-            content: question,
-            timestampSeconds: req.body.timestamp_seconds,
-            timestampLabel: req.body.timestamp_label,
-            frameAttachmentId: frameAttachment?.id || null,
-            provider: null,
-            model: null,
-            context: { lesson_id: lessonId }
-          })
-        : null
+
+    const persistenceContextPromise = Promise.all([chatPromise, frameAttachmentPromise]);
+    const userMessagePromise = persistenceContextPromise.then(([chat, frameAttachment]) => (
+      persist('kara-chat/user-message', () => (
+        chat?.id
+          ? saveChatMessage({
+              chatId: chat.id,
+              role: 'user',
+              content: question,
+              timestampSeconds: req.body.timestamp_seconds,
+              timestampLabel: req.body.timestamp_label,
+              frameAttachmentId: frameAttachment?.id || null,
+              provider: null,
+              model: null,
+              context: { lesson_id: lessonId }
+            })
+          : null
+      ))
     ));
 
-    const result = await answerKaraQuestion({
-      question,
-      frame: req.body.frame,
-      timestampSeconds: req.body.timestamp_seconds,
-      timestampLabel: req.body.timestamp_label,
-      lessonTitle: req.body.lesson_title,
-      lessonPlan: req.body.lesson_plan,
-      chatHistory: req.body.chat_history
-    });
-    await persist('kara-chat/assistant-message', () => (
-      chat?.id
-        ? saveChatMessage({
-            chatId: chat.id,
-            role: 'assistant',
-            content: result.answer,
-            timestampSeconds: req.body.timestamp_seconds,
-            timestampLabel: req.body.timestamp_label,
-            frameAttachmentId: frameAttachment?.id || null,
-            provider: 'gemini',
-            model: geminiPlanModel,
-            context: {
-              lesson_id: lessonId,
-              lesson_plan: req.body.lesson_plan || null,
-              history_count: Array.isArray(req.body.chat_history) ? req.body.chat_history.length : 0
-            }
-          })
-        : null
-    ));
+    const result = await answerPromise;
+    void userMessagePromise
+      .then(async () => {
+        const [chat, frameAttachment] = await persistenceContextPromise;
+        return persist('kara-chat/assistant-message', () => (
+          chat?.id
+            ? saveChatMessage({
+                chatId: chat.id,
+                role: 'assistant',
+                content: result.answer,
+                timestampSeconds: req.body.timestamp_seconds,
+                timestampLabel: req.body.timestamp_label,
+                frameAttachmentId: frameAttachment?.id || null,
+                provider: 'gemini',
+                model: result.model || geminiPlanModel,
+                context: {
+                  lesson_id: lessonId,
+                  history_count: Array.isArray(req.body.chat_history) ? req.body.chat_history.length : 0
+                }
+              })
+            : null
+        ));
+      })
+      .catch((error) => {
+        logInfo('Kara sohbet kaydi arka planda tamamlanamadi', { error: error.message });
+      });
     res.json(result);
   } catch (error) {
     next(error);
