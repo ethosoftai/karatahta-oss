@@ -17,13 +17,5 @@ alter table chat_messages enable row level security;
 alter table generation_jobs enable row level security;
 alter table generation_events enable row level security;
 
--- Mevcut pipeline'ın kullandığı bucket'lar private oluşturulur.
-insert into storage.buckets (id, name, public, allowed_mime_types)
-values
-  ('videos', 'videos', false, array['video/mp4']),
-  ('audio', 'audio', false, array['audio/mpeg', 'audio/mp3']),
-  ('attachments', 'attachments', false, array['image/*'])
-on conflict (id) do update
-set
-  public = excluded.public,
-  allowed_mime_types = excluded.allowed_mime_types;
+-- Binary dosyalar Railway Bucket'ta tutulur. Supabase yalnız Auth ve
+-- Postgres verileri için kullanıldığı için burada Storage bucket oluşturulmaz.

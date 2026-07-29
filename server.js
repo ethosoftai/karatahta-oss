@@ -21,7 +21,6 @@ import {
   appendGenerationEvent,
   createGenerationJob,
   createLesson,
-  createStorageSignedUrl,
   extensionFromContentType,
   fileNameFromLocalPath,
   getProfileForAccessToken,
@@ -40,16 +39,21 @@ import {
   saveTtsOutput,
   saveVideoRender,
   listLessonsForUser,
-  storagePathFor,
   signInWithPassword,
   signUpWithPassword,
   supabaseConfigured,
   updateGenerationJob,
   updateLesson,
-  updateSegment,
+  updateSegment
+} from './services/supabaseStore.js';
+import {
+  createStorageSignedUrl,
+  mediaStorageProvider,
+  railwayMediaConfigured,
+  storagePathFor,
   uploadDataUrl,
   uploadLocalFile
-} from './services/supabaseStore.js';
+} from './services/mediaStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1756,6 +1760,8 @@ app.get('/api/config', async (_req, res, next) => {
       targetVideoMinutes,
       targetSegmentCount,
       hasSupabase: supabaseConfigured,
+      mediaStorageProvider,
+      hasRailwayBucket: railwayMediaConfigured,
       authRequired
     });
   } catch (error) {

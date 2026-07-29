@@ -78,7 +78,30 @@ npm start             # Production sunucusu
 npm run dev           # Watch modunda local sunucu
 npm test              # Node testleri
 npm run supabase:schema
+npm run storage:cors:railway
+npm run storage:migrate:railway
 ```
+
+## Kalici medya depolama
+
+Production'da Supabase yalnız Auth ve Postgres için kullanılır. Video, ses ve
+sohbet eki gibi binary dosyalar private Railway Bucket'ta tutulur. Backend
+istemciye süreli S3 URL'si üretir; bucket anahtarları frontend'e gönderilmez.
+
+Yeni dosyaları Railway Bucket'a yazmak için `MEDIA_STORAGE_PROVIDER=railway`
+ve `.env.example` içindeki `MEDIA_S3_*` değişkenlerini tanımlayın. Eski
+Supabase Storage dosyalarını kesintisiz taşımak için önce bu sürümü deploy
+edin. Browser video erişimi için `npm run storage:cors:railway` komutuyla
+`CORS_ORIGIN` ve local geliştirme origin'lerini bucket'a uygulayın, ardından:
+
+```bash
+npm run storage:migrate:railway
+node scripts/migrate_supabase_media_to_railway.js --delete-source --delete-buckets
+```
+
+İlk komut dosyaları kopyalar, veritabanı yollarını günceller ve kaynakları
+korur. İkinci komut, yalnız kopyalama ve doğrulama başarılı olduktan sonra
+Supabase Storage kaynaklarını ve boş bucket'ları siler.
 
 ## Repo yapısı
 

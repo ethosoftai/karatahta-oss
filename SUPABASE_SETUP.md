@@ -35,7 +35,8 @@ Supabase Dashboard içindeki SQL Editor'da aşağıdaki dosyaları sırasıyla
 
 - bütün uygulama tablolarında RLS'yi etkinleştirir,
 - doğrudan anon/authenticated tablo erişimini kapalı bırakır,
-- `videos`, `audio` ve `attachments` private bucket'larını oluşturur.
+- Supabase Auth ve Postgres tablolarını hazırlar; binary medya bucket'ı
+  oluşturmaz. Video, ses ve ekler Railway Bucket'ta tutulur.
 
 Uygulama veritabanına yalnız backend secret key ile erişir. Frontend'e
 Supabase secret key verilmez.

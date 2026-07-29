@@ -8,10 +8,10 @@ Environment: production
 Service: karatahta-backend
 Domain: https://api.example.com
 Port: 8080
-Source: Ahmet2001/karatahta-backend (main)
+Source: Ahmet2001/karatahta-backend (railway)
 ```
 
-GitHub `main` branch'ine yapılan push'lar normalde otomatik deployment
+GitHub `railway` branch'ine yapılan push'lar normalde otomatik deployment
 başlatır.
 
 ## Gerekli Railway değişkenleri
@@ -35,6 +35,14 @@ MANIM_QUALITY=-qm
 MANIM_FONT=Georgia
 TARGET_VIDEO_MINUTES=10
 TARGET_SEGMENT_COUNT=8
+
+MEDIA_STORAGE_PROVIDER=railway
+MEDIA_S3_ENDPOINT=
+MEDIA_S3_BUCKET=
+MEDIA_S3_REGION=auto
+MEDIA_S3_URL_STYLE=virtual-host
+MEDIA_S3_ACCESS_KEY_ID=
+MEDIA_S3_SECRET_ACCESS_KEY=
 ```
 
 Railway Variables ekranına değerleri girin; `.env` dosyasını image içine
