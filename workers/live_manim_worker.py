@@ -78,6 +78,7 @@ class StreamSettings:
     fps: int = 20
     crf: int = 23
     preset: str = "fast"
+    fragment_seconds: float = 5.0
     background: str = "#071512"
 
 
@@ -176,6 +177,15 @@ class LiveManimSession:
         if self.started:
             raise RuntimeError("Live Manim session already started.")
 
+        fragment_frames = max(
+            1,
+            round(self.settings.fps * self.settings.fragment_seconds),
+        )
+        fragment_microseconds = max(
+            1,
+            round(self.settings.fragment_seconds * 1_000_000),
+        )
+
         config.renderer = "cairo"
         config.pixel_width = self.settings.width
         config.pixel_height = self.settings.height
@@ -233,9 +243,9 @@ class LiveManimSession:
                 "-pix_fmt",
                 "yuv420p",
                 "-g",
-                str(self.settings.fps),
+                str(fragment_frames),
                 "-keyint_min",
-                str(self.settings.fps),
+                str(fragment_frames),
                 "-sc_threshold",
                 "0",
                 "-c:a",
@@ -245,6 +255,10 @@ class LiveManimSession:
                 "-shortest",
                 "-movflags",
                 "frag_keyframe+empty_moov+default_base_moof",
+                "-frag_duration",
+                str(fragment_microseconds),
+                "-flush_packets",
+                "1",
                 "-f",
                 "mp4",
                 "pipe:1",
@@ -269,6 +283,7 @@ class LiveManimSession:
             width=self.settings.width,
             height=self.settings.height,
             fps=self.settings.fps,
+            fragment_seconds=self.settings.fragment_seconds,
         )
 
     def begin_segment(self, payload: dict[str, Any]) -> None:
@@ -448,6 +463,7 @@ def main() -> None:
                     preset=safe_text(message.get("preset"), 12)
                     if safe_text(message.get("preset"), 12) in {"veryfast", "faster", "fast", "medium"}
                     else "fast",
+                    fragment_seconds=clamp(message.get("fragment_seconds"), 2, 10, 5),
                     background=safe_text(message.get("background"), 24) or "#071512",
                 )
                 session = LiveManimSession(settings)

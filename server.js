@@ -153,6 +153,10 @@ const liveManimCrf = Math.max(18, Math.min(30, Number(process.env.LIVE_MANIM_CRF
 const liveManimPreset = ['veryfast', 'faster', 'fast', 'medium'].includes(process.env.LIVE_MANIM_PRESET)
   ? process.env.LIVE_MANIM_PRESET
   : 'fast';
+const liveManimFragmentSeconds = Math.max(
+  2,
+  Math.min(10, Number(process.env.LIVE_MANIM_FRAGMENT_SECONDS || 5))
+);
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
 const mathTexAvailable = mathTexMode === '1' || mathTexMode === 'true' || (mathTexMode === 'auto' && Boolean(miktexBin));
@@ -1916,7 +1920,8 @@ async function runLiveManimPreview(job) {
       height: liveManimHeight,
       fps: liveManimFps,
       crf: liveManimCrf,
-      preset: liveManimPreset
+      preset: liveManimPreset,
+      fragmentSeconds: liveManimFragmentSeconds
     });
 
     let preferredModel = null;
@@ -2339,6 +2344,7 @@ app.get('/api/config', async (_req, res, next) => {
       liveManimFps,
       liveManimCrf,
       liveManimPreset,
+      liveManimFragmentSeconds,
       mathTexAvailable,
       miktexBin,
       speechVolume,

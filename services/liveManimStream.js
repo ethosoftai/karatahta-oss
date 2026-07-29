@@ -31,6 +31,19 @@ function parseJsonLines(onMessage) {
   };
 }
 
+export function buildLiveManimStartMessage(settings = {}) {
+  return {
+    type: 'start',
+    width: settings.width || 1280,
+    height: settings.height || 720,
+    fps: settings.fps || 20,
+    crf: settings.crf || 23,
+    preset: settings.preset || 'fast',
+    fragment_seconds: settings.fragmentSeconds || 5,
+    background: settings.background || '#071512'
+  };
+}
+
 class LiveManimSession extends EventEmitter {
   constructor({ worker, jobId, outputPath }) {
     super();
@@ -62,15 +75,7 @@ class LiveManimSession extends EventEmitter {
   }
 
   start(settings = {}) {
-    this.send({
-      type: 'start',
-      width: settings.width || 1280,
-      height: settings.height || 720,
-      fps: settings.fps || 20,
-      crf: settings.crf || 23,
-      preset: settings.preset || 'fast',
-      background: settings.background || '#071512'
-    });
+    this.send(buildLiveManimStartMessage(settings));
   }
 
   beginSegment({ segmentId, audioPath, durationSeconds }) {
