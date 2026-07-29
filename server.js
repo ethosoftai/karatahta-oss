@@ -26,7 +26,8 @@ import { safeJsonParse } from './services/llmJson.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
 import {
   buildPlannedSpeech,
-  resolveStreamingSegmentCount
+  resolveStreamingSegmentCount,
+  resolveStreamingSegmentDurations
 } from './services/streamingPipeline.js';
 import {
   buildBurnSubtitleArgs,
@@ -141,7 +142,15 @@ const codeModel = llmProvider === 'groq' ? groqCodeModel : geminiCodeModel;
 const groqBaseUrl = process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1';
 const manimQuality = process.env.MANIM_QUALITY || '-qm';
 const streamManimQuality = process.env.STREAM_MANIM_QUALITY || '-qm';
-const streamSegmentSeconds = Math.max(10, Math.min(30, Number(process.env.STREAM_SEGMENT_SECONDS || 20)));
+const streamSegmentSeconds = Math.max(20, Math.min(60, Number(process.env.STREAM_SEGMENT_SECONDS || 30)));
+const segmentProductionBudgetSeconds = Math.max(
+  5,
+  Math.min(60, Number(process.env.SEGMENT_PRODUCTION_BUDGET_SECONDS || 15))
+);
+const firstSegmentTargetSeconds = Math.max(
+  12,
+  Math.min(24, Number(process.env.FIRST_SEGMENT_TARGET_SECONDS || 20))
+);
 const liveBoardEnabled = String(process.env.LIVE_BOARD_ENABLED || 'true').toLowerCase() !== 'false';
 const defaultLiveBoardModel = geminiFallbackModels.find((model) => model.includes('flash-lite')) || geminiCodeModel;
 const liveBoardModel = resolveGeminiModel(process.env.LIVE_BOARD_MODEL || defaultLiveBoardModel);
@@ -154,8 +163,8 @@ const liveManimPreset = ['veryfast', 'faster', 'fast', 'medium'].includes(proces
   ? process.env.LIVE_MANIM_PRESET
   : 'veryfast';
 const liveManimFragmentSeconds = Math.max(
-  2,
-  Math.min(10, Number(process.env.LIVE_MANIM_FRAGMENT_SECONDS || 5))
+  1,
+  Math.min(4, Number(process.env.LIVE_MANIM_FRAGMENT_SECONDS || 1))
 );
 const manimRenderFps = 60;
 const manimFont = process.env.MANIM_FONT || 'Georgia';
@@ -1609,7 +1618,14 @@ function rejectPendingSegments(job, error) {
   }
 }
 
-async function createVideoJob({ plan, lessonId, userId, total, initialSegments = [] }) {
+async function createVideoJob({
+  plan,
+  lessonId,
+  userId,
+  total,
+  initialSegments = [],
+  promptReceivedAt = null
+}) {
   const segmentTotal = Math.max(1, Number(total || initialSegments.length || plan?.segments?.length || 1));
   const jobPlan = {
     ...(plan || {}),
@@ -1643,6 +1659,8 @@ async function createVideoJob({ plan, lessonId, userId, total, initialSegments =
       firstContentReadyAt: null,
       firstContentSeconds: null,
       promptToFirstContentMs: null,
+      firstContentTargetMs: 10000,
+      firstContentDeadlineMet: null,
       completedAt: null,
       durationSeconds: null,
       bytes: 0,
@@ -1656,7 +1674,7 @@ async function createVideoJob({ plan, lessonId, userId, total, initialSegments =
     })),
     result: null,
     error: null,
-    startedAt: new Date().toISOString(),
+    startedAt: promptReceivedAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     completedAt: null,
     listeners: new Set(),
@@ -1665,11 +1683,15 @@ async function createVideoJob({ plan, lessonId, userId, total, initialSegments =
     _audioDeferred: Array.from({ length: segmentTotal }, () => createDeferred()),
     _liveManimSession: null,
     _livePreviewReady: createDeferred(),
-    _livePreviewReadyResolved: false
+    _livePreviewReadyResolved: false,
+    _livePreviewFinished: createDeferred(),
+    _livePreviewFinishedResolved: false
   };
   if (!job.liveManimEnabled) {
     job._livePreviewReadyResolved = true;
     job._livePreviewReady.resolve({ reason: 'disabled' });
+    job._livePreviewFinishedResolved = true;
+    job._livePreviewFinished.resolve({ reason: 'disabled' });
   }
   if (job.liveManim.streamUrl) {
     job.liveManim.streamUrl = job.liveManim.streamUrl.replace('__JOB_ID__', job.id);
@@ -1712,6 +1734,7 @@ function normalizeOutline(rawOutline, input, segmentCount) {
     common_misconceptions: Array.isArray(rawOutline.common_misconceptions)
       ? rawOutline.common_misconceptions
       : [],
+    first_segment: rawOutline.first_segment || null,
     segments: outlineSegments.slice(0, segmentCount).map((segment, index) => ({
       index,
       title: String(segment.title || `Bölüm ${index + 1}`),
@@ -1740,7 +1763,7 @@ function normalizeDetailedSegment(rawValue, outlineSegment, index, durationSecon
   return {
     id: `segment-${index + 1}`,
     title: String(value?.title || outlineSegment.title || `Bölüm ${index + 1}`),
-    duration_seconds: Math.max(35, Math.min(100, Number(value?.duration_seconds || durationSeconds))),
+    duration_seconds: Number(durationSeconds),
     learning_objective: String(
       value?.learning_objective || outlineSegment.learning_objective || ''
     ),
@@ -1764,10 +1787,14 @@ function normalizeDetailedSegment(rawValue, outlineSegment, index, durationSecon
 async function generateProgressiveLessonPlan(job, input, plannerPrompt) {
   const segmentCount = job.total;
   const targetMinutes = Number(input.target_video_minutes);
-  const durationSeconds = Math.round((targetMinutes * 60) / segmentCount);
+  const segmentDurations = resolveStreamingSegmentDurations({
+    targetMinutes,
+    segmentCount,
+    firstSegmentSeconds: firstSegmentTargetSeconds
+  });
   try {
     updateJob(job, {
-      current: 'Sekiz bölümlük ders taslağı hazırlanıyor.',
+      current: `${segmentCount} bölümlük ders taslağı ve ilk gerçek segment hazırlanıyor.`,
       message: `0/${segmentCount} segment planlandı.`
     });
     const outlineResult = await generateLlmText({
@@ -1775,8 +1802,10 @@ async function generateProgressiveLessonPlan(job, input, plannerPrompt) {
       model: planModel,
       systemInstruction: `${plannerPrompt}
 
-Bu aşamada yalnızca kısa bir ders iskeleti üret. Detaylı narration veya animation kodu yazma.
+Bu aşamada kısa ders iskeletini ve ilk oynatılacak segmentin eksiksiz ayrıntısını birlikte üret.
 Tam olarak ${segmentCount} bölüm başlığı ve her bölümün tek cümlelik öğrenme hedefini üret.
+first_segment alanında ilk bölümün yaklaşık ${segmentDurations[0]} saniyelik doğal Türkçe narration metnini ve 4-6 sade görsel aksiyonunu eksiksiz ver.
+İlk narration doğrudan konuya girsin; selamlama, hazırlık veya "dersimize başlıyoruz" cümlesi kullanma.
 Yalnızca geçerli JSON döndür.`,
       userText: JSON.stringify({
         ...input,
@@ -1788,17 +1817,29 @@ Yalnızca geçerli JSON döndür.`,
           analogy: { everyday_scenario: 'string', mapping: 'string' },
           learning_objectives: ['string'],
           common_misconceptions: ['string'],
+          first_segment: {
+            id: 'segment-1',
+            title: 'string',
+            duration_seconds: segmentDurations[0],
+            learning_objective: 'string',
+            narration: `${segmentDurations[0]} saniyeye sığan yaklaşık ${Math.round(segmentDurations[0] * 2.2)} kelimelik doğal Türkçe anlatım`,
+            animation: {
+              description: 'string',
+              sequence: ['4-6 kısa ve render edilmesi kolay gerçek ders görseli']
+            }
+          },
           segments: Array.from({ length: segmentCount }, (_, index) => ({
             index,
             title: 'string',
             learning_objective: 'string',
-            role: 'Bu bölümün ders akışındaki görevi'
+            role: 'Bu bölümün ders akışındaki görevi',
+            duration_seconds: segmentDurations[index]
           }))
         }
       }, null, 2),
       json: true,
       temperature: 0.4,
-      maxCompletionTokens: 3200,
+      maxCompletionTokens: 4800,
       withMetadata: true
     });
     const outline = normalizeOutline(
@@ -1816,10 +1857,11 @@ Yalnızca geçerli JSON döndür.`,
       common_misconceptions: outline.common_misconceptions
     });
     updateJob(job, {
-      current: 'Ders taslağı hazır; ilk segment detaylandırılıyor.'
+      current: 'Ders taslağı ve ilk gerçek segment hazır.'
     });
 
     const createDetail = async (outlineSegment, index) => {
+      const durationSeconds = segmentDurations[index];
       if (job.status === 'failed') {
         throw new Error('Video üretim hattı durduğu için planlama iptal edildi.');
       }
@@ -1829,6 +1871,7 @@ Yalnızca geçerli JSON döndür.`,
         systemInstruction: `Sen Kara Tahta'nın eğitim videosu planlayıcısısın.
 Yalnızca verilen tek segmenti ayrıntılandır ve yalnızca geçerli JSON döndür.
 Narration doğal Türkçe, doğrudan TTS'e uygun ve yaklaşık ${durationSeconds} saniyelik dolu anlatım olsun.
+Narration en fazla ${Math.round(durationSeconds * 2.2)} kelime olsun.
 Konuyu gerçekten öğret; tanım, sezgi ve gerekiyorsa adım adım örnek kullan.
 animation.sequence 4-8 sade, öğretici ve Manim ile uygulanabilir görsel aksiyon içersin.
 Başka segment, markdown veya açıklama ekleme.`,
@@ -1879,7 +1922,22 @@ Başka segment, markdown veya açıklama ekleme.`,
     };
 
     const detailedSegments = new Array(segmentCount);
-    detailedSegments[0] = await createDetail(outline.segments[0], 0);
+    if (outline.first_segment?.narration) {
+      detailedSegments[0] = normalizeDetailedSegment(
+        outline.first_segment,
+        outline.segments[0],
+        0,
+        segmentDurations[0]
+      );
+      await persist(`${detailedSegments[0].id}/progressive-plan`, () => saveSegments({
+        lessonId: job.lessonId,
+        segments: [detailedSegments[0]],
+        startIndex: 0
+      }));
+      setJobSegment(job, 0, detailedSegments[0]);
+    } else {
+      detailedSegments[0] = await createDetail(outline.segments[0], 0);
+    }
     const remaining = outline.segments.slice(1).map((segment, offset) => (
       limitPlanDetail(async () => {
         const index = offset + 1;
@@ -1918,27 +1976,43 @@ function markLivePreviewReady(job, details = {}) {
   if (job._livePreviewReadyResolved) return;
   job._livePreviewReadyResolved = true;
   const readyAt = new Date();
-  const promptToFirstContentMs = Math.max(
+  const elapsedMs = Math.max(
     0,
     readyAt.getTime() - new Date(job.startedAt).getTime()
   );
-  job.liveManim.firstContentReadyAt = readyAt.toISOString();
-  job.liveManim.firstContentSeconds = Number(details.timelineSeconds || 0) || null;
-  job.liveManim.promptToFirstContentMs = promptToFirstContentMs;
+  const reason = details.reason || 'first_real_fragment';
+  const hasRealContent = !['disabled', 'live_stream_failed'].includes(reason);
+  if (hasRealContent) {
+    job.liveManim.firstContentReadyAt = readyAt.toISOString();
+    job.liveManim.firstContentSeconds = Number(details.timelineSeconds || 0) || null;
+    job.liveManim.promptToFirstContentMs = elapsedMs;
+    job.liveManim.firstContentDeadlineMet = elapsedMs <= job.liveManim.firstContentTargetMs;
+  }
   job._livePreviewReady.resolve({
-    reason: details.reason || 'first_real_fragment',
-    promptToFirstContentMs
+    reason,
+    promptToFirstContentMs: hasRealContent ? elapsedMs : null
   });
-  logInfo(`Job ${job.id}: ilk gerçek canlı ders parçası hazır`, {
-    promptToFirstContentMs,
+  logInfo(`Job ${job.id}: canlı başlangıç kapısı açıldı`, {
+    promptToFirstContentMs: hasRealContent ? elapsedMs : null,
+    deadlineMet: job.liveManim.firstContentDeadlineMet,
     timelineSeconds: job.liveManim.firstContentSeconds,
-    reason: details.reason || 'first_real_fragment'
+    reason
+  });
+}
+
+function markLivePreviewFinished(job, details = {}) {
+  if (job._livePreviewFinishedResolved) return;
+  job._livePreviewFinishedResolved = true;
+  job._livePreviewFinished.resolve({
+    reason: details.reason || 'live_stream_completed',
+    durationSeconds: Number(details.durationSeconds || 0) || null
   });
 }
 
 async function runLiveManimPreview(job) {
   if (!liveBoardEnabled || !liveManimEnabled || !job.total) {
     markLivePreviewReady(job, { reason: 'disabled' });
+    markLivePreviewFinished(job, { reason: 'disabled' });
     return;
   }
 
@@ -1961,7 +2035,7 @@ async function runLiveManimPreview(job) {
           reason: 'first_real_mp4_fragment'
         });
         updateJob(job, {
-          current: `İlk gerçek ${liveManimFragmentSeconds} saniyelik ders parçası yayında.`
+          current: 'İlk gerçek ders segmenti oynatılıyor.'
         });
       }
       mp4ProbeTail = probe.subarray(Math.max(0, probe.length - 7));
@@ -1979,6 +2053,11 @@ async function runLiveManimPreview(job) {
           actionId: event.action_id,
           actionType: event.action_type,
           error: event.message
+        });
+      } else if (event.event === 'input_error') {
+        logInfo(`Job ${job.id}: Live Manim bozuk girdi satırını atladı`, {
+          error: event.message,
+          rawLine: String(event.raw_line || '').slice(0, 300)
         });
       }
     });
@@ -2002,21 +2081,36 @@ async function runLiveManimPreview(job) {
     for (let index = 0; index < job.total; index += 1) {
       const segment = await job._segmentDeferred[index].promise;
       const segmentState = job.segments[index];
-      const tts = await job._audioDeferred[index].promise;
       segmentState.liveManim = {
-        status: 'streaming',
+        status: 'preparing',
         model: preferredModel || liveBoardModel,
         commandCount: 0,
         error: null
       };
+      const bufferedCommands = [];
+      let commandSink = null;
+      const commandResultPromise = streamLiveBoardCommands(
+        segment,
+        (command) => {
+          if (commandSink) commandSink(command);
+          else bufferedCommands.push(command);
+        },
+        preferredModel
+      ).then(
+        (result) => ({ result, error: null }),
+        (error) => ({ result: null, error })
+      );
+      updateJob(job, {
+        current: `${segment.id}: ses ve gerçek ders görselleri paralel hazırlanıyor...`
+      });
+
+      const tts = await job._audioDeferred[index].promise;
       session.beginSegment({
         segmentId: segment.id,
         audioPath: resolveRenderRelative(tts.audioRelativePath),
         durationSeconds: tts.durationSeconds
       });
-      updateJob(job, {
-        current: `${segment.id}: Gemini Manim aksiyonlarini canli yaziyor...`
-      });
+      segmentState.liveManim.status = 'streaming';
 
       const seenIds = new Set();
       const appendCommand = (command) => {
@@ -2030,6 +2124,7 @@ async function runLiveManimPreview(job) {
           current: `${segment.id}: ${segmentState.liveManim.commandCount} Manim aksiyonu yayina girdi.`
         });
       };
+      commandSink = appendCommand;
       if (index > 0) {
         appendCommand({
           id: `${segment.id}-transition`,
@@ -2049,15 +2144,21 @@ async function runLiveManimPreview(job) {
           stroke_width: 0.7
         });
       }
+      for (const command of bufferedCommands) appendCommand(command);
+      bufferedCommands.length = 0;
 
-      try {
-        const result = await streamLiveBoardCommands(segment, appendCommand, preferredModel);
+      const commandOutcome = await commandResultPromise;
+      if (commandOutcome.result) {
+        const result = commandOutcome.result;
         preferredModel = result.model;
         segmentState.liveManim.status = 'queued';
         segmentState.liveManim.model = result.model;
-      } catch (error) {
+      } else {
+        const error = commandOutcome.error;
         logInfo(`${segment.id}: Live Manim fallback aksiyonlari kullaniliyor`, { error: error.message });
-        for (const command of buildFallbackLiveBoardCommands(segment)) appendCommand(command);
+        if (segmentState.liveManim.commandCount === 0) {
+          for (const command of buildFallbackLiveBoardCommands(segment)) appendCommand(command);
+        }
         segmentState.liveManim.status = 'fallback';
         segmentState.liveManim.error = error.message;
       }
@@ -2079,12 +2180,20 @@ async function runLiveManimPreview(job) {
       timelineSeconds: actualDuration,
       reason: 'live_stream_completed'
     });
+    markLivePreviewFinished(job, {
+      reason: 'live_stream_completed',
+      durationSeconds: actualDuration
+    });
     updateJob(job, { current: 'Canli Manim dersi tamamlandi.' });
   } catch (error) {
     job.liveManim.status = 'failed';
     job.liveManim.error = error.message || 'Canli Manim yayini basarisiz oldu.';
-    logInfo(`Job ${job.id}: canli Manim hata verdi`, { error: job.liveManim.error });
+    logInfo(`Job ${job.id}: canli Manim hata verdi`, {
+      error: job.liveManim.error,
+      traceback: String(error.details || '').slice(-2000) || null
+    });
     markLivePreviewReady(job, { reason: 'live_stream_failed' });
+    markLivePreviewFinished(job, { reason: 'live_stream_failed' });
     updateJob(job, { current: 'Canli Manim kullanilamadi; parca video akisi devam ediyor.' });
   }
 }
@@ -2127,11 +2236,14 @@ async function runFullVideoJob(job) {
         }));
         segmentState.status = 'speech';
         updateJob(job, { current: `${segment.id}: plan anlatimi yayina hazirlaniyor...` });
-        const targetSegmentDuration = Math.ceil(
-          (Number(job.plan.estimated_duration_minutes || targetVideoMinutes) * 60) / job.total
+        const targetSegmentDuration = Math.max(
+          12,
+          Number(segment.duration_seconds) || Math.ceil(
+            (Number(job.plan.estimated_duration_minutes || targetVideoMinutes) * 60) / job.total
+          )
         );
         const speech = segment.narration
-          ? buildPlannedSpeech(segment, { maxDurationSeconds: targetSegmentDuration + 12 })
+          ? buildPlannedSpeech(segment, { maxDurationSeconds: targetSegmentDuration + 2 })
           : await limitSpeech(() => createSpeechScript(segment));
         segmentState.speech = speech;
         await persist(`${segment.id}/speech`, async () => {
@@ -2153,8 +2265,8 @@ async function runFullVideoJob(job) {
         segmentState.status = index === 0 ? 'tts_code' : 'tts';
         updateJob(job, {
           current: index === 0
-            ? `${segment.id}: ses ve Manim kodu paralel uretiliyor...`
-            : `${segment.id}: ses uretiliyor; Manim kodu ilk segmentten sonra baslayacak...`
+            ? `${segment.id}: ses ve canlı ders görselleri paralel üretiliyor...`
+            : `${segment.id}: ses üretiliyor; arşiv Manim kodu canlı dersten sonra başlayacak...`
         });
         const ttsPromise = limitTts(() => synthesizeSpeech(speech.speech_text, segment.id))
           .then((tts) => {
@@ -2168,6 +2280,12 @@ async function runFullVideoJob(job) {
             return tts;
           });
         const codePromise = (async () => {
+          if (index === 0 && job.liveManimEnabled) {
+            await job._livePreviewFinished.promise;
+            updateJob(job, {
+              current: `${segment.id}: canlı ders önde; arşiv Manim kodu şimdi hazırlanıyor...`
+            });
+          }
           if (index > 0) {
             await firstReadyToRender;
             segmentState.status = 'code';
@@ -2185,7 +2303,7 @@ async function runFullVideoJob(job) {
           }));
         })();
         if (index === 0) {
-          logInfo(`Job ${job.id}: ilk segment TTS ve Manim kodu kuyruğa girdi`);
+          logInfo(`Job ${job.id}: ilk segment TTS kuyruğa girdi; arşiv kodu canlı yayını bekliyor`);
           firstParallelStartedResolve();
         }
 
@@ -2262,23 +2380,6 @@ async function runFullVideoJob(job) {
 
       if (!prepared.ok) {
         throw prepared.error;
-      }
-
-      if (index === 0 && job.liveManimEnabled && !job._livePreviewReadyResolved) {
-        updateJob(job, {
-          current: `İlk gerçek ${liveManimFragmentSeconds} saniyelik canlı ders parçasına öncelik veriliyor...`,
-          message: 'Canlı başlangıç hazırlanırken ağır final renderı kısa süre bekletiliyor.'
-        });
-        let releaseWait;
-        const maxPriorityWait = new Promise((resolve) => {
-          releaseWait = setTimeout(() => resolve({ reason: 'priority_wait_timeout' }), 15000);
-        });
-        const liveStart = await Promise.race([
-          job._livePreviewReady.promise,
-          maxPriorityWait
-        ]);
-        clearTimeout(releaseWait);
-        logInfo(`Job ${job.id}: final render bekleme sonucu`, liveStart);
       }
 
       segmentState.status = 'render';
@@ -2447,7 +2548,12 @@ app.get('/api/config', async (_req, res, next) => {
       backgroundMusicVolume: musicVolume,
       backgroundMusicFadeSeconds: musicFadeSeconds,
       targetVideoMinutes,
-      targetSegmentCount,
+      targetSegmentCount: resolveStreamingSegmentCount({
+        targetMinutes: targetVideoMinutes,
+        estimatedProductionSeconds: segmentProductionBudgetSeconds
+      }),
+      segmentProductionBudgetSeconds,
+      firstSegmentTargetSeconds,
       hasSupabase: supabaseConfigured,
       mediaStorageProvider,
       hasRailwayBucket: railwayMediaConfigured,
@@ -2658,7 +2764,13 @@ app.post('/api/plan', async (req, res, next) => {
     const targetMinutes = input.target_video_minutes;
     const segmentCount = resolveStreamingSegmentCount({
       targetMinutes,
-      requestedSegmentCount
+      requestedSegmentCount,
+      estimatedProductionSeconds: segmentProductionBudgetSeconds
+    });
+    const segmentDurations = resolveStreamingSegmentDurations({
+      targetMinutes,
+      segmentCount,
+      firstSegmentSeconds: firstSegmentTargetSeconds
     });
     const targetDurationPerSegment = Math.round((targetMinutes * 60) / segmentCount);
     input.target_segment_count = segmentCount;
@@ -2679,6 +2791,7 @@ ZORUNLU:
 - estimated_duration_minutes degeri ${targetMinutes} civarinda olsun.
 - segments dizisi tam olarak ${segmentCount} segment icersin.
 - Her segment yaklaşık ${targetDurationPerSegment} saniye olsun; toplam süre ${targetMinutes} dakikaya yaklaşsın.
+- İlk segment ${segmentDurations[0]} saniye, sonraki segmentler yaklaşık ${segmentDurations[1] || segmentDurations[0]} saniye olsun.
 - Her narration alani TTS'e dogrudan gidecek kadar temiz, dogal Turkce ve kendi duration_seconds suresine sigacak uzunlukta olsun.
 - Ilk segment merak uyandiran tek bir fikirle hemen baslasin; uzun selamlama veya ders ozeti yapmasin.
 - Her animation.sequence en fazla 4 kisa ve render edilmesi kolay gorsel aksiyon icersin.
@@ -2957,6 +3070,7 @@ app.post('/api/concat', async (req, res, next) => {
 });
 
 app.post('/api/generate-lesson', async (req, res, next) => {
+  const promptReceivedAt = new Date().toISOString();
   try {
     const userContext = await resolveRequestUser(req);
     const topic = String(req.body.topic || '').trim();
@@ -2971,7 +3085,8 @@ app.post('/api/generate-lesson', async (req, res, next) => {
     );
     const segmentCount = resolveStreamingSegmentCount({
       targetMinutes,
-      requestedSegmentCount
+      requestedSegmentCount,
+      estimatedProductionSeconds: segmentProductionBudgetSeconds
     });
     const input = {
       topic,
@@ -3008,7 +3123,8 @@ app.post('/api/generate-lesson', async (req, res, next) => {
       plan,
       lessonId: lesson?.id || null,
       userId: userContext.profileId,
-      total: segmentCount
+      total: segmentCount,
+      promptReceivedAt
     });
     logInfo(`Job ${job.id}: kademeli plan ve video üretimi başlatıldı`, {
       topic,

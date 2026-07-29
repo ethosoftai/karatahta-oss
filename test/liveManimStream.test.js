@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 
 import { buildLiveManimStartMessage } from '../services/liveManimStream.js';
 
-test('canlı Manim varsayılan olarak beş saniyelik MP4 fragmentleri ister', () => {
+test('ağ fragmentini kullanıcı segmentinden bağımsız olarak bir saniye tutar', () => {
   const message = buildLiveManimStartMessage();
 
   assert.equal(message.type, 'start');
-  assert.equal(message.fragment_seconds, 5);
+  assert.equal(message.fragment_seconds, 1);
   assert.equal(message.fps, 60);
   assert.equal(message.crf, 20);
   assert.equal(message.preset, 'veryfast');
@@ -15,10 +15,10 @@ test('canlı Manim varsayılan olarak beş saniyelik MP4 fragmentleri ister', ()
 
 test('canlı Manim fragment süresini worker mesajına aktarır', () => {
   const message = buildLiveManimStartMessage({
-    fragmentSeconds: 7,
+    fragmentSeconds: 3,
     fps: 24
   });
 
-  assert.equal(message.fragment_seconds, 7);
+  assert.equal(message.fragment_seconds, 3);
   assert.equal(message.fps, 24);
 });

@@ -4,12 +4,36 @@ function clamp(value, min, max) {
 
 export function resolveStreamingSegmentCount({
   targetMinutes,
-  requestedSegmentCount
+  estimatedProductionSeconds = 15
 }) {
   const minutes = clamp(Number(targetMinutes) || 1, 1, 30);
-  const requested = clamp(Math.round(Number(requestedSegmentCount) || 1), 1, 40);
-  if (minutes >= 8 && minutes <= 10) return 8;
-  return requested;
+  const productionSeconds = clamp(Number(estimatedProductionSeconds) || 15, 5, 60);
+  const targetPlaybackSeconds = Math.max(30, Math.ceil(productionSeconds * 1.5));
+  return clamp(Math.round((minutes * 60) / targetPlaybackSeconds), 2, 40);
+}
+
+export function resolveStreamingSegmentDurations({
+  targetMinutes,
+  segmentCount,
+  firstSegmentSeconds = 20
+}) {
+  const totalSeconds = clamp(Number(targetMinutes) || 1, 1, 30) * 60;
+  const count = clamp(Math.round(Number(segmentCount) || 1), 1, 40);
+  if (count === 1) return [Number(totalSeconds.toFixed(1))];
+
+  const averageSeconds = totalSeconds / count;
+  const firstSeconds = clamp(
+    Number(firstSegmentSeconds) || 20,
+    12,
+    Math.min(24, averageSeconds)
+  );
+  const remainingSeconds = (totalSeconds - firstSeconds) / (count - 1);
+  const durations = Array.from({ length: count }, (_, index) => Number(
+    (index === 0 ? firstSeconds : remainingSeconds).toFixed(1)
+  ));
+  const beforeLast = durations.slice(0, -1).reduce((sum, value) => sum + value, 0);
+  durations[durations.length - 1] = Number((totalSeconds - beforeLast).toFixed(1));
+  return durations;
 }
 
 function narrationWithinWordBudget(text, maxWords) {

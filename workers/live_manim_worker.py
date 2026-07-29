@@ -457,6 +457,14 @@ def main() -> None:
             continue
         try:
             message = json.loads(line)
+        except json.JSONDecodeError as error:
+            emit(
+                "input_error",
+                message=str(error),
+                raw_line=line[:500],
+            )
+            continue
+        try:
             message_type = message.get("type")
             if message_type == "start":
                 settings = StreamSettings(
@@ -467,7 +475,7 @@ def main() -> None:
                     preset=safe_text(message.get("preset"), 12)
                     if safe_text(message.get("preset"), 12) in {"veryfast", "faster", "fast", "medium"}
                     else "veryfast",
-                    fragment_seconds=clamp(message.get("fragment_seconds"), 2, 10, 5),
+                    fragment_seconds=clamp(message.get("fragment_seconds"), 1, 4, 1),
                     background=safe_text(message.get("background"), 24) or "#071512",
                 )
                 session = LiveManimSession(settings)

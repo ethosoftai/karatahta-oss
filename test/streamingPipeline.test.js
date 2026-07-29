@@ -3,25 +3,35 @@ import assert from 'node:assert/strict';
 
 import {
   buildPlannedSpeech,
-  resolveStreamingSegmentCount
+  resolveStreamingSegmentCount,
+  resolveStreamingSegmentDurations
 } from '../services/streamingPipeline.js';
 
-test('kısa videolarda kullanıcının istediği segment sayısını korur', () => {
+test('iki dakikalık dersi yaklaşık otuz saniyelik dört mantıksal segmente böler', () => {
   assert.equal(resolveStreamingSegmentCount({
     targetMinutes: 2,
     requestedSegmentCount: 2
-  }), 2);
+  }), 4);
 });
 
-test('sekiz-on dakikalık dersleri sekiz ana segmentte tutar', () => {
+test('segment sayısını video süresi ve üretim bütçesinden otomatik hesaplar', () => {
   assert.equal(resolveStreamingSegmentCount({
     targetMinutes: 10,
-    requestedSegmentCount: 15
-  }), 8);
+    requestedSegmentCount: 8
+  }), 20);
   assert.equal(resolveStreamingSegmentCount({
-    targetMinutes: 8,
-    requestedSegmentCount: 4
-  }), 8);
+    targetMinutes: 2,
+    estimatedProductionSeconds: 25
+  }), 3);
+});
+
+test('ilk segmenti hızlı başlangıç için kısa, kalanları yaklaşık otuz saniye tutar', () => {
+  const durations = resolveStreamingSegmentDurations({
+    targetMinutes: 2,
+    segmentCount: 4
+  });
+  assert.deepEqual(durations, [20, 33.3, 33.3, 33.4]);
+  assert.equal(Number(durations.reduce((sum, value) => sum + value, 0).toFixed(1)), 120);
 });
 
 test('plan anlatımından kısa TTS metni ve eşit dağılmış senkron ipuçları üretir', () => {

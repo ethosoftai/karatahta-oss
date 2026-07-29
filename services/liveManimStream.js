@@ -39,7 +39,7 @@ export function buildLiveManimStartMessage(settings = {}) {
     fps: settings.fps || 60,
     crf: settings.crf || 20,
     preset: settings.preset || 'veryfast',
-    fragment_seconds: settings.fragmentSeconds || 5,
+    fragment_seconds: settings.fragmentSeconds || 1,
     background: settings.background || '#071512'
   };
 }
