@@ -20,6 +20,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "pg": "^8.22.0",
+    "standardwebhooks": "^1.0.0",
     "undici": "^8.5.0"
   }
 }

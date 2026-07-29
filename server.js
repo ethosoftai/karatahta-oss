@@ -15,6 +15,12 @@ import {
   DEFAULT_GEMINI_FALLBACK_MODELS,
   runGeminiModelRoute
 } from './services/geminiRouter.js';
+import {
+  buildSendEmailJobs,
+  renderAuthEmail,
+  sendWithResend,
+  verifySendEmailHook
+} from './services/authEmailHook.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
 import {
@@ -92,6 +98,10 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const authRequired = String(process.env.AUTH_REQUIRED || 'true').toLowerCase() !== 'false';
 const authRedirectUrl = String(process.env.AUTH_REDIRECT_URL || '').trim();
+const sendEmailHookSecret = String(process.env.SEND_EMAIL_HOOK_SECRET || '').trim();
+const resendApiKey = String(process.env.RESEND_API_KEY || '').trim();
+const authEmailFrom = String(process.env.AUTH_EMAIL_FROM || '').trim();
+const authEmailReplyTo = String(process.env.AUTH_EMAIL_REPLY_TO || '').trim();
 const signedVideoUrlTtlSeconds = process.env.SUPABASE_SIGNED_URL_TTL_SECONDS || 3600;
 const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
@@ -182,7 +192,14 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '20mb' }));
+app.use(express.json({
+  limit: '20mb',
+  verify: (req, _res, buffer) => {
+    if (req.originalUrl?.startsWith('/api/auth/hooks/send-email')) {
+      req.rawBody = Buffer.from(buffer);
+    }
+  }
+}));
 app.use(express.static(publicDir));
 app.use('/renders', express.static(rendersDir));
 
@@ -1792,8 +1809,48 @@ app.get('/api/config', async (_req, res, next) => {
       mediaStorageProvider,
       hasRailwayBucket: railwayMediaConfigured,
       authRequired,
-      authRedirectConfigured: Boolean(authRedirectUrl)
+      authRedirectConfigured: Boolean(authRedirectUrl),
+      authEmailHookConfigured: Boolean(sendEmailHookSecret && resendApiKey && authEmailFrom)
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/hooks/send-email', async (req, res, next) => {
+  try {
+    const payload = req.rawBody;
+    const webhookId = String(req.get('webhook-id') || '');
+    const event = verifySendEmailHook({
+      payload,
+      secret: sendEmailHookSecret,
+      headers: {
+        'webhook-id': webhookId,
+        'webhook-timestamp': String(req.get('webhook-timestamp') || ''),
+        'webhook-signature': String(req.get('webhook-signature') || '')
+      }
+    });
+    const jobs = buildSendEmailJobs(event);
+    const results = await Promise.all(jobs.map(async (job, index) => {
+      const email = renderAuthEmail(job, {
+        supabaseUrl: process.env.SUPABASE_URL
+      });
+      return sendWithResend({
+        apiKey: resendApiKey,
+        from: authEmailFrom,
+        replyTo: authEmailReplyTo,
+        to: job.to,
+        subject: email.subject,
+        html: email.html,
+        text: email.text,
+        idempotencyKey: webhookId ? `${webhookId}-${index}` : undefined
+      });
+    }));
+    logInfo('Supabase auth e-postasi Resend ile gonderildi', {
+      action: event?.email_data?.email_action_type,
+      count: results.length
+    });
+    res.json({});
   } catch (error) {
     next(error);
   }
