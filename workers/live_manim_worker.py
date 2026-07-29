@@ -75,9 +75,9 @@ def safe_color(value: Any, fallback: str) -> str:
 class StreamSettings:
     width: int = 1280
     height: int = 720
-    fps: int = 20
-    crf: int = 23
-    preset: str = "fast"
+    fps: int = 60
+    crf: int = 20
+    preset: str = "veryfast"
     fragment_seconds: float = 5.0
     background: str = "#071512"
 
@@ -234,6 +234,10 @@ class LiveManimSession:
                 "1:a:0",
                 "-c:v",
                 "libx264",
+                "-profile:v",
+                "main",
+                "-level:v",
+                "4.2",
                 "-preset",
                 self.settings.preset,
                 "-tune",
@@ -458,11 +462,11 @@ def main() -> None:
                 settings = StreamSettings(
                     width=int(clamp(message.get("width"), 320, 1920, 1280)),
                     height=int(clamp(message.get("height"), 180, 1080, 720)),
-                    fps=int(clamp(message.get("fps"), 10, 30, 20)),
-                    crf=int(clamp(message.get("crf"), 18, 30, 23)),
+                    fps=int(clamp(message.get("fps"), 10, 60, 60)),
+                    crf=int(clamp(message.get("crf"), 18, 30, 20)),
                     preset=safe_text(message.get("preset"), 12)
                     if safe_text(message.get("preset"), 12) in {"veryfast", "faster", "fast", "medium"}
-                    else "fast",
+                    else "veryfast",
                     fragment_seconds=clamp(message.get("fragment_seconds"), 2, 10, 5),
                     background=safe_text(message.get("background"), 24) or "#071512",
                 )

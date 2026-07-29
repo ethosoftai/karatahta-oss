@@ -28,6 +28,7 @@ import {
   buildPlannedSpeech,
   resolveStreamingSegmentCount
 } from './services/streamingPipeline.js';
+import { buildSilentWav } from './services/wavAudio.js';
 import {
   buildBurnSubtitleArgs,
   buildConcatArgs,
@@ -146,17 +147,18 @@ const liveBoardEnabled = String(process.env.LIVE_BOARD_ENABLED || 'true').toLowe
 const defaultLiveBoardModel = geminiFallbackModels.find((model) => model.includes('flash-lite')) || geminiCodeModel;
 const liveBoardModel = resolveGeminiModel(process.env.LIVE_BOARD_MODEL || defaultLiveBoardModel);
 const liveManimEnabled = String(process.env.LIVE_MANIM_ENABLED || 'true').toLowerCase() !== 'false';
-const liveManimWidth = Math.max(640, Math.min(1280, Number(process.env.LIVE_MANIM_WIDTH || 1280)));
-const liveManimHeight = Math.max(360, Math.min(720, Number(process.env.LIVE_MANIM_HEIGHT || 720)));
-const liveManimFps = Math.max(10, Math.min(30, Number(process.env.LIVE_MANIM_FPS || 20)));
-const liveManimCrf = Math.max(18, Math.min(30, Number(process.env.LIVE_MANIM_CRF || 23)));
+const liveManimWidth = 1280;
+const liveManimHeight = 720;
+const liveManimFps = 60;
+const liveManimCrf = 20;
 const liveManimPreset = ['veryfast', 'faster', 'fast', 'medium'].includes(process.env.LIVE_MANIM_PRESET)
   ? process.env.LIVE_MANIM_PRESET
-  : 'fast';
+  : 'veryfast';
 const liveManimFragmentSeconds = Math.max(
   2,
   Math.min(10, Number(process.env.LIVE_MANIM_FRAGMENT_SECONDS || 5))
 );
+const manimRenderFps = 60;
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
 const mathTexAvailable = mathTexMode === '1' || mathTexMode === 'true' || (mathTexMode === 'auto' && Boolean(miktexBin));
@@ -1113,7 +1115,7 @@ async function muxAudio(
         '-movflags', '+faststart',
         outputPath
       ],
-      { timeoutMs: 180000 }
+      { timeoutMs: 600000 }
     );
 
     if (result.code !== 0) {
@@ -1425,7 +1427,19 @@ async function renderManimVideo({
     logInfo(`${safeSegmentId}: Manim render basladi`, { attempt: attempt + 1, className });
     result = await runCommand(
       'python',
-      ['-m', 'manim', quality, filePath, className, '--media_dir', mediaDir],
+      [
+        '-m',
+        'manim',
+        quality,
+        filePath,
+        className,
+        '--media_dir',
+        mediaDir,
+        '--resolution',
+        '1280,720',
+        '--fps',
+        String(manimRenderFps)
+      ],
       { timeoutMs: 180000 }
     );
 
@@ -1891,15 +1905,82 @@ Başka segment, markdown veya açıklama ekleme.`,
   }
 }
 
+function buildLiveIntroCommands(topic) {
+  const cleanTopic = String(topic || 'Yeni ders').trim().slice(0, 120);
+  return [
+    {
+      id: 'kara-intro-title',
+      type: 'title',
+      at_percent: 0,
+      duration_ms: 650,
+      text: cleanTopic,
+      x: 50,
+      y: 20,
+      color: '#f8fafc',
+      font_size: 6.8
+    },
+    {
+      id: 'kara-intro-subtitle',
+      type: 'write',
+      at_percent: 20,
+      duration_ms: 550,
+      text: 'Kara Tahta dersi hazırlanıyor',
+      x: 28,
+      y: 46,
+      color: '#86efac',
+      font_size: 4.3
+    },
+    {
+      id: 'kara-intro-line',
+      type: 'line',
+      at_percent: 48,
+      duration_ms: 550,
+      x: 24,
+      y: 62,
+      x2: 76,
+      y2: 62,
+      color: '#93c5fd',
+      stroke_width: 0.9
+    },
+    {
+      id: 'kara-intro-status',
+      type: 'write',
+      at_percent: 76,
+      duration_ms: 600,
+      text: 'Plan • Ses • Animasyon',
+      x: 31,
+      y: 76,
+      color: '#fde68a',
+      font_size: 3.8
+    },
+    {
+      id: 'kara-intro-hold',
+      type: 'wait',
+      at_percent: 92,
+      duration_ms: 650,
+      text: '',
+      x: 50,
+      y: 50,
+      color: '#f8fafc'
+    }
+  ];
+}
+
 async function runLiveManimPreview(job) {
   if (!liveBoardEnabled || !liveManimEnabled || !job.total) return;
 
   const outputDir = path.join(rendersDir, 'live-manim');
   const outputPath = path.join(outputDir, `${sanitizeSegmentId(job.id)}.mp4`);
+  const introAudioPath = path.join(outputDir, `${sanitizeSegmentId(job.id)}-intro.wav`);
+  const introDurationSeconds = 8;
   job.liveManim.status = 'waiting_worker';
   updateJob(job, { current: 'Canli Manim motoru hazirlaniyor...' });
 
   try {
+    await fs.mkdir(outputDir, { recursive: true });
+    await fs.writeFile(introAudioPath, buildSilentWav({
+      durationSeconds: introDurationSeconds
+    }));
     const session = await liveManimPool.acquire({ jobId: job.id, outputPath });
     job._liveManimSession = session;
     session.on('event', (event) => {
@@ -1922,6 +2003,18 @@ async function runLiveManimPreview(job) {
       crf: liveManimCrf,
       preset: liveManimPreset,
       fragmentSeconds: liveManimFragmentSeconds
+    });
+    session.beginSegment({
+      segmentId: 'kara-intro',
+      audioPath: introAudioPath,
+      durationSeconds: introDurationSeconds
+    });
+    for (const command of buildLiveIntroCommands(job.plan.topic)) {
+      session.action(command);
+      job.liveManim.generatedActions += 1;
+    }
+    updateJob(job, {
+      current: 'Konuya özel açılış yayına hazırlanıyor.'
     });
 
     let preferredModel = null;
@@ -1956,25 +2049,23 @@ async function runLiveManimPreview(job) {
           current: `${segment.id}: ${segmentState.liveManim.commandCount} Manim aksiyonu yayina girdi.`
         });
       };
-      if (index > 0) {
-        appendCommand({
-          id: `${segment.id}-transition`,
-          type: 'clear',
-          at_percent: 0,
-          duration_ms: 350,
-          color: '#f8fafc',
-          text: '',
-          x: 50,
-          y: 50,
-          x2: 50,
-          y2: 50,
-          width: 1,
-          height: 1,
-          radius: 1,
-          font_size: 4,
-          stroke_width: 0.7
-        });
-      }
+      appendCommand({
+        id: `${segment.id}-transition`,
+        type: 'clear',
+        at_percent: 0,
+        duration_ms: 350,
+        color: '#f8fafc',
+        text: '',
+        x: 50,
+        y: 50,
+        x2: 50,
+        y2: 50,
+        width: 1,
+        height: 1,
+        radius: 1,
+        font_size: 4,
+        stroke_width: 0.7
+      });
 
       try {
         const result = await streamLiveBoardCommands(segment, appendCommand, preferredModel);
@@ -2007,6 +2098,8 @@ async function runLiveManimPreview(job) {
     job.liveManim.error = error.message || 'Canli Manim yayini basarisiz oldu.';
     logInfo(`Job ${job.id}: canli Manim hata verdi`, { error: job.liveManim.error });
     updateJob(job, { current: 'Canli Manim kullanilamadi; parca video akisi devam ediyor.' });
+  } finally {
+    await fs.unlink(introAudioPath).catch(() => {});
   }
 }
 

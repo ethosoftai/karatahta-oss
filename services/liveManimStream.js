@@ -36,9 +36,9 @@ export function buildLiveManimStartMessage(settings = {}) {
     type: 'start',
     width: settings.width || 1280,
     height: settings.height || 720,
-    fps: settings.fps || 20,
-    crf: settings.crf || 23,
-    preset: settings.preset || 'fast',
+    fps: settings.fps || 60,
+    crf: settings.crf || 20,
+    preset: settings.preset || 'veryfast',
     fragment_seconds: settings.fragmentSeconds || 5,
     background: settings.background || '#071512'
   };
@@ -52,6 +52,8 @@ class LiveManimSession extends EventEmitter {
     this.outputPath = outputPath;
     this.streamToken = null;
     this.chunks = [];
+    this.cachedBytes = 0;
+    this.hasClientConnected = false;
     this.clients = new Set();
     this.bytes = 0;
     this.done = false;
@@ -97,7 +99,10 @@ class LiveManimSession extends EventEmitter {
 
   handleVideoChunk(chunk) {
     const payload = Buffer.from(chunk);
-    this.chunks.push(payload);
+    if (!this.hasClientConnected && this.cachedBytes < 32 * 1024 * 1024) {
+      this.chunks.push(payload);
+      this.cachedBytes += payload.length;
+    }
     this.bytes += payload.length;
     this.fileStream.write(payload);
     for (const client of this.clients) {
@@ -158,6 +163,9 @@ class LiveManimSession extends EventEmitter {
 
   pipeTo(response) {
     for (const chunk of this.chunks) response.write(chunk);
+    this.hasClientConnected = true;
+    this.chunks = [];
+    this.cachedBytes = 0;
     if (this.done) {
       response.end();
       return () => {};
@@ -174,6 +182,7 @@ class LiveManimSession extends EventEmitter {
 
   releaseCachedChunks() {
     this.chunks = [];
+    this.cachedBytes = 0;
   }
 }
 

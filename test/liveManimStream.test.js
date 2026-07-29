@@ -8,7 +8,9 @@ test('canlı Manim varsayılan olarak beş saniyelik MP4 fragmentleri ister', ()
 
   assert.equal(message.type, 'start');
   assert.equal(message.fragment_seconds, 5);
-  assert.equal(message.fps, 20);
+  assert.equal(message.fps, 60);
+  assert.equal(message.crf, 20);
+  assert.equal(message.preset, 'veryfast');
 });
 
 test('canlı Manim fragment süresini worker mesajına aktarır', () => {
