@@ -256,7 +256,6 @@ class LiveManimSession:
                 "aac",
                 "-b:a",
                 "96k",
-                "-shortest",
                 "-movflags",
                 "frag_keyframe+empty_moov+default_base_moof",
                 "-frag_duration",
@@ -371,13 +370,28 @@ class LiveManimSession:
         at_percent = clamp(payload.get("at_percent"), 0, 100, 0)
         target_seconds = self.segment_start + ((at_percent / 100) * self.segment_duration)
         self.wait_until(target_seconds)
-        run_time = clamp(payload.get("duration_ms"), 150, 5000, 1000) / 1000
+        segment_end = self.segment_start + self.segment_duration
+        remaining_seconds = max(0.0, segment_end - self.elapsed)
+        run_time = min(
+            clamp(payload.get("duration_ms"), 150, 5000, 1000) / 1000,
+            remaining_seconds,
+        )
         emit(
             "action_started",
             action_id=action_id,
             action_type=action_type,
             timeline_seconds=round(self.elapsed, 3),
         )
+
+        if run_time < (1 / self.settings.fps):
+            emit(
+                "action_completed",
+                action_id=action_id,
+                action_type=action_type,
+                timeline_seconds=round(self.elapsed, 3),
+                skipped=True,
+            )
+            return
 
         if action_type in {"title", "write", "equation"}:
             mobject = self.text_mobject(payload)
@@ -425,8 +439,6 @@ class LiveManimSession:
         if not self.started or not self.scene or not self.renderer:
             return
         self.wait_until(self.expected_duration)
-        # One final frame prevents a zero-length tail after the last action.
-        self.scene.wait(1 / self.settings.fps, frozen_frame=True)
         self.scene.tear_down()
         self.frame_pipe.close()
         assert self.audio_feeder is not None
