@@ -21,6 +21,7 @@ import {
   buildLiveBoardPrompt,
   createLiveBoardNdjsonParser
 } from './services/liveBoard.js';
+import { LiveManimPool } from './services/liveManimStream.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
 import {
   buildPlannedSpeech,
@@ -141,7 +142,12 @@ const manimQuality = process.env.MANIM_QUALITY || '-qm';
 const streamManimQuality = process.env.STREAM_MANIM_QUALITY || '-ql';
 const streamSegmentSeconds = Math.max(10, Math.min(30, Number(process.env.STREAM_SEGMENT_SECONDS || 20)));
 const liveBoardEnabled = String(process.env.LIVE_BOARD_ENABLED || 'true').toLowerCase() !== 'false';
-const liveBoardModel = resolveGeminiModel(process.env.LIVE_BOARD_MODEL || geminiCodeModel);
+const defaultLiveBoardModel = geminiFallbackModels.find((model) => model.includes('flash-lite')) || geminiCodeModel;
+const liveBoardModel = resolveGeminiModel(process.env.LIVE_BOARD_MODEL || defaultLiveBoardModel);
+const liveManimEnabled = String(process.env.LIVE_MANIM_ENABLED || 'true').toLowerCase() !== 'false';
+const liveManimWidth = Math.max(640, Math.min(1280, Number(process.env.LIVE_MANIM_WIDTH || 854)));
+const liveManimHeight = Math.max(360, Math.min(720, Number(process.env.LIVE_MANIM_HEIGHT || 480)));
+const liveManimFps = Math.max(10, Math.min(30, Number(process.env.LIVE_MANIM_FPS || 15)));
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
 const mathTexAvailable = mathTexMode === '1' || mathTexMode === 'true' || (mathTexMode === 'auto' && Boolean(miktexBin));
@@ -177,6 +183,7 @@ const rendersDir = path.join(__dirname, 'renders');
 const downloadsDir = path.join(__dirname, 'downloads');
 const musicExtensions = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.mp4']);
 const fullVideoJobs = new Map();
+const liveManimPool = new LiveManimPool();
 const speechConcurrency = Number(process.env.SPEECH_CONCURRENCY || 3);
 const ttsConcurrency = Number(process.env.TTS_CONCURRENCY || 4);
 const codeConcurrency = Number(process.env.CODE_CONCURRENCY || 2);
@@ -225,6 +232,17 @@ function createLimiter(maxConcurrent) {
     queue.push({ task, resolve, reject });
     runNext();
   });
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  promise.catch(() => {});
+  return { promise, resolve, reject };
 }
 
 const limitSpeech = createLimiter(speechConcurrency);
@@ -554,9 +572,13 @@ async function generateLlmText({
   return text;
 }
 
-async function streamLiveBoardCommands(segment, onCommand) {
+async function streamLiveBoardCommands(segment, onCommand, preferredModel = null) {
   const gemini = requireGemini();
-  const candidateModels = [...new Set([liveBoardModel, ...geminiFallbackModels])];
+  const candidateModels = [...new Set([
+    preferredModel,
+    liveBoardModel,
+    ...geminiFallbackModels
+  ].filter(Boolean))];
   let lastError = null;
 
   for (const candidateModel of candidateModels) {
@@ -1528,6 +1550,8 @@ function publicJob(job) {
     completedAt: job.completedAt,
     error: job.error,
     result: job.result,
+    liveManim: job.liveManim,
+    liveManimEnabled: job.liveManimEnabled,
     segments: job.segments
   };
 }
@@ -1575,40 +1599,119 @@ function updateJob(job, patch) {
   }));
 }
 
-async function runLiveBoardPreview(job) {
-  const segment = job.plan.segments[0];
-  const segmentState = job.segments[0];
-  if (!liveBoardEnabled || !segment || !segmentState) return;
+async function runLiveManimPreview(job) {
+  if (!liveBoardEnabled || !liveManimEnabled || !job.plan.segments.length) return;
 
-  segmentState.liveBoard = {
-    status: 'streaming',
-    model: liveBoardModel,
-    commands: [],
-    error: null
-  };
-  updateJob(job, { current: `${segment.id}: Gemini canli tahta komutlarini yaziyor...` });
-
-  const appendCommand = (command) => {
-    if (segmentState.liveBoard.commands.some((item) => item.id === command.id)) return;
-    segmentState.liveBoard.commands.push(command);
-    updateJob(job, {
-      current: `${segment.id}: canli tahta komutu ${segmentState.liveBoard.commands.length} hazir.`
-    });
-  };
+  const outputDir = path.join(rendersDir, 'live-manim');
+  const outputPath = path.join(outputDir, `${sanitizeSegmentId(job.id)}.mp4`);
+  job.liveManim.status = 'waiting_worker';
+  updateJob(job, { current: 'Canli Manim motoru hazirlaniyor...' });
 
   try {
-    const result = await streamLiveBoardCommands(segment, appendCommand);
-    segmentState.liveBoard.status = 'ready';
-    segmentState.liveBoard.model = result.model;
-    updateJob(job, {
-      current: `${segment.id}: canli tahta akisi hazir (${result.commands} komut).`
+    const session = await liveManimPool.acquire({ jobId: job.id, outputPath });
+    job._liveManimSession = session;
+    session.on('event', (event) => {
+      if (event.event === 'stream_started') {
+        job.liveManim.status = 'streaming';
+        job.liveManim.startedAt = new Date().toISOString();
+        updateJob(job, { current: 'Canli Manim yayini basladi.' });
+      } else if (event.event === 'action_completed') {
+        job.liveManim.renderedActions += 1;
+      }
     });
+    session.on('log', (message) => {
+      const line = String(message || '').trim();
+      if (line) logInfo(`Job ${job.id}: Live Manim`, { line: line.slice(-500) });
+    });
+    session.start({
+      width: liveManimWidth,
+      height: liveManimHeight,
+      fps: liveManimFps
+    });
+
+    let preferredModel = null;
+    for (let index = 0; index < job.plan.segments.length; index += 1) {
+      const segment = job.plan.segments[index];
+      const segmentState = job.segments[index];
+      const tts = await job._audioDeferred[index].promise;
+      segmentState.liveManim = {
+        status: 'streaming',
+        model: preferredModel || liveBoardModel,
+        commandCount: 0,
+        error: null
+      };
+      session.beginSegment({
+        segmentId: segment.id,
+        audioPath: resolveRenderRelative(tts.audioRelativePath),
+        durationSeconds: tts.durationSeconds
+      });
+      updateJob(job, {
+        current: `${segment.id}: Gemini Manim aksiyonlarini canli yaziyor...`
+      });
+
+      const seenIds = new Set();
+      const appendCommand = (command) => {
+        const uniqueKey = `${command.id}:${command.type}:${command.at_percent}`;
+        if (seenIds.has(uniqueKey)) return;
+        seenIds.add(uniqueKey);
+        session.action(command);
+        segmentState.liveManim.commandCount += 1;
+        job.liveManim.generatedActions += 1;
+        updateJob(job, {
+          current: `${segment.id}: ${segmentState.liveManim.commandCount} Manim aksiyonu yayina girdi.`
+        });
+      };
+      if (index > 0) {
+        appendCommand({
+          id: `${segment.id}-transition`,
+          type: 'clear',
+          at_percent: 0,
+          duration_ms: 350,
+          color: '#f8fafc',
+          text: '',
+          x: 50,
+          y: 50,
+          x2: 50,
+          y2: 50,
+          width: 1,
+          height: 1,
+          radius: 1,
+          font_size: 4,
+          stroke_width: 0.7
+        });
+      }
+
+      try {
+        const result = await streamLiveBoardCommands(segment, appendCommand, preferredModel);
+        preferredModel = result.model;
+        segmentState.liveManim.status = 'queued';
+        segmentState.liveManim.model = result.model;
+      } catch (error) {
+        logInfo(`${segment.id}: Live Manim fallback aksiyonlari kullaniliyor`, { error: error.message });
+        for (const command of buildFallbackLiveBoardCommands(segment)) appendCommand(command);
+        segmentState.liveManim.status = 'fallback';
+        segmentState.liveManim.error = error.message;
+      }
+    }
+
+    job.liveManim.status = 'finishing';
+    updateJob(job, { current: 'Canli Manim kaydi tamamlaniyor...' });
+    session.finish();
+    const result = await session.completion;
+    const relativePath = path.relative(rendersDir, result.outputPath).replaceAll(path.sep, '/');
+    const actualDuration = await getMediaDurationSeconds(result.outputPath).catch(() => result.duration_seconds);
+    job.liveManim.status = 'done';
+    job.liveManim.completedAt = new Date().toISOString();
+    job.liveManim.durationSeconds = actualDuration;
+    job.liveManim.bytes = result.bytes;
+    job.liveManim.videoUrl = `/renders/${relativePath}`;
+    session.releaseCachedChunks();
+    updateJob(job, { current: 'Canli Manim dersi tamamlandi.' });
   } catch (error) {
-    logInfo(`${segment.id}: canli tahta fallback kullaniliyor`, { error: error.message });
-    for (const command of buildFallbackLiveBoardCommands(segment)) appendCommand(command);
-    segmentState.liveBoard.status = 'fallback';
-    segmentState.liveBoard.error = error.message;
-    updateJob(job, { current: `${segment.id}: hizli canli tahta akisi hazir.` });
+    job.liveManim.status = 'failed';
+    job.liveManim.error = error.message || 'Canli Manim yayini basarisiz oldu.';
+    logInfo(`Job ${job.id}: canli Manim hata verdi`, { error: job.liveManim.error });
+    updateJob(job, { current: 'Canli Manim kullanilamadi; parca video akisi devam ediyor.' });
   }
 }
 
@@ -1625,8 +1728,8 @@ async function runFullVideoJob(job) {
       status: 'running',
       message: 'Segment pipeline basladi.'
     });
-    void runLiveBoardPreview(job).catch((error) => {
-      logInfo(`Job ${job.id}: canli tahta beklenmeyen hata`, { error: error.message });
+    void runLiveManimPreview(job).catch((error) => {
+      logInfo(`Job ${job.id}: canli Manim beklenmeyen hata`, { error: error.message });
     });
 
     const videoPaths = new Array(job.plan.segments.length);
@@ -1681,6 +1784,7 @@ async function runFullVideoJob(job) {
               durationSeconds: tts.durationSeconds,
               voiceName: tts.voiceName
             };
+            job._audioDeferred[index].resolve(tts);
             updateJob(job, { current: `${segment.id}: canli anlatim sesi hazir.` });
             return tts;
           });
@@ -1750,6 +1854,7 @@ async function runFullVideoJob(job) {
         }
         return { ok: true, segment, dbSegment, speech, manimCode, code, tts, uploadedAudio };
       } catch (error) {
+        job._audioDeferred[index].reject(error);
         if (index === 0) {
           firstParallelStartedResolve();
           firstReadyToRenderResolve();
@@ -1933,6 +2038,10 @@ app.get('/api/config', async (_req, res, next) => {
       streamSegmentSeconds,
       liveBoardEnabled,
       liveBoardModel,
+      liveManimEnabled,
+      liveManimWidth,
+      liveManimHeight,
+      liveManimFps,
       mathTexAvailable,
       miktexBin,
       speechVolume,
@@ -2470,6 +2579,21 @@ app.post('/api/full-video', async (req, res, next) => {
       current: 'Siraya alindi.',
       message: 'Tam ders uretimi bekliyor.',
       plan,
+      liveManimEnabled: liveBoardEnabled && liveManimEnabled,
+      liveManim: {
+        status: liveBoardEnabled && liveManimEnabled ? 'queued' : 'disabled',
+        streamUrl: liveBoardEnabled && liveManimEnabled
+          ? `/api/jobs/__JOB_ID__/live-manim.mp4?token=${randomUUID()}`
+          : null,
+        generatedActions: 0,
+        renderedActions: 0,
+        startedAt: null,
+        completedAt: null,
+        durationSeconds: null,
+        bytes: 0,
+        videoUrl: null,
+        error: null
+      },
       segments: plan.segments.map((segment) => ({
         id: segment.id,
         title: segment.title,
@@ -2480,8 +2604,13 @@ app.post('/api/full-video', async (req, res, next) => {
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       completedAt: null,
-      listeners: new Set()
+      listeners: new Set(),
+      _audioDeferred: plan.segments.map(() => createDeferred()),
+      _liveManimSession: null
     };
+    if (job.liveManim.streamUrl) {
+      job.liveManim.streamUrl = job.liveManim.streamUrl.replace('__JOB_ID__', job.id);
+    }
 
     const dbJob = await persist('generation-job/create', () => createGenerationJob({
       appJobId: job.id,
@@ -2514,6 +2643,40 @@ app.get('/api/jobs/:id', async (req, res, next) => {
       return res.status(403).json({ error: 'Bu job bu kullaniciya ait degil.' });
     }
     res.json(publicJob(job));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/jobs/:id/live-manim.mp4', async (req, res, next) => {
+  try {
+    const job = fullVideoJobs.get(req.params.id);
+    if (!job?.liveManimEnabled || !job.liveManim?.streamUrl) {
+      return res.status(404).json({ error: 'Canli Manim yayini bulunamadi.' });
+    }
+    const expectedToken = new URL(job.liveManim.streamUrl, 'http://localhost').searchParams.get('token');
+    if (!expectedToken || String(req.query.token || '') !== expectedToken) {
+      return res.status(403).json({ error: 'Canli yayin anahtari gecersiz.' });
+    }
+    if (job.liveManim.status === 'done' && job.liveManim.videoUrl) {
+      const relativePath = job.liveManim.videoUrl.replace(/^\/renders\//, '');
+      return res.sendFile(resolveRenderRelative(relativePath));
+    }
+    if (job.liveManim.status === 'failed') {
+      return res.status(503).json({ error: job.liveManim.error || 'Canli Manim yayini basarisiz oldu.' });
+    }
+    if (!job._liveManimSession) {
+      return res.status(425).json({ error: 'Canli Manim worker henuz hazir degil.' });
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Accept-Ranges', 'none');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+    job._liveManimSession.pipeTo(res);
+    return undefined;
   } catch (error) {
     next(error);
   }
@@ -2574,7 +2737,10 @@ app.use((error, _req, res, _next) => {
   });
 });
 
-app.listen(port, () => {
+const httpServer = app.listen(port, () => {
+  if (liveManimEnabled) {
+    liveManimPool.prewarm();
+  }
   logInfo(`Kara Tahta calisiyor: http://localhost:${port}`, {
     provider: llmProvider,
     planModel,
@@ -2583,3 +2749,12 @@ app.listen(port, () => {
     quality: manimQuality
   });
 });
+
+function shutdownServer() {
+  liveManimPool.shutdown();
+  httpServer.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+
+process.once('SIGTERM', shutdownServer);
+process.once('SIGINT', shutdownServer);

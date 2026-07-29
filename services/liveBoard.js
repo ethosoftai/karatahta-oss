@@ -6,6 +6,8 @@ const LIVE_BOARD_TYPES = new Set([
   'arrow',
   'circle',
   'rectangle',
+  'highlight',
+  'remove',
   'clear',
   'wait'
 ]);
@@ -18,6 +20,8 @@ const DEFAULT_COLORS = {
   arrow: '#93c5fd',
   circle: '#86efac',
   rectangle: '#c4b5fd',
+  highlight: '#fde68a',
+  remove: '#f8fafc',
   clear: '#f8fafc',
   wait: '#f8fafc'
 };
@@ -57,6 +61,8 @@ export function normalizeLiveBoardCommand(value, index = 0) {
     font_size: clamp(value.font_size || (type === 'title' ? 7 : 4.4), 2, 12),
     stroke_width: clamp(value.stroke_width || 0.7, 0.2, 4)
   };
+  const targetId = safeText(value.target_id, 80);
+  if (targetId) command.target_id = targetId;
 
   if (['title', 'write', 'equation'].includes(type) && !command.text) return null;
   return command;
@@ -127,14 +133,16 @@ Asagidaki ders segmentini, ses devam ederken tarayicidaki 16:9 siyah tahtada oyn
 KESIN CIKTI KURALLARI:
 - Yalnizca NDJSON yaz: her satir tek, tamamlanmis ve gecerli bir JSON nesnesi olsun.
 - Markdown kod blogu, aciklama, dizi veya virgulle ayrilmis coklu nesne yazma.
-- 5-10 komut uret. Ilk komut at_percent=0 olan bir title veya write komutu olsun.
+- Segment suresine gore 7-14 komut uret. Ilk komut at_percent=0 olan bir title, clear veya write komutu olsun.
 - at_percent 0-96 arasinda artan sirada olsun ve konusmadaki ilgili ana denk gelsin.
 - Koordinatlar 0-100 arasi yuzdeliktir. Kenarlarda en az 7 birim guvenli alan birak.
 - Ekrani dolduran uzun cumleler yazma; anahtar kelime, kisa etiket ve denklem kullan.
 - Denklemleri unicode/duz metinle yaz; MathJax veya LaTeX komutu kullanma.
 - Her komutta su alanlar bulunabilir:
-  id, type, at_percent, duration_ms, text, x, y, x2, y2, width, height, radius, color, font_size, stroke_width
-- type yalnizca: title, write, equation, line, arrow, circle, rectangle, clear, wait
+  id, type, at_percent, duration_ms, text, target_id, x, y, x2, y2, width, height, radius, color, font_size, stroke_width
+- type yalnizca: title, write, equation, line, arrow, circle, rectangle, highlight, remove, clear, wait
+- Her kalici asset icin benzersiz ve anlamli id kullan. Asset, remove/clear gelene kadar Manim sahnesinde kalir.
+- Var olan asset'i vurgulamak icin highlight ve target_id kullan. Kaldirmak icin remove ve target_id kullan.
 - duration_ms 500-4000 arasi olsun.
 
 Ornek:
