@@ -1177,6 +1177,11 @@ async function createSpeechScript(segment) {
   });
 
   const speech = safeJsonParse(responseText || '');
+  if (!speech || typeof speech.speech_text !== 'string' || !speech.speech_text.trim()) {
+    const error = new Error(`${segment.id}: Gemini gecerli bir speech_text dondurmedi.`);
+    error.statusCode = 502;
+    throw error;
+  }
   logInfo(`${segment.id}: speech metni hazir`, { chars: String(speech.speech_text || '').length });
   return speech;
 }
@@ -1563,7 +1568,7 @@ async function runFullVideoJob(job) {
           logInfo(`Job ${job.id}: ilk segment render icin hazir; diger Manim kodlari baslayabilir`);
           firstReadyToRenderResolve();
         }
-        return { ok: true, segment, dbSegment, manimCode, code, tts, uploadedAudio };
+        return { ok: true, segment, dbSegment, speech, manimCode, code, tts, uploadedAudio };
       } catch (error) {
         if (index === 0) {
           firstParallelStartedResolve();
