@@ -73,9 +73,11 @@ def safe_color(value: Any, fallback: str) -> str:
 
 @dataclass
 class StreamSettings:
-    width: int = 854
-    height: int = 480
-    fps: int = 15
+    width: int = 1280
+    height: int = 720
+    fps: int = 20
+    crf: int = 23
+    preset: str = "fast"
     background: str = "#071512"
 
 
@@ -223,11 +225,11 @@ class LiveManimSession:
                 "-c:v",
                 "libx264",
                 "-preset",
-                "veryfast",
+                self.settings.preset,
                 "-tune",
                 "zerolatency",
                 "-crf",
-                "28",
+                str(self.settings.crf),
                 "-pix_fmt",
                 "yuv420p",
                 "-g",
@@ -439,9 +441,13 @@ def main() -> None:
             message_type = message.get("type")
             if message_type == "start":
                 settings = StreamSettings(
-                    width=int(clamp(message.get("width"), 320, 1920, 854)),
-                    height=int(clamp(message.get("height"), 180, 1080, 480)),
-                    fps=int(clamp(message.get("fps"), 10, 30, 15)),
+                    width=int(clamp(message.get("width"), 320, 1920, 1280)),
+                    height=int(clamp(message.get("height"), 180, 1080, 720)),
+                    fps=int(clamp(message.get("fps"), 10, 30, 20)),
+                    crf=int(clamp(message.get("crf"), 18, 30, 23)),
+                    preset=safe_text(message.get("preset"), 12)
+                    if safe_text(message.get("preset"), 12) in {"veryfast", "faster", "fast", "medium"}
+                    else "fast",
                     background=safe_text(message.get("background"), 24) or "#071512",
                 )
                 session = LiveManimSession(settings)

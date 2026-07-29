@@ -64,9 +64,11 @@ class LiveManimSession extends EventEmitter {
   start(settings = {}) {
     this.send({
       type: 'start',
-      width: settings.width || 854,
-      height: settings.height || 480,
-      fps: settings.fps || 15,
+      width: settings.width || 1280,
+      height: settings.height || 720,
+      fps: settings.fps || 20,
+      crf: settings.crf || 23,
+      preset: settings.preset || 'fast',
       background: settings.background || '#071512'
     });
   }

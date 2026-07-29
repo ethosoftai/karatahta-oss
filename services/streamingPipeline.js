@@ -4,14 +4,12 @@ function clamp(value, min, max) {
 
 export function resolveStreamingSegmentCount({
   targetMinutes,
-  requestedSegmentCount,
-  targetSegmentSeconds = 20
+  requestedSegmentCount
 }) {
   const minutes = clamp(Number(targetMinutes) || 1, 1, 30);
   const requested = clamp(Math.round(Number(requestedSegmentCount) || 1), 1, 40);
-  const seconds = clamp(Number(targetSegmentSeconds) || 20, 10, 30);
-  const ideal = Math.ceil((minutes * 60) / seconds);
-  return clamp(ideal, requested, Math.min(40, requested * 3));
+  if (minutes >= 8 && minutes <= 10) return 8;
+  return requested;
 }
 
 function narrationWithinWordBudget(text, maxWords) {
@@ -41,7 +39,7 @@ export function buildPlannedSpeech(segment, { maxDurationSeconds = 25 } = {}) {
     throw error;
   }
 
-  const durationCap = clamp(Number(maxDurationSeconds) || 25, 8, 35);
+  const durationCap = clamp(Number(maxDurationSeconds) || 25, 8, 120);
   const requestedDuration = clamp(Number(segment.duration_seconds) || durationCap, 6, durationCap);
   const narration = narrationWithinWordBudget(rawNarration, Math.max(18, Math.round(durationCap * 2.35)));
   const words = narration.split(/\s+/).filter(Boolean);

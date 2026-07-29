@@ -506,7 +506,7 @@ export async function savePlan({ lessonId, provider, model, prompt, plan, rawRes
   });
 }
 
-export async function saveSegments({ lessonId, segments }) {
+export async function saveSegments({ lessonId, segments, startIndex = 0 }) {
   const client = requireSupabase();
   const rows = (segments || []).map((segment, index) => ({
     lesson_id: lessonId,
@@ -516,7 +516,7 @@ export async function saveSegments({ lessonId, segments }) {
     learning_objective: segment.learning_objective || null,
     narration: segment.narration || null,
     animation_json: segment.animation || null,
-    order_index: index,
+    order_index: startIndex + index,
     status: 'planned'
   }));
   if (!rows.length) return [];

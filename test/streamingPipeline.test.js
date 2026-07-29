@@ -6,20 +6,22 @@ import {
   resolveStreamingSegmentCount
 } from '../services/streamingPipeline.js';
 
-test('iki dakikalık planı yaklaşık yirmi saniyelik yayın segmentlerine böler', () => {
+test('kısa videolarda kullanıcının istediği segment sayısını korur', () => {
   assert.equal(resolveStreamingSegmentCount({
     targetMinutes: 2,
-    requestedSegmentCount: 2,
-    targetSegmentSeconds: 20
-  }), 6);
+    requestedSegmentCount: 2
+  }), 2);
 });
 
-test('uzun derslerde segment sayısını istenen sayının üç katıyla sınırlar', () => {
+test('sekiz-on dakikalık dersleri sekiz ana segmentte tutar', () => {
   assert.equal(resolveStreamingSegmentCount({
     targetMinutes: 10,
-    requestedSegmentCount: 8,
-    targetSegmentSeconds: 20
-  }), 24);
+    requestedSegmentCount: 15
+  }), 8);
+  assert.equal(resolveStreamingSegmentCount({
+    targetMinutes: 8,
+    requestedSegmentCount: 4
+  }), 8);
 });
 
 test('plan anlatımından kısa TTS metni ve eşit dağılmış senkron ipuçları üretir', () => {
@@ -49,4 +51,18 @@ test('çok uzun plan anlatımını yayın süresi kelime bütçesine indirir', (
 
   assert.ok(speech.speech_text.split(/\s+/).length <= 47);
   assert.equal(speech.estimated_seconds, 20);
+});
+
+test('uzun ana segmentlerde anlatımı doksan saniyeye kadar korur', () => {
+  const narration = Array.from({ length: 180 }, (_, index) => `kelime${index}`).join(' ');
+  const speech = buildPlannedSpeech({
+    id: 's1',
+    duration_seconds: 75,
+    narration,
+    animation: { sequence: ['Giriş', 'Model', 'Örnek', 'Sonuç'] }
+  }, { maxDurationSeconds: 85 });
+
+  assert.ok(speech.speech_text.split(/\s+/).length > 100);
+  assert.ok(speech.estimated_seconds >= 75);
+  assert.ok(speech.estimated_seconds <= 85);
 });
