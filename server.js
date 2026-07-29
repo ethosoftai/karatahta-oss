@@ -18,6 +18,10 @@ import {
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
 import {
+  buildPlannedSpeech,
+  resolveStreamingSegmentCount
+} from './services/streamingPipeline.js';
+import {
   buildBurnSubtitleArgs,
   buildConcatArgs,
   buildMuxArgs,
@@ -129,6 +133,8 @@ const planModel = llmProvider === 'groq' ? groqPlanModel : geminiPlanModel;
 const codeModel = llmProvider === 'groq' ? groqCodeModel : geminiCodeModel;
 const groqBaseUrl = process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1';
 const manimQuality = process.env.MANIM_QUALITY || '-qm';
+const streamManimQuality = process.env.STREAM_MANIM_QUALITY || '-ql';
+const streamSegmentSeconds = Math.max(10, Math.min(30, Number(process.env.STREAM_SEGMENT_SECONDS || 20)));
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
 const mathTexAvailable = mathTexMode === '1' || mathTexMode === 'true' || (mathTexMode === 'auto' && Boolean(miktexBin));
@@ -1014,7 +1020,13 @@ function ffmpegSeconds(value) {
   return Math.max(0, Number(value) || 0).toFixed(3);
 }
 
-async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
+async function muxAudio(
+  videoPath,
+  audioPath,
+  outputPath,
+  speechText = '',
+  { preset = 'medium', crf = 20 } = {}
+) {
   const videoDuration = await getMediaDurationSeconds(videoPath);
   const speechDuration = audioPath ? await getMediaDurationSeconds(audioPath) : null;
   const targetDuration = speechDuration || videoDuration;
@@ -1087,7 +1099,9 @@ async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
       audioPath,
       outputPath: muxedPath,
       videoDuration,
-      audioDuration: speechDuration
+      audioDuration: speechDuration,
+      preset,
+      crf
     }),
     { timeoutMs: 180000 }
   );
@@ -1106,7 +1120,7 @@ async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
     await fs.writeFile(subtitlePath, buildTimedSubtitleSrt(speechText, speechDuration), 'utf8');
     subtitleResult = await runCommand(
       'ffmpeg',
-      buildBurnSubtitleArgs({ inputPath: muxedPath, subtitlePath, outputPath }),
+      buildBurnSubtitleArgs({ inputPath: muxedPath, subtitlePath, outputPath, preset, crf }),
       { timeoutMs: 180000 }
     );
     if (subtitleResult.code !== 0) {
@@ -1315,12 +1329,15 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId }
     error.statusCode = 400;
     throw error;
   }
+  const streamingSceneRules = input.duration_seconds <= 30
+    ? 'Bu sahne canli yayin icin kisa ve hizli render edilmelidir. En fazla 6 ana Mobject, en fazla 4 play adimi ve sade geometriler kullan. Gereksiz parcacik, 3B sahne, cok sayida kopya obje veya pahali updater kullanma.'
+    : 'Bu sahne uzun egitim videosunun bir bolumu. Segment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur.';
 
   const responseText = await generateLlmText({
     label: llmProvider === 'groq' ? 'Groq' : 'Gemini',
     model: codeModel,
     systemInstruction: buildManimSystemInstruction(coder, manimGuide),
-    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun bir bolumu. Basit bir giris animasyonu degil; segment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
+    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\n${streamingSceneRules} Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
     temperature: 0.35
   });
 
@@ -1330,8 +1347,16 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId }
   return code;
 }
 
-async function renderManimVideo({ code, segmentId, audioRelativePath, speechText = '' }) {
-  logInfo(`${segmentId}: Manim render hazirlaniyor`, { quality: manimQuality });
+async function renderManimVideo({
+  code,
+  segmentId,
+  audioRelativePath,
+  speechText = '',
+  quality = manimQuality,
+  postprocessPreset = 'medium',
+  postprocessCrf = 20
+}) {
+  logInfo(`${segmentId}: Manim render hazirlaniyor`, { quality });
   let currentCode = sanitizeManimForLocalRender(stripCodeFence(String(code || '')));
   if (!currentCode) {
     const error = new Error('Calistirilacak Manim kodu bos.');
@@ -1358,7 +1383,7 @@ async function renderManimVideo({ code, segmentId, audioRelativePath, speechText
     logInfo(`${safeSegmentId}: Manim render basladi`, { attempt: attempt + 1, className });
     result = await runCommand(
       'python',
-      ['-m', 'manim', manimQuality, filePath, className, '--media_dir', mediaDir],
+      ['-m', 'manim', quality, filePath, className, '--media_dir', mediaDir],
       { timeoutMs: 180000 }
     );
 
@@ -1405,7 +1430,10 @@ async function renderManimVideo({ code, segmentId, audioRelativePath, speechText
   const audioPath = audioRelativePath ? resolveRenderRelative(audioRelativePath) : null;
   const withAudioPath = path.join(workDir, `${className}-with-audio.mp4`);
   logInfo(`${safeSegmentId}: ses ve muzik birlestiriliyor`);
-  muxResult = await muxAudio(finalVideoPath, audioPath, withAudioPath, speechText);
+  muxResult = await muxAudio(finalVideoPath, audioPath, withAudioPath, speechText, {
+    preset: postprocessPreset,
+    crf: postprocessCrf
+  });
   if (muxResult) {
     finalVideoPath = withAudioPath;
   }
@@ -1447,6 +1475,18 @@ function publicJob(job) {
   };
 }
 
+function emitJobUpdate(job) {
+  if (!job.listeners?.size) return;
+  const snapshot = publicJob(job);
+  for (const listener of job.listeners) {
+    try {
+      listener(snapshot);
+    } catch {
+      job.listeners.delete(listener);
+    }
+  }
+}
+
 function updateJob(job, patch) {
   Object.assign(job, patch, { updatedAt: new Date().toISOString() });
   const message = patch.current || patch.message || patch.status || patch.error;
@@ -1456,6 +1496,7 @@ function updateJob(job, patch) {
       progress: `${job.progress}/${job.total}`
     });
   }
+  emitJobUpdate(job);
   persist('generation-job/update', () => updateGenerationJob(job.id, {
     status: job.status,
     progress: job.progress,
@@ -1509,8 +1550,10 @@ async function runFullVideoJob(job) {
 
       try {
         segmentState.status = 'speech';
-        updateJob(job, { current: `${segment.id}: speech uretiliyor...` });
-        const speech = await limitSpeech(() => createSpeechScript(segment));
+        updateJob(job, { current: `${segment.id}: plan anlatimi yayina hazirlaniyor...` });
+        const speech = segment.narration
+          ? buildPlannedSpeech(segment, { maxDurationSeconds: streamSegmentSeconds + 5 })
+          : await limitSpeech(() => createSpeechScript(segment));
         segmentState.speech = speech;
         await persist(`${segment.id}/speech`, async () => {
           if (!dbSegment?.id) return null;
@@ -1647,7 +1690,10 @@ async function runFullVideoJob(job) {
         code: prepared.code,
         segmentId: prepared.segment.id,
         audioRelativePath: prepared.tts.audioRelativePath,
-        speechText: prepared.speech.speech_text
+        speechText: prepared.speech.speech_text,
+        quality: streamManimQuality,
+        postprocessPreset: 'veryfast',
+        postprocessCrf: 24
       }));
       const uploadedVideo = await persist(`${prepared.segment.id}/video-upload`, () => (
         job.lessonId
@@ -1668,7 +1714,7 @@ async function runFullVideoJob(job) {
         return saveVideoRender({
           segmentId: prepared.dbSegment.id,
           manimCodeId: prepared.manimCode?.id || null,
-          quality: manimQuality,
+          quality: streamManimQuality,
           videoStoragePath: uploadedVideo?.storagePath || null,
           localVideoPath: render.videoRelativePath,
           audioStoragePath: prepared.uploadedAudio?.storagePath || null,
@@ -1783,6 +1829,8 @@ app.get('/api/config', async (_req, res, next) => {
       ttsVoiceId: null,
       manimFont,
       manimQuality,
+      streamManimQuality,
+      streamSegmentSeconds,
       mathTexAvailable,
       miktexBin,
       speechVolume,
@@ -1980,11 +2028,12 @@ app.post('/api/plan', async (req, res, next) => {
       return res.status(400).json({ error: 'Konu bos olamaz.' });
     }
 
+    const requestedSegmentCount = Number(req.body.target_segment_count || targetSegmentCount);
     const input = {
       topic,
       student_level: req.body.student_level || 'beginner',
       target_video_minutes: Number(req.body.target_video_minutes || targetVideoMinutes),
-      target_segment_count: Number(req.body.target_segment_count || targetSegmentCount),
+      target_segment_count: requestedSegmentCount,
       lesson_style: 'full_explainer_with_examples',
       prior_knowledge: Array.isArray(req.body.prior_knowledge)
         ? req.body.prior_knowledge
@@ -1997,28 +2046,37 @@ app.post('/api/plan', async (req, res, next) => {
     };
 
     const targetMinutes = input.target_video_minutes;
-    const segmentCount = input.target_segment_count;
+    const segmentCount = resolveStreamingSegmentCount({
+      targetMinutes,
+      requestedSegmentCount,
+      targetSegmentSeconds: streamSegmentSeconds
+    });
+    input.target_segment_count = segmentCount;
     logInfo('Plan uretimi basladi', {
       topic,
       targetMinutes,
+      requestedSegmentCount,
       segmentCount,
       provider: llmProvider,
       model: planModel
     });
     const fullLessonPlanner = `${planner}
 
-## UZUN VIDEO MODU
-Bu uygulamada hedef kisa giris degil, yaklasik ${targetMinutes} dakikalik tam bir egitim videosudur.
+## CANLI YAYIN VIDEO MODU
+Bu uygulamada yaklasik ${targetMinutes} dakikalik egitim videosu, kullanici izlerken arkadan uretilen kisa parcalar halinde yayinlanir.
 
 ZORUNLU:
 - estimated_duration_minutes degeri ${targetMinutes} civarinda olsun.
 - segments dizisi tam olarak ${segmentCount} segment icersin.
-- Her segment 55-95 saniye araliginda olsun; toplam sure ${targetMinutes} dakikaya yaklassin.
+- Ilk segment 10-15 saniye, sonraki segmentler 15-25 saniye araliginda olsun; toplam sure ${targetMinutes} dakikaya yaklassin.
+- Bu canli yayin modu, yukaridaki genel "narration 30 saniyeden kisa olmasin" kisitini gecersiz kilar.
+- Her narration alani TTS'e dogrudan gidecek kadar temiz, dogal Turkce ve kendi duration_seconds suresine sigacak uzunlukta olsun.
+- Ilk segment merak uyandiran tek bir fikirle hemen baslasin; uzun selamlama veya ders ozeti yapmasin.
+- Her animation.sequence en fazla 4 kisa ve render edilmesi kolay gorsel aksiyon icersin.
 - Sadece tanitim yapma. Konuyu gercekten ogret: sezgi, tanim, gorsel model, adim adim ornek, ikinci ornek, tipik hata, mini alistirma ve toparlama bolumleri olsun.
 - Matematik konularinda en az 2 cozumlu ornek segmenti uret. Fen konularinda en az 2 somut senaryo/deney/uygulama segmenti uret.
 - Segment basliklari ders akisi gibi olsun: Giris, Sezgi, Model, Yontem, Ornek 1, Ornek 2, Yanlis Anlama, Pratik, Ozet gibi.
-- narration alanlari TTS icin dolu, dogal ve aciklayici olsun. Tek cumlelik kisa metin yazma.
-- animation.description ve sequence alanlari uzun video sahnesini tasiyacak kadar ayrintili olsun.
+- animation.description ve sequence alanlari kisa segmentin tek fikrini net gostersin.
 - Her segment tek ana fikre odaklansin ama o fikri yeterince anlatsin.
 - JSON disinda hicbir sey yazma.`;
 
@@ -2319,7 +2377,8 @@ app.post('/api/full-video', async (req, res, next) => {
       error: null,
       startedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      completedAt: null
+      completedAt: null,
+      listeners: new Set()
     };
 
     const dbJob = await persist('generation-job/create', () => createGenerationJob({
@@ -2353,6 +2412,52 @@ app.get('/api/jobs/:id', async (req, res, next) => {
       return res.status(403).json({ error: 'Bu job bu kullaniciya ait degil.' });
     }
     res.json(publicJob(job));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/jobs/:id/events', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const job = fullVideoJobs.get(req.params.id);
+    if (!job) {
+      return res.status(404).json({ error: 'Job bulunamadi.' });
+    }
+    if (job.userId && job.userId !== userContext.profileId) {
+      return res.status(403).json({ error: 'Bu job bu kullaniciya ait degil.' });
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    let closed = false;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      job.listeners.delete(send);
+    };
+    const send = (snapshot) => {
+      if (closed || res.writableEnded) return;
+      res.write(`event: job\ndata: ${JSON.stringify(snapshot)}\n\n`);
+      if (snapshot.status === 'done' || snapshot.status === 'failed') {
+        cleanup();
+        res.end();
+      }
+    };
+    const heartbeat = setInterval(() => {
+      if (!closed && !res.writableEnded) res.write(': keep-alive\n\n');
+    }, 15000);
+
+    job.listeners.add(send);
+    req.on('close', cleanup);
+    send(publicJob(job));
+    return undefined;
   } catch (error) {
     next(error);
   }
