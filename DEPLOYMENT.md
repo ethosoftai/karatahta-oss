@@ -8,7 +8,7 @@ Environment: production
 Service: karatahta-backend
 Domain: https://api.example.com
 Port: 8080
-Source: Ahmet2001/karatahta-backend (railway)
+Source: ethosoftai/karatahta-backend (railway)
 ```
 
 GitHub `railway` branch'ine yapılan push'lar normalde otomatik deployment

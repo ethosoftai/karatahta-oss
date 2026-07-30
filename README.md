@@ -10,7 +10,7 @@ Railway Bucket'a yazar.
 | Parça | Adres / repo |
 | --- | --- |
 | Production API | `https://api.example.com` |
-| Backend repo | `https://github.com/Ahmet2001/karatahta-backend` |
+| Backend repo | `https://github.com/ethosoftai/karatahta-backend` |
 | Production branch | `railway` |
 | Railway project | `<railway-project>` |
 | Railway service | `karatahta-backend` |
@@ -138,7 +138,7 @@ En tutarlı yöntem Docker'dır; image gerekli Node, Python, Manim, LaTeX,
 Edge TTS ve FFmpeg bağımlılıklarını içerir.
 
 ```bash
-git clone --branch railway https://github.com/Ahmet2001/karatahta-backend.git
+git clone --branch railway https://github.com/ethosoftai/karatahta-backend.git
 cd karatahta-backend
 cp .env.example .env
 # En az LLM ve local auth/depolama değerlerini doldur.
@@ -382,7 +382,7 @@ git commit -m "..."
 git push origin railway
 ```
 
-Railway service ayarlarında source repo `Ahmet2001/karatahta-backend`, branch
+Railway service ayarlarında source repo `ethosoftai/karatahta-backend`, branch
 `railway` olmalıdır. Deploy sonrasında Railway'in gösterdiği source commit SHA
 ile `git rev-parse origin/railway` aynı olmalıdır. Loglarda server'ın `PORT`
 üzerinde başladığını ve `/api/config` yanıtını kontrol edin.
