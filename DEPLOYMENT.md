@@ -14,6 +14,21 @@ Source: Ahmet2001/karatahta-backend (railway)
 GitHub `railway` branch'ine yapılan push'lar normalde otomatik deployment
 başlatır.
 
+## Progressive Manim rollout
+
+Progressive oynatma feature flag arkasındadır. Önce staging/preview ortamında:
+
+```env
+MANIM_QUALITY=-qm
+PROGRESSIVE_MANIM_PARTIALS=true
+PROGRESSIVE_BUFFER_SECONDS=6
+```
+
+Flag açıkken Manim ayrıca `1280x720 @ 30 FPS` ile zorlanır. Backend yalnız
+tamamlanmış ve `ffprobe` doğrulamasından geçen `partial_movie_files` çıktılarını
+authenticated fMP4 manifestine ekler. Flag kapatıldığında traditional segment
+render + final concat akışı değişmeden çalışır.
+
 ## Gerekli Railway değişkenleri
 
 ```env

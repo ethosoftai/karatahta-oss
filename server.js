@@ -5,7 +5,7 @@ import textToSpeech from '@google-cloud/text-to-speech';
 import express from 'express';
 import { Agent, setGlobalDispatcher } from 'undici';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -65,6 +65,13 @@ import {
   uploadDataUrl,
   uploadLocalFile
 } from './services/mediaStore.js';
+import {
+  ManimPartialCollector,
+  appendPartialMetadata,
+  createJobEventChannel,
+  createProgressiveState,
+  publicProgressiveState
+} from './services/progressiveManim.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -169,6 +176,12 @@ const speechConcurrency = Number(process.env.SPEECH_CONCURRENCY || 3);
 const ttsConcurrency = Number(process.env.TTS_CONCURRENCY || 4);
 const codeConcurrency = Number(process.env.CODE_CONCURRENCY || 2);
 const renderConcurrency = Number(process.env.RENDER_CONCURRENCY || 1);
+const progressiveManimEnabled = String(process.env.PROGRESSIVE_MANIM_PARTIALS || 'false').toLowerCase() === 'true';
+const progressiveBufferSeconds = Math.max(2, Number(process.env.PROGRESSIVE_BUFFER_SECONDS || 6));
+const progressiveArtifactTtlMs = Math.max(
+  10 * 60 * 1000,
+  Number(process.env.PROGRESSIVE_ARTIFACT_TTL_MS || 30 * 60 * 1000)
+);
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -176,7 +189,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Last-Event-ID');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   }
   if (req.method === 'OPTIONS') {
@@ -929,6 +942,95 @@ async function getMediaDurationSeconds(filePath) {
   return Number.parseFloat(result.stdout.trim());
 }
 
+async function probeVideo(filePath) {
+  const result = await runCommand(
+    'ffprobe',
+    [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height,avg_frame_rate,codec_name,profile,level:format=duration',
+      '-of', 'json',
+      filePath
+    ],
+    { timeoutMs: 30000 }
+  );
+  if (result.code !== 0) {
+    throw new Error(`ffprobe video okuyamadi: ${result.stderr || result.stdout}`);
+  }
+  const payload = JSON.parse(result.stdout || '{}');
+  const stream = payload.streams?.[0];
+  const durationSeconds = Number(payload.format?.duration);
+  if (!stream || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    throw new Error('MP4 video streami veya suresi gecersiz.');
+  }
+  const [fpsNumerator, fpsDenominator] = String(stream.avg_frame_rate || '0/1')
+    .split('/')
+    .map(Number);
+  return {
+    width: Number(stream.width),
+    height: Number(stream.height),
+    fps: fpsDenominator ? fpsNumerator / fpsDenominator : 0,
+    codec: stream.codec_name,
+    profile: stream.profile,
+    level: Number(stream.level),
+    durationSeconds
+  };
+}
+
+function avcCodecString(probe) {
+  const profileHex = /high/i.test(probe.profile || '')
+    ? '64'
+    : /main/i.test(probe.profile || '')
+      ? '4D'
+      : '42';
+  const levelHex = Math.max(0, Math.min(255, Number(probe.level || 31)))
+    .toString(16)
+    .padStart(2, '0')
+    .toUpperCase();
+  return `avc1.${profileHex}00${levelHex}`;
+}
+
+async function sha256File(filePath) {
+  const data = await fs.readFile(filePath);
+  return createHash('sha256').update(data).digest('hex');
+}
+
+async function normalizeProgressivePartial({
+  sourcePath,
+  outputPath,
+  audioPath,
+  audioStartSeconds,
+  durationSeconds
+}) {
+  const args = [
+    '-y',
+    '-i', sourcePath,
+    '-ss', ffmpegSeconds(audioStartSeconds),
+    '-i', audioPath,
+    '-filter_complex',
+    `[1:a]volume=${speechVolume},apad,atrim=0:${ffmpegSeconds(durationSeconds)},asetpts=PTS-STARTPTS[aout]`,
+    '-map', '0:v:0',
+    '-map', '[aout]',
+    '-t', ffmpegSeconds(durationSeconds),
+    '-c:v', 'copy',
+    '-c:a', 'aac',
+    '-b:a', '128k',
+    '-ar', '48000',
+    '-movflags', '+empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset',
+    '-frag_duration', '1000000',
+    '-video_track_timescale', '90000',
+    outputPath
+  ];
+  const result = await runCommand('ffmpeg', args, { timeoutMs: 60000 });
+  if (result.code !== 0) {
+    const error = new Error('Manim partial fMP4 olarak hazirlanamadi.');
+    error.stdout = result.stdout;
+    error.stderr = result.stderr;
+    throw error;
+  }
+  await probeVideo(outputPath);
+}
+
 async function listMusicFiles(dir) {
   try {
     const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -1271,7 +1373,7 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId }
     label: llmProvider === 'groq' ? 'Groq' : 'Gemini',
     model: codeModel,
     systemInstruction: buildManimSystemInstruction(coder, manimGuide),
-    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun bir bolumu. Basit bir giris animasyonu degil; segment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
+    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun bir bolumu. Basit bir giris animasyonu degil; segment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nPROGRESSIVE RENDER KURALLARI: Ilk self.play() 2-3 saniyeyi gecmesin. Sonraki gorsel akis anlamli 2-5 saniyelik self.play()/self.wait() bloklarindan olussun. Tek bir run_time=10/15 gibi dev animasyon kullanma. Ilk blokta binlerce obje, agir 3D veya gereksiz always_redraw kullanma; sonraki bloklarda gorsel zenginligi ve pedagojik kaliteyi koru. Kod satir satir calistirilmayacak; partial sinirlari yalnizca normal self.play()/self.wait() cagrilaridir.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
     temperature: 0.35
   });
 
@@ -1281,7 +1383,13 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId }
   return code;
 }
 
-async function renderManimVideo({ code, segmentId, audioRelativePath, speechText = '' }) {
+async function renderManimVideo({
+  code,
+  segmentId,
+  audioRelativePath,
+  speechText = '',
+  progressiveContext = null
+}) {
   logInfo(`${segmentId}: Manim render hazirlaniyor`, { quality: manimQuality });
   let currentCode = sanitizeManimForLocalRender(stripCodeFence(String(code || '')));
   if (!currentCode) {
@@ -1298,6 +1406,7 @@ async function renderManimVideo({ code, segmentId, audioRelativePath, speechText
   let filePath = path.join(workDir, `${className}.py`);
   let result = null;
   const repairLogs = [];
+  const progressiveStartSequence = progressiveContext?.job?.progressive?.partials?.length || 0;
 
   await fs.mkdir(workDir, { recursive: true });
 
@@ -1306,12 +1415,106 @@ async function renderManimVideo({ code, segmentId, audioRelativePath, speechText
     filePath = path.join(workDir, `${className}.py`);
     await fs.writeFile(filePath, currentCode, 'utf8');
 
+    let partialCollector = null;
+    if (
+      attempt === 0
+      && progressiveContext?.job?.progressive?.enabled
+      && audioRelativePath
+    ) {
+      const progressiveDir = path.join(workDir, 'progressive');
+      const audioPath = resolveRenderRelative(audioRelativePath);
+      let localAudioCursor = 0;
+      await fs.mkdir(progressiveDir, { recursive: true });
+      partialCollector = new ManimPartialCollector({
+        mediaDir,
+        validate: async (partialPath) => {
+          const probe = await probeVideo(partialPath);
+          return (
+            probe.codec === 'h264'
+            && probe.width === 1280
+            && probe.height === 720
+            && Math.abs(probe.fps - 30) < 0.1
+          );
+        },
+        normalize: async (partialPath, segmentSequence) => {
+          const probe = await probeVideo(partialPath);
+          const sequence = progressiveContext.job.progressive.partials.length;
+          const outputPath = path.join(progressiveDir, `partial-${String(sequence).padStart(5, '0')}.mp4`);
+          await normalizeProgressivePartial({
+            sourcePath: partialPath,
+            outputPath,
+            audioPath,
+            audioStartSeconds: localAudioCursor,
+            durationSeconds: probe.durationSeconds
+          });
+          const startSeconds = progressiveContext.job.progressive.readyDurationSeconds;
+          const checksum = await sha256File(outputPath);
+          const codec = `${avcCodecString(probe)}, mp4a.40.2`;
+          localAudioCursor += probe.durationSeconds;
+          return {
+            id: `${progressiveContext.job.id}-${sequence}-${checksum.slice(0, 12)}`,
+            jobId: progressiveContext.job.id,
+            lessonId: progressiveContext.job.lessonId,
+            segmentId: safeSegmentId,
+            segmentIndex: progressiveContext.segmentIndex,
+            segmentSequence,
+            sequence,
+            startSeconds,
+            durationSeconds: probe.durationSeconds,
+            width: probe.width,
+            height: probe.height,
+            fps: probe.fps,
+            codec,
+            mimeType: `video/mp4; codecs="${codec}"`,
+            url: `/api/jobs/${encodeURIComponent(progressiveContext.job.id)}/partials/${sequence}`,
+            checksum,
+            readyAt: new Date().toISOString(),
+            _filePath: outputPath
+          };
+        },
+        onPartial: async (partial) => {
+          const job = progressiveContext.job;
+          if (!appendPartialMetadata(job.progressive, partial)) return;
+          job.timings.firstPartialReadyAt ||= partial.readyAt;
+          if (job.progressive.playbackReadyAt) {
+            job.timings.playbackReadyAt ||= job.progressive.playbackReadyAt;
+          }
+          job.progressive.status = job.progressive.playbackReadyAt ? 'ready' : 'buffering';
+          job.updatedAt = new Date().toISOString();
+          job.eventChannel.emit('job', publicJob(job));
+          logInfo(`Job ${job.id}: progressive partial hazir`, {
+            sequence: partial.sequence,
+            segmentId: partial.segmentId,
+            seconds: Number(partial.durationSeconds).toFixed(2),
+            buffered: Number(job.progressive.readyDurationSeconds).toFixed(2)
+          });
+        }
+      });
+      partialCollector.start();
+    }
+
     logInfo(`${safeSegmentId}: Manim render basladi`, { attempt: attempt + 1, className });
-    result = await runCommand(
-      'python',
-      ['-m', 'manim', manimQuality, filePath, className, '--media_dir', mediaDir],
-      { timeoutMs: 180000 }
-    );
+    if (progressiveContext?.job && attempt === 0) {
+      progressiveContext.job.timings.manimStartedAt ||= new Date().toISOString();
+    }
+    const manimArgs = ['-m', 'manim', manimQuality];
+    if (progressiveContext?.job?.progressive?.enabled) {
+      manimArgs.push('--resolution', '1280,720', '--fps', '30');
+    }
+    manimArgs.push(filePath, className, '--media_dir', mediaDir);
+    result = await runCommand('python', manimArgs, { timeoutMs: 180000 });
+    if (partialCollector) {
+      try {
+        await partialCollector.finish();
+      } catch (partialError) {
+        progressiveContext.job.progressive.status = 'failed';
+        progressiveContext.job.progressive.error = partialError.message;
+        progressiveContext.job.eventChannel.emit('job', publicJob(progressiveContext.job));
+        logInfo(`${safeSegmentId}: progressive partial akisi durdu`, {
+          error: partialError.message
+        });
+      }
+    }
 
     if (result.code === 0) {
       logInfo(`${safeSegmentId}: Manim render tamamlandi`, { attempt: attempt + 1 });
@@ -1322,6 +1525,12 @@ async function renderManimVideo({ code, segmentId, audioRelativePath, speechText
     logInfo(`${safeSegmentId}: Manim render hata verdi, duzeltme denenecek`, { attempt: attempt + 1 });
     if (attempt >= 2) {
       break;
+    }
+
+    if (progressiveContext?.job?.progressive?.readyCount) {
+      progressiveContext.job.progressive.status = 'failed';
+      progressiveContext.job.progressive.error = 'Manim render onarima gecti; yari kalan canli akis durduruldu.';
+      progressiveContext.job.eventChannel.emit('job', publicJob(progressiveContext.job));
     }
 
     repairLogs.push(`Manim render attempt ${attempt + 1} failed. Gemini repair started.`);
@@ -1355,10 +1564,45 @@ async function renderManimVideo({ code, segmentId, audioRelativePath, speechText
   let muxResult = null;
   const audioPath = audioRelativePath ? resolveRenderRelative(audioRelativePath) : null;
   const withAudioPath = path.join(workDir, `${className}-with-audio.mp4`);
-  logInfo(`${safeSegmentId}: ses ve muzik birlestiriliyor`);
-  muxResult = await muxAudio(finalVideoPath, audioPath, withAudioPath, speechText);
-  if (muxResult) {
-    finalVideoPath = withAudioPath;
+  const progressivePartials = progressiveContext?.job?.progressive?.status !== 'failed'
+    ? (progressiveContext?.job?.progressive?.partials || [])
+        .filter((partial) => (
+          partial.sequence >= progressiveStartSequence
+          && partial.segmentIndex === progressiveContext.segmentIndex
+        ))
+    : [];
+  if (progressivePartials.length) {
+    const listPath = path.join(workDir, 'progressive-partials.txt');
+    const listContent = progressivePartials
+      .sort((left, right) => left.sequence - right.sequence)
+      .map((partial) => `file '${partial._filePath.replaceAll("'", "'\\''")}'`)
+      .join('\n');
+    await fs.writeFile(listPath, listContent, 'utf8');
+    const concatResult = await runCommand(
+      'ffmpeg',
+      buildConcatArgs({ listPath, outputPath: withAudioPath }),
+      { timeoutMs: 180000 }
+    );
+    if (concatResult.code !== 0) {
+      progressiveContext.job.progressive.status = 'failed';
+      progressiveContext.job.progressive.error = 'Progressive parcalar final segmente birlestirilemedi.';
+      progressiveContext.job.eventChannel.emit('job', publicJob(progressiveContext.job));
+      repairLogs.push(progressiveContext.job.progressive.error);
+    } else {
+      finalVideoPath = withAudioPath;
+      muxResult = {
+        ...concatResult,
+        backgroundMusic: null,
+        source: 'progressive_partials'
+      };
+    }
+  }
+  if (!muxResult) {
+    logInfo(`${safeSegmentId}: ses ve muzik birlestiriliyor`);
+    muxResult = await muxAudio(finalVideoPath, audioPath, withAudioPath, speechText);
+    if (muxResult) {
+      finalVideoPath = withAudioPath;
+    }
   }
 
   const relativeVideo = path.relative(rendersDir, finalVideoPath).replaceAll(path.sep, '/');
@@ -1372,7 +1616,8 @@ async function renderManimVideo({ code, segmentId, audioRelativePath, speechText
     stderr: [result.stderr, muxResult?.stderr].filter(Boolean).join('\n'),
     hasAudio: Boolean(audioRelativePath),
     hasMusic: Boolean(muxResult?.backgroundMusic),
-    backgroundMusic: muxResult?.backgroundMusic || null
+    backgroundMusic: muxResult?.backgroundMusic || null,
+    source: muxResult?.source || 'traditional'
   };
   logInfo(`${safeSegmentId}: video hazir`, {
     seconds: durationSeconds ? Number(durationSeconds).toFixed(1) : null,
@@ -1394,7 +1639,10 @@ function publicJob(job) {
     completedAt: job.completedAt,
     error: job.error,
     result: job.result,
-    segments: job.segments
+    segments: job.segments,
+    lessonId: job.lessonId,
+    progressive: publicProgressiveState(job.progressive),
+    timings: job.timings || null
   };
 }
 
@@ -1426,6 +1674,7 @@ function updateJob(job, patch) {
       total: job.total
     }
   }));
+  job.eventChannel?.emit('job', publicJob(job));
 }
 
 async function runFullVideoJob(job) {
@@ -1463,6 +1712,9 @@ async function runFullVideoJob(job) {
         updateJob(job, { current: `${segment.id}: speech uretiliyor...` });
         const speech = await limitSpeech(() => createSpeechScript(segment));
         segmentState.speech = speech;
+        if (index === 0) {
+          job.timings.firstSpeechReadyAt ||= new Date().toISOString();
+        }
         await persist(`${segment.id}/speech`, async () => {
           if (!dbSegment?.id) return null;
           await updateSegment(dbSegment.id, { status: 'speech_done' });
@@ -1485,7 +1737,11 @@ async function runFullVideoJob(job) {
             ? `${segment.id}: ses ve Manim kodu paralel uretiliyor...`
             : `${segment.id}: ses uretiliyor; Manim kodu ilk segmentten sonra baslayacak...`
         });
-        const ttsPromise = limitTts(() => synthesizeSpeech(speech.speech_text, segment.id));
+        const ttsPromise = limitTts(() => synthesizeSpeech(speech.speech_text, segment.id))
+          .then((value) => {
+            if (index === 0) job.timings.firstTtsReadyAt ||= new Date().toISOString();
+            return value;
+          });
         const codePromise = (async () => {
           if (index > 0) {
             await firstReadyToRender;
@@ -1501,7 +1757,10 @@ async function runFullVideoJob(job) {
               cue_plan: speech.cue_plan || []
             },
             segmentId: segment.id
-          }));
+          })).then((value) => {
+            if (index === 0) job.timings.firstCodeReadyAt ||= new Date().toISOString();
+            return value;
+          });
         })();
         if (index === 0) {
           logInfo(`Job ${job.id}: ilk segment TTS ve Manim kodu kuyruğa girdi`);
@@ -1598,8 +1857,14 @@ async function runFullVideoJob(job) {
         code: prepared.code,
         segmentId: prepared.segment.id,
         audioRelativePath: prepared.tts.audioRelativePath,
-        speechText: prepared.speech.speech_text
+        speechText: prepared.speech.speech_text,
+        progressiveContext: job.progressive.enabled && job.progressive.status !== 'failed'
+          ? { job, segmentIndex: index }
+          : null
       }));
+      if (index === 0) {
+        job.timings.firstSegmentCompletedAt ||= new Date().toISOString();
+      }
       const uploadedVideo = await persist(`${prepared.segment.id}/video-upload`, () => (
         job.lessonId
           ? uploadRenderRelative({
@@ -1652,6 +1917,9 @@ async function runFullVideoJob(job) {
     });
 
     const concat = await concatVideos(videoPaths);
+    concat.source = job.progressive.enabled && job.progressive.status !== 'failed'
+      ? 'progressive_partials'
+      : 'traditional';
     const uploadedFinalVideo = await persist('final-video/upload', () => (
       job.lessonId
         ? uploadRenderRelative({
@@ -1678,6 +1946,10 @@ async function runFullVideoJob(job) {
         segmentRenderIds: job.segments.map((segment) => segment.dbRenderId).filter(Boolean)
       });
     });
+    job.timings.finalVideoReadyAt = new Date().toISOString();
+    if (job.progressive.enabled && job.progressive.status !== 'failed') {
+      job.progressive.status = 'done';
+    }
     updateJob(job, {
       status: 'done',
       current: 'Tamamlandi.',
@@ -1685,6 +1957,7 @@ async function runFullVideoJob(job) {
       completedAt: new Date().toISOString(),
       result: concat
     });
+    scheduleProgressiveCleanup(job);
     logInfo(`Job ${job.id}: tam ders uretimi bitti`, { videoUrl: concat.videoUrl });
   } catch (error) {
     logInfo(`Job ${job.id}: tam ders uretimi hata verdi`, { error: error.message });
@@ -1696,6 +1969,7 @@ async function runFullVideoJob(job) {
       error: error.message || 'Tam ders uretimi basarisiz oldu.',
       completedAt: new Date().toISOString()
     });
+    scheduleProgressiveCleanup(job);
   }
 }
 
@@ -1734,6 +2008,13 @@ app.get('/api/config', async (_req, res, next) => {
       ttsVoiceId: null,
       manimFont,
       manimQuality,
+      progressiveManimEnabled,
+      progressiveBufferSeconds,
+      progressiveVideo: {
+        width: 1280,
+        height: 720,
+        fps: 30
+      },
       mathTexAvailable,
       miktexBin,
       speechVolume,
@@ -2246,7 +2527,7 @@ app.post('/api/concat', async (req, res, next) => {
   }
 });
 
-async function queueTraditionalVideoJob({ plan, lessonId, userContext }) {
+async function queueTraditionalVideoJob({ plan, lessonId, userContext, requestTimings = {} }) {
   if (!plan || !Array.isArray(plan.segments) || !plan.segments.length) {
     const error = new Error('Tam ders icin gecerli plan.segments gerekli.');
     error.statusCode = 400;
@@ -2274,7 +2555,24 @@ async function queueTraditionalVideoJob({ plan, lessonId, userContext }) {
     error: null,
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    completedAt: null
+    completedAt: null,
+    progressive: createProgressiveState({
+      enabled: progressiveManimEnabled,
+      bufferTargetSeconds: progressiveBufferSeconds
+    }),
+    eventChannel: createJobEventChannel(),
+    timings: {
+      promptReceivedAt: requestTimings.promptReceivedAt || new Date().toISOString(),
+      planReadyAt: requestTimings.planReadyAt || new Date().toISOString(),
+      firstSpeechReadyAt: null,
+      firstTtsReadyAt: null,
+      firstCodeReadyAt: null,
+      manimStartedAt: null,
+      firstPartialReadyAt: null,
+      playbackReadyAt: null,
+      firstSegmentCompletedAt: null,
+      finalVideoReadyAt: null
+    }
   };
 
   const dbJob = await persist('generation-job/create', () => createGenerationJob({
@@ -2296,12 +2594,15 @@ async function queueTraditionalVideoJob({ plan, lessonId, userContext }) {
 
 app.post('/api/generate-lesson', async (req, res, next) => {
   try {
+    const promptReceivedAt = new Date().toISOString();
     const userContext = await resolveRequestUser(req);
     const { plan, lessonId } = await createTraditionalLessonPlan(req.body, userContext);
+    const planReadyAt = new Date().toISOString();
     const job = await queueTraditionalVideoJob({
       plan,
       lessonId,
-      userContext
+      userContext,
+      requestTimings: { promptReceivedAt, planReadyAt }
     });
     res.status(202).json({
       ...publicJob(job),
@@ -2340,6 +2641,129 @@ app.get('/api/jobs/:id', async (req, res, next) => {
       return res.status(403).json({ error: 'Bu job bu kullaniciya ait degil.' });
     }
     res.json(publicJob(job));
+  } catch (error) {
+    next(error);
+  }
+});
+
+function requireOwnedJob(jobId, userContext) {
+  const job = fullVideoJobs.get(jobId);
+  if (!job) {
+    const error = new Error('Job bulunamadi.');
+    error.statusCode = 404;
+    throw error;
+  }
+  if (job.userId && job.userId !== userContext.profileId) {
+    const error = new Error('Bu job bu kullaniciya ait degil.');
+    error.statusCode = 403;
+    throw error;
+  }
+  return job;
+}
+
+function publicPartial(partial) {
+  if (!partial) return null;
+  const { _filePath, ...payload } = partial;
+  return payload;
+}
+
+function scheduleProgressiveCleanup(job) {
+  if (!job?.progressive?.partials?.length || job.progressive.cleanupScheduled) return;
+  job.progressive.cleanupScheduled = true;
+  const directories = new Set(
+    job.progressive.partials
+      .map((partial) => partial._filePath ? path.dirname(partial._filePath) : null)
+      .filter(Boolean)
+  );
+  const timer = setTimeout(() => {
+    void Promise.all([...directories].map((directory) => (
+      fs.rm(directory, { recursive: true, force: true })
+    ))).then(() => {
+      logInfo(`Job ${job.id}: progressive gecici dosyalari temizlendi`, {
+        directories: directories.size
+      });
+    }).catch((error) => {
+      logInfo(`Job ${job.id}: progressive dosya temizligi basarisiz`, {
+        error: error.message
+      });
+    });
+  }, progressiveArtifactTtlMs);
+  timer.unref?.();
+}
+
+function writeSse(res, event) {
+  res.write(`id: ${event.id}\n`);
+  res.write(`event: ${event.type}\n`);
+  res.write(`data: ${JSON.stringify(event.payload)}\n\n`);
+}
+
+app.get('/api/jobs/:id/events', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const job = requireOwnedJob(req.params.id, userContext);
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'private, no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const lastEventId = Number(req.headers['last-event-id'] || req.query.after || 0);
+    if (!lastEventId) {
+      writeSse(res, {
+        id: 0,
+        type: 'job',
+        payload: publicJob(job)
+      });
+    }
+    const afterId = lastEventId || job.eventChannel.latestId();
+    const unsubscribe = job.eventChannel.subscribe((event) => writeSse(res, event), afterId);
+    const heartbeat = setInterval(() => {
+      res.write(`: keepalive ${Date.now()}\n\n`);
+    }, 15000);
+    const close = () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    req.once('close', close);
+    res.once('close', close);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/jobs/:id/stream-manifest', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const job = requireOwnedJob(req.params.id, userContext);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({
+      jobId: job.id,
+      lessonId: job.lessonId,
+      status: job.progressive.status,
+      bufferTargetSeconds: job.progressive.bufferTargetSeconds,
+      readyDurationSeconds: job.progressive.readyDurationSeconds,
+      complete: ['done', 'failed'].includes(job.progressive.status),
+      partials: job.progressive.partials.map(publicPartial)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/jobs/:id/partials/:sequence', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const job = requireOwnedJob(req.params.id, userContext);
+    const sequence = Number(req.params.sequence);
+    const partial = job.progressive.partials.find((item) => item.sequence === sequence);
+    if (!partial?._filePath) {
+      return res.status(404).json({ error: 'Progressive video parcasi hazir degil.' });
+    }
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(path.resolve(partial._filePath));
   } catch (error) {
     next(error);
   }
