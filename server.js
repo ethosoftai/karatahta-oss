@@ -1922,41 +1922,41 @@ app.get('/api/lessons/:id/video-url', async (req, res, next) => {
   }
 });
 
-app.post('/api/plan', async (req, res, next) => {
-  try {
-    const userContext = await resolveRequestUser(req);
-    const { planner } = await loadPrompts();
-    const topic = String(req.body.topic || '').trim();
-    if (!topic) {
-      return res.status(400).json({ error: 'Konu bos olamaz.' });
-    }
+async function createTraditionalLessonPlan(body, userContext) {
+  const { planner } = await loadPrompts();
+  const topic = String(body.topic || '').trim();
+  if (!topic) {
+    const error = new Error('Konu bos olamaz.');
+    error.statusCode = 400;
+    throw error;
+  }
 
-    const input = {
-      topic,
-      student_level: req.body.student_level || 'beginner',
-      target_video_minutes: Number(req.body.target_video_minutes || targetVideoMinutes),
-      target_segment_count: Number(req.body.target_segment_count || targetSegmentCount),
-      lesson_style: 'full_explainer_with_examples',
-      prior_knowledge: Array.isArray(req.body.prior_knowledge)
-        ? req.body.prior_knowledge
-        : String(req.body.prior_knowledge || '')
-            .split(',')
-            .map((item) => item.trim())
-            .filter(Boolean),
-      session_history: [],
-      interrupt_question: req.body.interrupt_question || null
-    };
+  const input = {
+    topic,
+    student_level: body.student_level || 'beginner',
+    target_video_minutes: Number(body.target_video_minutes || targetVideoMinutes),
+    target_segment_count: Number(body.target_segment_count || targetSegmentCount),
+    lesson_style: 'full_explainer_with_examples',
+    prior_knowledge: Array.isArray(body.prior_knowledge)
+      ? body.prior_knowledge
+      : String(body.prior_knowledge || '')
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+    session_history: [],
+    interrupt_question: body.interrupt_question || null
+  };
 
-    const targetMinutes = input.target_video_minutes;
-    const segmentCount = input.target_segment_count;
-    logInfo('Plan uretimi basladi', {
-      topic,
-      targetMinutes,
-      segmentCount,
-      provider: llmProvider,
-      model: planModel
-    });
-    const fullLessonPlanner = `${planner}
+  const targetMinutes = input.target_video_minutes;
+  const segmentCount = input.target_segment_count;
+  logInfo('Plan uretimi basladi', {
+    topic,
+    targetMinutes,
+    segmentCount,
+    provider: llmProvider,
+    model: planModel
+  });
+  const fullLessonPlanner = `${planner}
 
 ## UZUN VIDEO MODU
 Bu uygulamada hedef kisa giris degil, yaklasik ${targetMinutes} dakikalik tam bir egitim videosudur.
@@ -1973,45 +1973,51 @@ ZORUNLU:
 - Her segment tek ana fikre odaklansin ama o fikri yeterince anlatsin.
 - JSON disinda hicbir sey yazma.`;
 
-    const responseText = await generateLlmText({
-      label: llmProvider === 'groq' ? 'Groq' : 'Gemini',
-      model: planModel,
-      systemInstruction: fullLessonPlanner,
-      userText: JSON.stringify(input, null, 2),
-      json: true,
-      temperature: 0.7
-    });
+  const responseText = await generateLlmText({
+    label: llmProvider === 'groq' ? 'Groq' : 'Gemini',
+    model: planModel,
+    systemInstruction: fullLessonPlanner,
+    userText: JSON.stringify(input, null, 2),
+    json: true,
+    temperature: 0.7
+  });
 
-    const plan = parseLlmJson(responseText || '', 'Ders plani');
-    logInfo('Plan uretimi tamamlandi', {
-      topic: plan.topic || topic,
-      segments: Array.isArray(plan.segments) ? plan.segments.length : 0
+  const plan = parseLlmJson(responseText || '', 'Ders plani');
+  logInfo('Plan uretimi tamamlandi', {
+    topic: plan.topic || topic,
+    segments: Array.isArray(plan.segments) ? plan.segments.length : 0
+  });
+  const lesson = await persist('lesson/plan', async () => {
+    const createdLesson = await createLesson({
+      userId: userContext.profileId,
+      title: plan.topic || topic,
+      topic,
+      studentLevel: input.student_level,
+      targetMinutes,
+      targetSegmentCount: segmentCount,
+      sourceType: 'topic'
     });
-    const lesson = await persist('lesson/plan', async () => {
-      const createdLesson = await createLesson({
-        userId: userContext.profileId,
-        title: plan.topic || topic,
-        topic,
-        studentLevel: input.student_level,
-        targetMinutes,
-        targetSegmentCount: segmentCount,
-        sourceType: 'topic'
-      });
-      await savePlan({
-        lessonId: createdLesson.id,
-        provider: llmProvider,
-        model: planModel,
-        prompt: fullLessonPlanner,
-        plan,
-        rawResponse: responseText
-      });
-      await saveSegments({ lessonId: createdLesson.id, segments: plan.segments || [] });
-      return createdLesson;
+    await savePlan({
+      lessonId: createdLesson.id,
+      provider: llmProvider,
+      model: planModel,
+      prompt: fullLessonPlanner,
+      plan,
+      rawResponse: responseText
     });
-    if (lesson?.id) {
-      plan._lesson_id = lesson.id;
-    }
-    res.json({ plan, lessonId: lesson?.id || null });
+    await saveSegments({ lessonId: createdLesson.id, segments: plan.segments || [] });
+    return createdLesson;
+  });
+  if (lesson?.id) {
+    plan._lesson_id = lesson.id;
+  }
+  return { plan, lessonId: lesson?.id || null };
+}
+
+app.post('/api/plan', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    res.json(await createTraditionalLessonPlan(req.body, userContext));
   } catch (error) {
     next(error);
   }
@@ -2240,53 +2246,83 @@ app.post('/api/concat', async (req, res, next) => {
   }
 });
 
+async function queueTraditionalVideoJob({ plan, lessonId, userContext }) {
+  if (!plan || !Array.isArray(plan.segments) || !plan.segments.length) {
+    const error = new Error('Tam ders icin gecerli plan.segments gerekli.');
+    error.statusCode = 400;
+    throw error;
+  }
+  await requireOwnedLesson(lessonId, userContext);
+
+  const job = {
+    id: `${Date.now()}-${randomUUID().slice(0, 8)}`,
+    lessonId,
+    userId: userContext.profileId,
+    dbJobId: null,
+    status: 'queued',
+    progress: 0,
+    total: plan.segments.length,
+    current: 'Siraya alindi.',
+    message: 'Tam ders uretimi bekliyor.',
+    plan,
+    segments: plan.segments.map((segment) => ({
+      id: segment.id,
+      title: segment.title,
+      status: 'queued'
+    })),
+    result: null,
+    error: null,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    completedAt: null
+  };
+
+  const dbJob = await persist('generation-job/create', () => createGenerationJob({
+    appJobId: job.id,
+    lessonId,
+    total: plan.segments.length,
+    current: job.current,
+    message: job.message
+  }));
+  job.dbJobId = dbJob?.id || null;
+  await persist('lesson/status-running', () => (
+    lessonId ? updateLesson(lessonId, { status: 'generating' }) : null
+  ));
+
+  fullVideoJobs.set(job.id, job);
+  void runFullVideoJob(job);
+  return job;
+}
+
+app.post('/api/generate-lesson', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const { plan, lessonId } = await createTraditionalLessonPlan(req.body, userContext);
+    const job = await queueTraditionalVideoJob({
+      plan,
+      lessonId,
+      userContext
+    });
+    res.status(202).json({
+      ...publicJob(job),
+      plan,
+      lessonId
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/full-video', async (req, res, next) => {
   try {
     const userContext = await resolveRequestUser(req);
     const plan = req.body.plan;
-    if (!plan || !Array.isArray(plan.segments) || !plan.segments.length) {
-      return res.status(400).json({ error: 'Tam ders icin gecerli plan.segments gerekli.' });
-    }
-    const lessonId = req.body.lesson_id || plan._lesson_id || null;
-    await requireOwnedLesson(lessonId, userContext);
-
-    const job = {
-      id: `${Date.now()}-${randomUUID().slice(0, 8)}`,
-      lessonId,
-      userId: userContext.profileId,
-      dbJobId: null,
-      status: 'queued',
-      progress: 0,
-      total: plan.segments.length,
-      current: 'Siraya alindi.',
-      message: 'Tam ders uretimi bekliyor.',
+    const lessonId = req.body.lesson_id || plan?._lesson_id || null;
+    const job = await queueTraditionalVideoJob({
       plan,
-      segments: plan.segments.map((segment) => ({
-        id: segment.id,
-        title: segment.title,
-        status: 'queued'
-      })),
-      result: null,
-      error: null,
-      startedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      completedAt: null
-    };
-
-    const dbJob = await persist('generation-job/create', () => createGenerationJob({
-      appJobId: job.id,
       lessonId,
-      total: plan.segments.length,
-      current: job.current,
-      message: job.message
-    }));
-    job.dbJobId = dbJob?.id || null;
-    await persist('lesson/status-running', () => (
-      lessonId ? updateLesson(lessonId, { status: 'generating' }) : null
-    ));
-
-    fullVideoJobs.set(job.id, job);
-    runFullVideoJob(job);
+      userContext
+    });
     res.status(202).json(publicJob(job));
   } catch (error) {
     next(error);
