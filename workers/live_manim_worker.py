@@ -9,6 +9,7 @@ file descriptor 3.
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import subprocess
@@ -22,14 +23,20 @@ from manim import (
     Arrow,
     Circle,
     Create,
+    Dot,
+    FadeIn,
     FadeOut,
     GrowArrow,
     Indicate,
     Line,
+    Polygon,
     Rectangle,
+    RoundedRectangle,
     Scene,
     Text,
     Transform,
+    VGroup,
+    VMobject,
     Write,
     config,
 )
@@ -326,6 +333,23 @@ class LiveManimSession:
             mobject.scale_to_fit_width(max_width)
         return mobject
 
+    def screen_size(self, width: Any, height: Any) -> tuple[float, float]:
+        return (
+            clamp(width, 1, 100, 24) * ((16 / 9) * 8 / 100),
+            clamp(height, 1, 100, 18) * (8 / 100),
+        )
+
+    def label_mobject(
+        self,
+        text: Any,
+        *,
+        font_size: float = 26,
+        color: str = "#f8fafc",
+        max_width: float = 3.0,
+    ) -> Any:
+        label = Text(safe_text(text, 90), font_size=font_size, color=color)
+        return self.fit_text(label, max_width)
+
     def text_mobject(self, payload: dict[str, Any]) -> Any:
         text = safe_text(payload.get("text"))
         font_size = clamp(payload.get("font_size"), 2, 12, 4.4) * 7.5
@@ -360,7 +384,278 @@ class LiveManimSession:
             mobject = Rectangle(width=width, height=height, color=color, stroke_width=stroke_width)
             mobject.move_to(start)
             return mobject, Create(mobject)
+        if action_type == "dot":
+            radius = clamp(payload.get("radius"), 1, 50, 3) * 0.025
+            mobject = Dot(start, radius=radius, color=color)
+            return mobject, FadeIn(mobject, scale=1.8)
+        if action_type in {"polyline", "polygon"}:
+            points = [
+                self.point(point[0], point[1])
+                for point in payload.get("points", [])
+                if isinstance(point, list) and len(point) >= 2
+            ]
+            if action_type == "polygon":
+                mobject = Polygon(
+                    *points,
+                    color=color,
+                    stroke_width=stroke_width,
+                    fill_color=color,
+                    fill_opacity=clamp(payload.get("fill_opacity"), 0, 0.85, 0.16),
+                )
+            else:
+                mobject = VMobject(color=color, stroke_width=stroke_width)
+                mobject.set_points_as_corners(points)
+            return mobject, Create(mobject)
         raise RuntimeError(f"Unsupported shape action: {action_type}")
+
+    def axes_mobject(self, payload: dict[str, Any]) -> Any:
+        color = safe_color(payload.get("color"), "#cbd5e1")
+        center = self.point(payload.get("x", 50), payload.get("y", 56))
+        width, height = self.screen_size(payload.get("width", 78), payload.get("height", 56))
+        left = center[0] - (width / 2)
+        right = center[0] + (width / 2)
+        bottom = center[1] - (height / 2)
+        top = center[1] + (height / 2)
+        group = VGroup(
+            Arrow([left, bottom, 0], [right, bottom, 0], buff=0, color=color, stroke_width=2.5),
+            Arrow([left, bottom, 0], [left, top, 0], buff=0, color=color, stroke_width=2.5),
+        )
+        for index in range(1, 6):
+            x_pos = left + ((width * index) / 6)
+            y_pos = bottom + ((height * index) / 6)
+            group.add(Line([x_pos, bottom - 0.06, 0], [x_pos, bottom + 0.06, 0], color=color))
+            group.add(Line([left - 0.06, y_pos, 0], [left + 0.06, y_pos, 0], color=color))
+        x_label = safe_text(payload.get("x_label"), 52)
+        y_label = safe_text(payload.get("y_label"), 52)
+        if x_label:
+            label = self.label_mobject(x_label, font_size=21, color=color, max_width=2.1)
+            label.move_to([right - 0.45, bottom - 0.32, 0])
+            group.add(label)
+        if y_label:
+            label = self.label_mobject(y_label, font_size=21, color=color, max_width=2.1)
+            label.move_to([left + 0.5, top + 0.24, 0])
+            group.add(label)
+        return group
+
+    def plot_mobject(self, payload: dict[str, Any]) -> Any:
+        color = safe_color(payload.get("color"), "#fde68a")
+        stroke_width = clamp(payload.get("stroke_width"), 0.2, 4, 0.8) * 4
+        points = [
+            self.point(point[0], point[1])
+            for point in payload.get("points", [])
+            if isinstance(point, list) and len(point) >= 2
+        ]
+        path = VMobject(color=color, stroke_width=stroke_width)
+        if payload.get("smooth") and len(points) >= 3:
+            path.set_points_smoothly(points)
+        else:
+            path.set_points_as_corners(points)
+        group = VGroup()
+        if payload.get("show_axes", True):
+            group.add(self.axes_mobject({**payload, "color": "#64748b"}))
+        group.add(path)
+        group.add(*[Dot(point, radius=0.055, color=color) for point in points])
+        text = safe_text(payload.get("text"), 90)
+        if text:
+            label = self.label_mobject(text, font_size=25, color=color, max_width=4.0)
+            label.move_to(self.point(payload.get("x", 50), max(8, clamp(payload.get("y", 56), 0, 100, 56) - 34)))
+            group.add(label)
+        return group
+
+    def bar_chart_mobject(self, payload: dict[str, Any]) -> Any:
+        labels = [safe_text(item, 24) for item in payload.get("labels", [])][:8]
+        values = [float(item) for item in payload.get("values", [])][: len(labels)]
+        count = min(len(labels), len(values))
+        color = safe_color(payload.get("color"), "#60a5fa")
+        center = self.point(payload.get("x", 50), payload.get("y", 55))
+        width, height = self.screen_size(payload.get("width", 76), payload.get("height", 58))
+        left = center[0] - (width / 2)
+        bottom = center[1] - (height / 2)
+        usable_height = max(0.8, height - 0.65)
+        slot_width = width / max(1, count)
+        bar_width = min(1.15, slot_width * 0.58)
+        maximum = max([abs(value) for value in values[:count]] + [1.0])
+        group = VGroup(Line([left, bottom, 0], [left + width, bottom, 0], color="#64748b"))
+        for index, (label_text, value) in enumerate(zip(labels[:count], values[:count])):
+            bar_height = max(0.08, usable_height * (abs(value) / maximum))
+            bar_color = color if value >= 0 else "#fca5a5"
+            bar = Rectangle(
+                width=bar_width,
+                height=bar_height,
+                color=bar_color,
+                fill_color=bar_color,
+                fill_opacity=0.66,
+                stroke_width=1.8,
+            )
+            x_pos = left + ((index + 0.5) * slot_width)
+            bar.move_to([x_pos, bottom + (bar_height / 2), 0])
+            label = self.label_mobject(label_text, font_size=19, color="#e2e8f0", max_width=slot_width * 0.9)
+            label.move_to([x_pos, bottom - 0.28, 0])
+            group.add(bar, label)
+            if payload.get("show_values", True):
+                value_label = self.label_mobject(
+                    f"{value:g}",
+                    font_size=19,
+                    color="#f8fafc",
+                    max_width=slot_width * 0.8,
+                )
+                value_label.move_to([x_pos, bottom + bar_height + 0.2, 0])
+                group.add(value_label)
+        return group
+
+    def diagram_mobject(self, payload: dict[str, Any]) -> Any:
+        nodes = payload.get("nodes", [])[:7]
+        node_positions = {
+            safe_text(node.get("id"), 40): self.point(node.get("x"), node.get("y"))
+            for node in nodes
+        }
+        edges_group = VGroup()
+        for edge in payload.get("edges", [])[:10]:
+            start = node_positions.get(safe_text(edge.get("from"), 40))
+            end = node_positions.get(safe_text(edge.get("to"), 40))
+            if start is None or end is None:
+                continue
+            color = safe_color(edge.get("color"), "#94a3b8")
+            distance = math.hypot(end[0] - start[0], end[1] - start[1])
+            arrow = Arrow(
+                start,
+                end,
+                buff=min(1.25, distance * 0.28),
+                color=color,
+                stroke_width=2.6,
+            )
+            edges_group.add(arrow)
+            edge_label = safe_text(edge.get("label"), 42)
+            if edge_label:
+                label = self.label_mobject(edge_label, font_size=17, color=color, max_width=1.8)
+                label.move_to([
+                    (start[0] + end[0]) / 2,
+                    ((start[1] + end[1]) / 2) + 0.25,
+                    0,
+                ])
+                edges_group.add(label)
+        nodes_group = VGroup()
+        fill_opacity = clamp(payload.get("fill_opacity"), 0, 0.85, 0.16)
+        for node in nodes:
+            position = node_positions.get(safe_text(node.get("id"), 40))
+            color = safe_color(node.get("color"), "#93c5fd")
+            if safe_text(node.get("shape"), 12) == "circle":
+                container = Circle(
+                    radius=0.68,
+                    color=color,
+                    fill_color=color,
+                    fill_opacity=fill_opacity,
+                    stroke_width=2.5,
+                )
+                label_width = 1.05
+            else:
+                container = RoundedRectangle(
+                    width=2.45,
+                    height=1.05,
+                    corner_radius=0.16,
+                    color=color,
+                    fill_color=color,
+                    fill_opacity=fill_opacity,
+                    stroke_width=2.5,
+                )
+                label_width = 2.05
+            container.move_to(position)
+            label = self.label_mobject(
+                node.get("text"),
+                font_size=22,
+                color="#f8fafc",
+                max_width=label_width,
+            )
+            label.move_to(position)
+            nodes_group.add(VGroup(container, label))
+        return VGroup(edges_group, nodes_group)
+
+    def comparison_mobject(self, payload: dict[str, Any]) -> Any:
+        center = self.point(payload.get("x", 50), payload.get("y", 55))
+        width, height = self.screen_size(payload.get("width", 80), payload.get("height", 58))
+        gap = 0.35
+        panel_width = (width - gap) / 2
+        panel_height = height
+        color = safe_color(payload.get("color"), "#c4b5fd")
+        fill_opacity = clamp(payload.get("fill_opacity"), 0, 0.85, 0.12)
+        group = VGroup()
+        columns = [
+            (-1, safe_text(payload.get("left_title"), 52) or "Once", payload.get("left_items", []), "#93c5fd"),
+            (1, safe_text(payload.get("right_title"), 52) or "Sonra", payload.get("right_items", []), "#86efac"),
+        ]
+        for direction, title, items, accent in columns:
+            x_pos = center[0] + (direction * ((panel_width + gap) / 2))
+            panel = RoundedRectangle(
+                width=panel_width,
+                height=panel_height,
+                corner_radius=0.18,
+                color=color,
+                fill_color=color,
+                fill_opacity=fill_opacity,
+                stroke_width=2.2,
+            )
+            panel.move_to([x_pos, center[1], 0])
+            header = self.label_mobject(title, font_size=27, color=accent, max_width=panel_width - 0.4)
+            header.move_to([x_pos, center[1] + (panel_height / 2) - 0.48, 0])
+            column = VGroup(panel, header)
+            for index, item in enumerate(items[:6]):
+                bullet = self.label_mobject(
+                    f"• {safe_text(item, 72)}",
+                    font_size=21,
+                    color="#e2e8f0",
+                    max_width=panel_width - 0.45,
+                )
+                bullet.align_to(panel, direction=[-1, 0, 0])
+                bullet.shift([0.23, 0, 0])
+                bullet.move_to([
+                    x_pos,
+                    center[1] + (panel_height / 2) - 1.05 - (index * 0.48),
+                    0,
+                ])
+                column.add(bullet)
+            group.add(column)
+        return group
+
+    def timeline_mobject(self, payload: dict[str, Any]) -> Any:
+        items = [safe_text(item, 90) for item in payload.get("items", [])][:8]
+        center = self.point(payload.get("x", 50), payload.get("y", 54))
+        width, _ = self.screen_size(payload.get("width", 80), 10)
+        left = center[0] - (width / 2)
+        right = center[0] + (width / 2)
+        color = safe_color(payload.get("color"), "#93c5fd")
+        group = VGroup(Arrow([left, center[1], 0], [right, center[1], 0], buff=0, color=color))
+        for index, item in enumerate(items):
+            ratio = index / max(1, len(items) - 1)
+            x_pos = left + (ratio * width)
+            dot = Dot([x_pos, center[1], 0], radius=0.09, color="#fde68a")
+            stem_direction = 1 if index % 2 == 0 else -1
+            stem_end_y = center[1] + (stem_direction * 0.48)
+            stem = Line([x_pos, center[1], 0], [x_pos, stem_end_y, 0], color="#64748b")
+            label = self.label_mobject(
+                item,
+                font_size=20,
+                color="#e2e8f0",
+                max_width=max(1.2, width / max(2, len(items)) * 0.9),
+            )
+            label.move_to([x_pos, stem_end_y + (stem_direction * 0.26), 0])
+            group.add(stem, dot, label)
+        return group
+
+    def semantic_mobject(self, payload: dict[str, Any]) -> Any:
+        action_type = payload.get("type")
+        if action_type == "axes":
+            return self.axes_mobject(payload)
+        if action_type == "plot":
+            return self.plot_mobject(payload)
+        if action_type == "bar_chart":
+            return self.bar_chart_mobject(payload)
+        if action_type == "diagram":
+            return self.diagram_mobject(payload)
+        if action_type == "comparison":
+            return self.comparison_mobject(payload)
+        if action_type == "timeline":
+            return self.timeline_mobject(payload)
+        raise RuntimeError(f"Unsupported semantic action: {action_type}")
 
     def execute(self, payload: dict[str, Any]) -> None:
         if not self.scene:
@@ -401,7 +696,7 @@ class LiveManimSession:
             else:
                 self.objects[action_id] = mobject
                 self.scene.play(Write(mobject), run_time=run_time)
-        elif action_type in {"line", "arrow", "circle", "rectangle"}:
+        elif action_type in {"line", "arrow", "circle", "rectangle", "dot", "polyline", "polygon"}:
             mobject, animation = self.shape_mobject(payload)
             existing = self.objects.get(action_id)
             if existing is not None:
@@ -409,6 +704,14 @@ class LiveManimSession:
             else:
                 self.objects[action_id] = mobject
                 self.scene.play(animation, run_time=run_time)
+        elif action_type in {"axes", "plot", "bar_chart", "diagram", "comparison", "timeline"}:
+            mobject = self.semantic_mobject(payload)
+            existing = self.objects.get(action_id)
+            if existing is not None:
+                self.scene.play(Transform(existing, mobject), run_time=run_time)
+            else:
+                self.objects[action_id] = mobject
+                self.scene.play(FadeIn(mobject), run_time=run_time)
         elif action_type == "highlight":
             target_id = safe_text(payload.get("target_id") or action_id, 80)
             target = self.objects.get(target_id)

@@ -45,6 +45,39 @@ function waitForDrainOrClose(stream) {
   });
 }
 
+export function createSerializedJsonLineWriter(stream) {
+  const queue = [];
+  let waitingForDrain = false;
+
+  const flush = () => {
+    if (waitingForDrain || !stream.writable) return;
+    while (queue.length) {
+      const payload = queue.shift();
+      if (!stream.write(payload)) {
+        waitingForDrain = true;
+        stream.once('drain', () => {
+          waitingForDrain = false;
+          flush();
+        });
+        return;
+      }
+    }
+  };
+
+  return {
+    write(message) {
+      if (!stream.writable) {
+        throw new Error('Live Manim komut kanali kapali.');
+      }
+      queue.push(Buffer.from(`${JSON.stringify(message)}\n`, 'utf8'));
+      flush();
+    },
+    get queued() {
+      return queue.length;
+    }
+  };
+}
+
 export function buildLiveManimStartMessage(settings = {}) {
   return {
     type: 'start',
@@ -76,6 +109,7 @@ class LiveManimSession extends EventEmitter {
     this.videoEnded = false;
     this.finishedPayload = null;
     this.backpressurePromise = null;
+    this.commandWriter = createSerializedJsonLineWriter(this.worker.process.stdin);
     this.fileStream = createWriteStream(outputPath);
     this.fileStream.once('error', (error) => {
       this.fail(new Error(`Canli Manim dosyasi yazilamadi: ${error.message}`));
@@ -91,7 +125,7 @@ class LiveManimSession extends EventEmitter {
     if (this.done || this.failed || !this.worker.process.stdin.writable) {
       throw this.error || new Error('Live Manim worker artik komut kabul etmiyor.');
     }
-    this.worker.process.stdin.write(`${JSON.stringify(message)}\n`);
+    this.commandWriter.write(message);
   }
 
   start(settings = {}) {

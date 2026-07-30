@@ -156,7 +156,10 @@ const firstSegmentTargetSeconds = Math.max(
   Math.min(24, Number(process.env.FIRST_SEGMENT_TARGET_SECONDS || 20))
 );
 const liveBoardEnabled = String(process.env.LIVE_BOARD_ENABLED || 'true').toLowerCase() !== 'false';
-const defaultLiveBoardModel = geminiFallbackModels.find((model) => model.includes('flash-lite')) || geminiCodeModel;
+const defaultLiveBoardModel = [
+  geminiCodeModel,
+  ...geminiFallbackModels
+].find((model) => model && !model.includes('flash-lite')) || geminiCodeModel;
 const liveBoardModel = resolveGeminiModel(process.env.LIVE_BOARD_MODEL || defaultLiveBoardModel);
 const liveManimEnabled = String(process.env.LIVE_MANIM_ENABLED || 'true').toLowerCase() !== 'false';
 const liveManimWidth = 1280;
@@ -606,8 +609,10 @@ async function streamLiveBoardCommands(segment, onCommand, preferredModel = null
 
   for (const candidateModel of candidateModels) {
     let emitted = 0;
+    const commandTypes = {};
     const parser = createLiveBoardNdjsonParser((command) => {
       emitted += 1;
+      commandTypes[command.type] = (commandTypes[command.type] || 0) + 1;
       onCommand(command);
     });
 
@@ -632,10 +637,11 @@ async function streamLiveBoardCommands(segment, onCommand, preferredModel = null
       }
       logInfo(`${segment.id}: canli tahta Gemini akisi tamamlandi`, {
         model: candidateModel,
-        commands: emitted
+        commands: emitted,
+        commandTypes
       });
       markGeminiModelSuccess(candidateModel);
-      return { model: candidateModel, commands: emitted };
+      return { model: candidateModel, commands: emitted, commandTypes };
     } catch (error) {
       lastError = error;
       if (isGeminiFailoverError(error)) {
