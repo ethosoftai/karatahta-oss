@@ -44,28 +44,14 @@ function escapeSubtitlePath(filePath) {
   return filePath.replaceAll('\\', '/').replaceAll(':', '\\:').replaceAll("'", "\\'");
 }
 
-export function buildMuxArgs({
-  videoPath,
-  audioPath,
-  outputPath,
-  videoDuration,
-  audioDuration,
-  preset = 'medium',
-  crf = 20
-}) {
+export function buildMuxArgs({ videoPath, audioPath, outputPath, videoDuration, audioDuration }) {
   const factor = calculateVideoStretchFactor(videoDuration, audioDuration);
-  return ['-y', '-i', videoPath, '-i', audioPath, '-filter_complex', `[0:v]setpts=${factor}*PTS[v]`, '-map', '[v]', '-map', '1:a:0', '-c:v', 'libx264', '-preset', preset, '-crf', String(crf), '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', outputPath];
+  return ['-y', '-i', videoPath, '-i', audioPath, '-filter_complex', `[0:v]setpts=${factor}*PTS[v]`, '-map', '[v]', '-map', '1:a:0', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', outputPath];
 }
 
-export function buildBurnSubtitleArgs({
-  inputPath,
-  subtitlePath,
-  outputPath,
-  preset = 'medium',
-  crf = 20
-}) {
+export function buildBurnSubtitleArgs({ inputPath, subtitlePath, outputPath }) {
   const style = 'FontName=Noto Sans,FontSize=19,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=28';
-  return ['-y', '-i', inputPath, '-vf', `subtitles='${escapeSubtitlePath(subtitlePath)}':force_style='${style}'`, '-c:v', 'libx264', '-preset', preset, '-crf', String(crf), '-c:a', 'copy', '-movflags', '+faststart', outputPath];
+  return ['-y', '-i', inputPath, '-vf', `subtitles='${escapeSubtitlePath(subtitlePath)}':force_style='${style}'`, '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'copy', '-movflags', '+faststart', outputPath];
 }
 
 export function buildConcatArgs({ listPath, outputPath }) {
@@ -74,18 +60,6 @@ export function buildConcatArgs({ listPath, outputPath }) {
     '-f', 'concat',
     '-safe', '0',
     '-i', listPath,
-    '-c', 'copy',
-    '-movflags', '+faststart',
-    outputPath
-  ];
-}
-
-export function buildCanonicalRemuxArgs({ inputPath, outputPath }) {
-  return [
-    '-y',
-    '-i', inputPath,
-    '-map', '0:v:0',
-    '-map', '0:a:0?',
     '-c', 'copy',
     '-movflags', '+faststart',
     outputPath
