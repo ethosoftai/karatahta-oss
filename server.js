@@ -74,6 +74,7 @@ import {
   publicProgressiveState
 } from './services/progressiveManim.js';
 import {
+  buildEarlySpeechScript,
   extractFirstArrayObject,
   isUsableLessonSegment,
   mergeFirstSegment
@@ -1842,7 +1843,15 @@ async function runFullVideoJob(job) {
       try {
         segmentState.status = 'speech';
         updateJob(job, { current: `${segment.id}: speech uretiliyor...` });
-        const speech = await limitSpeech(() => createSpeechScript(segment));
+        const earlySpeech = index === 0 && job._fullPlanPromise
+          ? buildEarlySpeechScript(segment)
+          : null;
+        const speech = earlySpeech || await limitSpeech(() => createSpeechScript(segment));
+        if (earlySpeech) {
+          logInfo(`${segment.id}: streaming plandaki narration dogrudan kullanildi`, {
+            chars: earlySpeech.speech_text.length
+          });
+        }
         segmentState.speech = speech;
         if (index === 0) {
           job.timings.firstSpeechReadyAt ||= new Date().toISOString();
