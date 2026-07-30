@@ -73,6 +73,11 @@ import {
   createProgressiveState,
   publicProgressiveState
 } from './services/progressiveManim.js';
+import {
+  extractFirstArrayObject,
+  isUsableLessonSegment,
+  mergeFirstSegment
+} from './services/streamingPlan.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -181,6 +186,9 @@ const speechConcurrency = Number(process.env.SPEECH_CONCURRENCY || 3);
 const ttsConcurrency = Number(process.env.TTS_CONCURRENCY || 4);
 const codeConcurrency = Number(process.env.CODE_CONCURRENCY || 2);
 const renderConcurrency = Number(process.env.RENDER_CONCURRENCY || 1);
+const streamingPlanFirstSegmentEnabled = String(
+  process.env.STREAMING_PLAN_FIRST_SEGMENT || 'false'
+).toLowerCase() === 'true';
 const progressiveManimEnabled = String(process.env.PROGRESSIVE_MANIM_PARTIALS || 'false').toLowerCase() === 'true';
 const progressiveBufferSeconds = Math.max(2, Number(process.env.PROGRESSIVE_BUFFER_SECONDS || 6));
 const progressiveArtifactTtlMs = Math.max(
@@ -567,6 +575,71 @@ async function generateLlmText({
   const text = response.text || '';
   logInfo(`${label || 'Gemini'}: yanit geldi`, { model: usedModel, ms: Date.now() - started, chars: text.length });
   return text;
+}
+
+async function generateGeminiTextStream({
+  label = 'Gemini stream',
+  model,
+  systemInstruction,
+  userText,
+  json = false,
+  temperature = 0.4,
+  timeoutMs = geminiRequestTimeoutMs,
+  onText
+}) {
+  const gemini = requireGemini();
+  const started = Date.now();
+  logInfo(`${label}: istek basladi`, { provider: 'gemini', model, streaming: true });
+
+  const { response: text, model: usedModel } = await runGeminiModelRoute({
+    primaryModel: model,
+    fallbackModels: geminiFallbackModels,
+    generate: (candidateModel) => withRetry(label, () => runWithAbortTimeout(
+      async (abortSignal) => {
+        const stream = await gemini.models.generateContentStream({
+          model: candidateModel,
+          contents: [{ role: 'user', parts: [{ text: userText }] }],
+          config: {
+            ...(systemInstruction ? { systemInstruction } : {}),
+            ...(json ? { responseMimeType: 'application/json' } : {}),
+            temperature,
+            abortSignal
+          }
+        });
+        let accumulatedText = '';
+        for await (const chunk of stream) {
+          const delta = String(chunk.text || '');
+          if (!delta) continue;
+          accumulatedText += delta;
+          await onText?.({
+            text: accumulatedText,
+            delta,
+            model: candidateModel
+          });
+        }
+        return accumulatedText;
+      },
+      {
+        timeoutMs,
+        label: `${label}/${candidateModel}`
+      }
+    )),
+    onModelFailure: ({ model: failedModel, nextModel, error }) => {
+      logInfo(`${label}: model fallback`, {
+        failedModel,
+        nextModel,
+        reason: String(error?.message || error?.status || 'unknown').slice(0, 240)
+      });
+    }
+  });
+
+  logInfo(`${label}: yanit geldi`, {
+    model: usedModel,
+    ms: Date.now() - started,
+    chars: text.length,
+    streaming: true
+  });
+  return { text, model: usedModel };
 }
 
 function requireTts() {
@@ -1653,6 +1726,7 @@ function publicJob(job) {
     completedAt: job.completedAt,
     error: job.error,
     result: job.result,
+    plan: job.plan,
     segments: job.segments,
     lessonId: job.lessonId,
     progressive: publicProgressiveState(job.progressive),
@@ -1695,7 +1769,8 @@ async function runFullVideoJob(job) {
   try {
     logInfo(`Job ${job.id}: tam ders uretimi basladi`, {
       topic: job.plan.topic,
-      segments: job.plan.segments.length,
+      initialSegments: job.plan.segments.length,
+      expectedSegments: job.total,
       provider: llmProvider,
       planModel,
       codeModel
@@ -1705,7 +1780,7 @@ async function runFullVideoJob(job) {
       message: 'Segment pipeline basladi.'
     });
 
-    const videoPaths = new Array(job.plan.segments.length);
+    const videoPaths = new Array(job.total);
     let firstParallelStartedResolve = null;
     const firstParallelStarted = new Promise((resolve) => {
       firstParallelStartedResolve = resolve;
@@ -1714,14 +1789,49 @@ async function runFullVideoJob(job) {
     const firstReadyToRender = new Promise((resolve) => {
       firstReadyToRenderResolve = resolve;
     });
-    const codeSubmissionTurns = job.plan.segments.map(() => {
-      let resolve;
-      const promise = new Promise((turnResolve) => {
-        resolve = turnResolve;
+    const codeSubmissionTurns = [];
+    const ensureCodeSubmissionTurn = (index) => {
+      if (!codeSubmissionTurns[index]) {
+        let resolve;
+        const promise = new Promise((turnResolve) => {
+          resolve = turnResolve;
+        });
+        codeSubmissionTurns[index] = { promise, resolve };
+      }
+      return codeSubmissionTurns[index];
+    };
+    ensureCodeSubmissionTurn(0).resolve();
+    const fullPlanReadyTask = (async () => {
+      if (!job._fullPlanPromise) return job.plan;
+      const fullPlan = await job._fullPlanPromise;
+      if (!fullPlan || !Array.isArray(fullPlan.segments) || !fullPlan.segments.length) {
+        throw new Error('Streaming tam ders plani gecersiz.');
+      }
+
+      const previousStates = new Map(job.segments.map((segment) => [segment.id, segment]));
+      job.plan = fullPlan;
+      job.total = fullPlan.segments.length;
+      job.segments = fullPlan.segments.map((segment) => (
+        previousStates.get(segment.id) || {
+          id: segment.id,
+          title: segment.title,
+          status: 'queued'
+        }
+      ));
+      videoPaths.length = job.total;
+      for (let index = 0; index < job.total; index += 1) {
+        ensureCodeSubmissionTurn(index);
+      }
+      job.timings.fullPlanReadyAt = new Date().toISOString();
+      updateJob(job, {
+        message: `Tam plan hazir: ${job.total} segment.`
       });
-      return { promise, resolve };
-    });
-    codeSubmissionTurns[0]?.resolve();
+      logInfo(`Job ${job.id}: streaming tam plan pipeline'a eklendi`, {
+        segments: job.total
+      });
+      return fullPlan;
+    })();
+    void fullPlanReadyTask.catch(() => {});
     const prepareSegment = (segment, index) => (async () => {
       const segmentState = job.segments[index];
       const dbSegment = await persist(`${segment.id}/segment lookup`, () => getSegment({
@@ -1767,7 +1877,7 @@ async function runFullVideoJob(job) {
         const codePromise = (async () => {
           if (index > 0) {
             await firstReadyToRender;
-            await codeSubmissionTurns[index - 1].promise;
+            await ensureCodeSubmissionTurn(index - 1).promise;
             segmentState.status = 'code';
             updateJob(job, { current: `${segment.id}: Manim kodu uretiliyor...` });
           }
@@ -1781,7 +1891,7 @@ async function runFullVideoJob(job) {
             },
             segmentId: segment.id
           }));
-          codeSubmissionTurns[index]?.resolve();
+          ensureCodeSubmissionTurn(index).resolve();
           return queuedCode.then((value) => {
             if (index === 0) job.timings.firstCodeReadyAt ||= new Date().toISOString();
             return value;
@@ -1842,7 +1952,7 @@ async function runFullVideoJob(job) {
         }
         return { ok: true, segment, dbSegment, speech, manimCode, code, tts, uploadedAudio };
       } catch (error) {
-        codeSubmissionTurns[index]?.resolve();
+        ensureCodeSubmissionTurn(index).resolve();
         if (index === 0) {
           firstParallelStartedResolve();
           firstReadyToRenderResolve();
@@ -1854,18 +1964,25 @@ async function runFullVideoJob(job) {
       }
     })();
 
-    const preparationTasks = new Array(job.plan.segments.length);
+    const preparationTasks = new Array(job.total);
     if (job.plan.segments.length) {
       logInfo(`Job ${job.id}: ilk segment oncelikli hazirlaniyor`);
       preparationTasks[0] = prepareSegment(job.plan.segments[0], 0);
       await firstParallelStarted;
     }
 
-    for (let index = 1; index < job.plan.segments.length; index += 1) {
-      preparationTasks[index] = prepareSegment(job.plan.segments[index], index);
-    }
+    const remainingPreparationSetup = (async () => {
+      const fullPlan = await fullPlanReadyTask;
+      for (let index = 1; index < fullPlan.segments.length; index += 1) {
+        preparationTasks[index] = prepareSegment(fullPlan.segments[index], index);
+      }
+    })();
+    void remainingPreparationSetup.catch(() => {});
 
-    for (let index = 0; index < preparationTasks.length; index += 1) {
+    for (let index = 0; index < job.total; index += 1) {
+      if (index === 1) {
+        await remainingPreparationSetup;
+      }
       const prepared = await preparationTasks[index];
       const segmentState = job.segments[index];
 
@@ -2034,6 +2151,7 @@ app.get('/api/config', async (_req, res, next) => {
       ttsVoiceId: null,
       manimFont,
       manimQuality,
+      streamingPlanFirstSegmentEnabled,
       progressiveManimEnabled,
       progressiveBufferSeconds,
       progressiveVideo: {
@@ -2229,7 +2347,7 @@ app.get('/api/lessons/:id/video-url', async (req, res, next) => {
   }
 });
 
-async function createTraditionalLessonPlan(body, userContext) {
+async function buildTraditionalPlannerRequest(body) {
   const { planner } = await loadPrompts();
   const topic = String(body.topic || '').trim();
   if (!topic) {
@@ -2280,6 +2398,24 @@ ZORUNLU:
 - Her segment tek ana fikre odaklansin ama o fikri yeterince anlatsin.
 - JSON disinda hicbir sey yazma.`;
 
+  return {
+    topic,
+    input,
+    targetMinutes,
+    segmentCount,
+    fullLessonPlanner
+  };
+}
+
+async function createTraditionalLessonPlan(body, userContext) {
+  const {
+    topic,
+    input,
+    targetMinutes,
+    segmentCount,
+    fullLessonPlanner
+  } = await buildTraditionalPlannerRequest(body);
+
   const responseText = await generateLlmText({
     label: llmProvider === 'groq' ? 'Groq' : 'Gemini',
     model: planModel,
@@ -2319,6 +2455,153 @@ ZORUNLU:
     plan._lesson_id = lesson.id;
   }
   return { plan, lessonId: lesson?.id || null };
+}
+
+function createDeferredPromise() {
+  let resolve;
+  let reject;
+  const promise = new Promise((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function startStreamingTraditionalLessonPlan(body, userContext) {
+  const {
+    topic,
+    input,
+    targetMinutes,
+    segmentCount,
+    fullLessonPlanner
+  } = await buildTraditionalPlannerRequest(body);
+  const lesson = await persist('lesson/streaming-plan-create', () => createLesson({
+    userId: userContext.profileId,
+    title: topic,
+    topic,
+    studentLevel: input.student_level,
+    targetMinutes,
+    targetSegmentCount: segmentCount,
+    sourceType: 'topic'
+  }));
+  const lessonId = lesson?.id || null;
+  const firstSegmentDeferred = createDeferredPromise();
+  let firstSegment = null;
+  let firstSegmentPublishPromise = null;
+
+  const publishFirstSegment = (candidate) => {
+    if (firstSegmentPublishPromise || !isUsableLessonSegment(candidate)) {
+      return firstSegmentPublishPromise;
+    }
+    firstSegment = {
+      ...candidate,
+      id: candidate.id || 's1'
+    };
+    firstSegmentPublishPromise = (async () => {
+      await persist('lesson/streaming-first-segment', () => (
+        lessonId ? saveSegments({ lessonId, segments: [firstSegment] }) : null
+      ));
+      const readyAt = new Date().toISOString();
+      logInfo('Streaming plan: ilk segment hazir', {
+        segmentId: firstSegment.id,
+        title: firstSegment.title || null
+      });
+      firstSegmentDeferred.resolve({ segment: firstSegment, readyAt });
+      return firstSegment;
+    })().catch((error) => {
+      firstSegmentDeferred.reject(error);
+      throw error;
+    });
+    return firstSegmentPublishPromise;
+  };
+
+  const streamingPlanner = `${fullLessonPlanner}
+
+## STREAMING JSON SIRASI
+Kullanici ilk segment tamamlanir tamamlanmaz uretime baslayacak.
+Bu nedenle root JSON nesnesinin ILK alani "segments" olmak zorunda.
+Yaniti tam olarak {"segments":[{s1...},{s2...},...], ...diger root alanlari...} sirasiyla yaz.
+Once s1 objesini eksiksiz kapat, sonra s2 ve diger segmentlere gec.
+segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazilacak diye pedagojik kaliteyi veya gerekli alanlari azaltma.`;
+
+  const fullPlanPromise = (async () => {
+    try {
+      const { text: responseText, model: usedModel } = await generateGeminiTextStream({
+        label: 'Gemini streaming plan',
+        model: planModel,
+        systemInstruction: streamingPlanner,
+        userText: JSON.stringify(input, null, 2),
+        json: true,
+        temperature: 0.7,
+        timeoutMs: Math.min(120000, Math.max(30000, segmentCount * 3000)),
+        onText: async ({ text }) => {
+          if (firstSegmentPublishPromise) return;
+          const extracted = extractFirstArrayObject(text, 'segments');
+          if (isUsableLessonSegment(extracted)) {
+            await publishFirstSegment(extracted);
+          }
+        }
+      });
+
+      let plan = parseLlmJson(responseText || '', 'Streaming ders plani');
+      if (!firstSegmentPublishPromise) {
+        const completedFirstSegment = plan.segments?.[0];
+        if (!completedFirstSegment) {
+          throw new Error('Streaming ders planinda ilk segment bulunamadi.');
+        }
+        publishFirstSegment(completedFirstSegment);
+      }
+      await firstSegmentPublishPromise;
+      plan = mergeFirstSegment(plan, firstSegment);
+      if (lessonId) plan._lesson_id = lessonId;
+
+      await persist('lesson/streaming-plan-complete', async () => {
+        if (!lessonId) return null;
+        await updateLesson(lessonId, { title: plan.topic || topic });
+        await savePlan({
+          lessonId,
+          provider: llmProvider,
+          model: usedModel,
+          prompt: streamingPlanner,
+          plan,
+          rawResponse: responseText
+        });
+        await saveSegments({
+          lessonId,
+          segments: (plan.segments || []).slice(1),
+          startIndex: 1
+        });
+        return lesson;
+      });
+      logInfo('Streaming plan: tam plan hazir', {
+        topic: plan.topic || topic,
+        segments: plan.segments.length
+      });
+      return plan;
+    } catch (error) {
+      firstSegmentDeferred.reject(error);
+      await persist('lesson/streaming-plan-failed', () => (
+        lessonId ? updateLesson(lessonId, { status: 'failed' }) : null
+      ));
+      throw error;
+    }
+  })();
+  void fullPlanPromise.catch(() => {});
+
+  const firstReady = await firstSegmentDeferred.promise;
+  const initialPlan = {
+    topic,
+    estimated_duration_minutes: targetMinutes,
+    segments: [firstReady.segment],
+    ...(lessonId ? { _lesson_id: lessonId } : {})
+  };
+  return {
+    initialPlan,
+    fullPlanPromise,
+    lessonId,
+    expectedSegmentCount: segmentCount,
+    firstSegmentReadyAt: firstReady.readyAt
+  };
 }
 
 app.post('/api/plan', async (req, res, next) => {
@@ -2553,7 +2836,14 @@ app.post('/api/concat', async (req, res, next) => {
   }
 });
 
-async function queueTraditionalVideoJob({ plan, lessonId, userContext, requestTimings = {} }) {
+async function queueTraditionalVideoJob({
+  plan,
+  lessonId,
+  userContext,
+  requestTimings = {},
+  fullPlanPromise = null,
+  expectedSegmentCount = null
+}) {
   if (!plan || !Array.isArray(plan.segments) || !plan.segments.length) {
     const error = new Error('Tam ders icin gecerli plan.segments gerekli.');
     error.statusCode = 400;
@@ -2561,6 +2851,10 @@ async function queueTraditionalVideoJob({ plan, lessonId, userContext, requestTi
   }
   await requireOwnedLesson(lessonId, userContext);
 
+  const expectedTotal = Math.max(
+    plan.segments.length,
+    Number(expectedSegmentCount || plan.segments.length)
+  );
   const job = {
     id: `${Date.now()}-${randomUUID().slice(0, 8)}`,
     lessonId,
@@ -2568,7 +2862,7 @@ async function queueTraditionalVideoJob({ plan, lessonId, userContext, requestTi
     dbJobId: null,
     status: 'queued',
     progress: 0,
-    total: plan.segments.length,
+    total: expectedTotal,
     current: 'Siraya alindi.',
     message: 'Tam ders uretimi bekliyor.',
     plan,
@@ -2590,6 +2884,7 @@ async function queueTraditionalVideoJob({ plan, lessonId, userContext, requestTi
     timings: {
       promptReceivedAt: requestTimings.promptReceivedAt || new Date().toISOString(),
       planReadyAt: requestTimings.planReadyAt || new Date().toISOString(),
+      fullPlanReadyAt: fullPlanPromise ? null : (requestTimings.planReadyAt || new Date().toISOString()),
       firstSpeechReadyAt: null,
       firstTtsReadyAt: null,
       firstCodeReadyAt: null,
@@ -2598,13 +2893,14 @@ async function queueTraditionalVideoJob({ plan, lessonId, userContext, requestTi
       playbackReadyAt: null,
       firstSegmentCompletedAt: null,
       finalVideoReadyAt: null
-    }
+    },
+    _fullPlanPromise: fullPlanPromise
   };
 
   const dbJob = await persist('generation-job/create', () => createGenerationJob({
     appJobId: job.id,
     lessonId,
-    total: plan.segments.length,
+    total: job.total,
     current: job.current,
     message: job.message
   }));
@@ -2622,6 +2918,25 @@ app.post('/api/generate-lesson', async (req, res, next) => {
   try {
     const promptReceivedAt = new Date().toISOString();
     const userContext = await resolveRequestUser(req);
+    if (llmProvider === 'gemini' && streamingPlanFirstSegmentEnabled) {
+      const streamingPlan = await startStreamingTraditionalLessonPlan(req.body, userContext);
+      const job = await queueTraditionalVideoJob({
+        plan: streamingPlan.initialPlan,
+        lessonId: streamingPlan.lessonId,
+        userContext,
+        fullPlanPromise: streamingPlan.fullPlanPromise,
+        expectedSegmentCount: streamingPlan.expectedSegmentCount,
+        requestTimings: {
+          promptReceivedAt,
+          planReadyAt: streamingPlan.firstSegmentReadyAt
+        }
+      });
+      return res.status(202).json({
+        ...publicJob(job),
+        lessonId: streamingPlan.lessonId
+      });
+    }
+
     const { plan, lessonId } = await createTraditionalLessonPlan(req.body, userContext);
     const planReadyAt = new Date().toISOString();
     const job = await queueTraditionalVideoJob({

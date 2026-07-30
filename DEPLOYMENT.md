@@ -24,12 +24,18 @@ PROGRESSIVE_MANIM_PARTIALS=true
 PROGRESSIVE_BUFFER_SECONDS=12
 PROGRESSIVE_ARTIFACT_TTL_MS=1800000
 GEMINI_REQUEST_TIMEOUT_MS=20000
+STREAMING_PLAN_FIRST_SEGMENT=true
 ```
 
 Flag açıkken Manim ayrıca `1280x720 @ 30 FPS` ile zorlanır. Backend yalnız
 tamamlanmış ve `ffprobe` doğrulamasından geçen `partial_movie_files` çıktılarını
 authenticated fMP4 manifestine ekler. Flag kapatıldığında traditional segment
 render + final concat akışı değişmeden çalışır.
+
+`STREAMING_PLAN_FIRST_SEGMENT=true` olduğunda Gemini plan JSON'unu akış halinde
+döndürür. İlk tamamlanmış segment TTS + Manim hazırlığına hemen girerken kalan
+plan arka planda tamamlanır. Sorun halinde bu değişken `false` yapılarak tam-plan
+bekleyen eski akışa kod değişikliği olmadan dönülebilir.
 
 ## Gerekli Railway değişkenleri
 
@@ -44,6 +50,7 @@ GEMINI_PLAN_MODEL=gemini-3-flash-preview
 GEMINI_CODE_MODEL=gemini-3-flash-preview
 GEMINI_FALLBACK_MODELS=gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3-flash-preview
 GEMINI_REQUEST_TIMEOUT_MS=20000
+STREAMING_PLAN_FIRST_SEGMENT=true
 
 TTS_PROVIDER=edge
 EDGE_TTS_VOICE=tr-TR-AhmetNeural
