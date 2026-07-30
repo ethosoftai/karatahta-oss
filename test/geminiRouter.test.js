@@ -7,6 +7,7 @@ import {
   isGeminiFailoverError,
   markGeminiModelFailure,
   resetGeminiModelCooldowns,
+  runWithAbortTimeout,
   runGeminiModelRoute
 } from '../services/geminiRouter.js';
 
@@ -56,10 +57,24 @@ test('kota hatası alan modeli sonraki isteklerde cooldown süresince atlar', ()
   resetGeminiModelCooldowns();
 });
 
-test('404 ve 503 model erisilebilirlik hatalari fallback icin uygundur', () => {
+test('404, 503 ve timeout hatalari fallback icin uygundur', () => {
   assert.equal(isGeminiFailoverError({ status: 404 }), true);
   assert.equal(isGeminiFailoverError({ code: 503 }), true);
+  assert.equal(isGeminiFailoverError({ statusCode: 504 }), true);
+  assert.equal(isGeminiFailoverError(new Error('request timed out')), true);
   assert.equal(isGeminiFailoverError(new Error('model is no longer available')), true);
+});
+
+test('takilan model istegini abort edip timeout hatasi dondurur', async () => {
+  await assert.rejects(
+    runWithAbortTimeout(
+      (signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      }),
+      { timeoutMs: 10, label: 'Gemini test' }
+    ),
+    (error) => error.code === 'LLM_REQUEST_TIMEOUT' && error.statusCode === 504
+  );
 });
 
 test('gecersiz istek hatasinda baska modele gecmez', async () => {

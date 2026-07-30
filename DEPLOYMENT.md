@@ -21,7 +21,9 @@ Progressive oynatma feature flag arkasındadır. Önce staging/preview ortamınd
 ```env
 MANIM_QUALITY=-qm
 PROGRESSIVE_MANIM_PARTIALS=true
-PROGRESSIVE_BUFFER_SECONDS=6
+PROGRESSIVE_BUFFER_SECONDS=12
+PROGRESSIVE_ARTIFACT_TTL_MS=1800000
+GEMINI_REQUEST_TIMEOUT_MS=20000
 ```
 
 Flag açıkken Manim ayrıca `1280x720 @ 30 FPS` ile zorlanır. Backend yalnız
@@ -41,6 +43,7 @@ GEMINI_API_KEY=
 GEMINI_PLAN_MODEL=gemini-3-flash-preview
 GEMINI_CODE_MODEL=gemini-3-flash-preview
 GEMINI_FALLBACK_MODELS=gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3-flash-preview
+GEMINI_REQUEST_TIMEOUT_MS=20000
 
 TTS_PROVIDER=edge
 EDGE_TTS_VOICE=tr-TR-AhmetNeural
@@ -48,6 +51,9 @@ EDGE_TTS_RATE=+0%
 
 MANIM_QUALITY=-qm
 MANIM_FONT=Georgia
+PROGRESSIVE_MANIM_PARTIALS=true
+PROGRESSIVE_BUFFER_SECONDS=12
+PROGRESSIVE_ARTIFACT_TTL_MS=1800000
 TARGET_VIDEO_MINUTES=10
 TARGET_SEGMENT_COUNT=8
 

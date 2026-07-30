@@ -19,6 +19,7 @@ function cooldownMsForError(error) {
   if (numericCode === 404) return 6 * 60 * 60 * 1000;
   if (numericCode === 429) return 10 * 60 * 1000;
   if (numericCode === 503) return 30 * 1000;
+  if (numericCode === 504) return 15 * 1000;
   const message = String(error?.message || error?.error?.message || '');
   if (/NOT_FOUND|no longer available/i.test(message)) return 6 * 60 * 60 * 1000;
   if (/RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(message)) return 10 * 60 * 1000;
@@ -50,7 +51,7 @@ export function buildAvailableGeminiModelRoute(
 
 export function isGeminiFailoverError(error) {
   const numericCode = Number(error?.statusCode || error?.code || error?.status);
-  if ([404, 429, 503].includes(numericCode)) {
+  if ([404, 429, 503, 504].includes(numericCode)) {
     return true;
   }
 
@@ -61,7 +62,35 @@ export function isGeminiFailoverError(error) {
     error?.error?.message
   ].filter(Boolean).join(' ');
 
-  return /RESOURCE_EXHAUSTED|NOT_FOUND|UNAVAILABLE|quota|rate.?limit|no longer available|high demand/i.test(message);
+  return /RESOURCE_EXHAUSTED|NOT_FOUND|UNAVAILABLE|DEADLINE_EXCEEDED|quota|rate.?limit|no longer available|high demand|timed? ?out|timeout|aborted/i.test(message);
+}
+
+export async function runWithAbortTimeout(task, {
+  timeoutMs = 20000,
+  label = 'Gemini'
+} = {}) {
+  const safeTimeoutMs = Math.max(1000, Number(timeoutMs) || 20000);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, safeTimeoutMs);
+
+  try {
+    return await task(controller.signal);
+  } catch (error) {
+    if (!timedOut && !controller.signal.aborted) {
+      throw error;
+    }
+    const timeoutError = new Error(`${label} istegi ${safeTimeoutMs} ms icinde tamamlanmadi.`);
+    timeoutError.code = 'LLM_REQUEST_TIMEOUT';
+    timeoutError.statusCode = 504;
+    timeoutError.cause = error;
+    throw timeoutError;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function runGeminiModelRoute({

@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import {
   DEFAULT_GEMINI_FALLBACK_MODELS,
+  runWithAbortTimeout,
   runGeminiModelRoute
 } from './services/geminiRouter.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
@@ -146,6 +147,10 @@ const speechVolume = Number(process.env.SPEECH_VOLUME || 1.25);
 const targetVideoMinutes = Number(process.env.TARGET_VIDEO_MINUTES || 10);
 const targetSegmentCount = Number(process.env.TARGET_SEGMENT_COUNT || 8);
 const geminiApiKey = process.env.GEMINI_API_KEY;
+const geminiRequestTimeoutMs = Math.max(
+  5000,
+  Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 20000)
+);
 const groqApiKey = process.env.GROQ_API_KEY;
 const apiKey = llmProvider === 'groq' ? groqApiKey : geminiApiKey;
 const ai = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
@@ -464,11 +469,20 @@ async function generateGeminiContent({ label = 'Gemini', model, contents, config
   return runGeminiModelRoute({
     primaryModel: model,
     fallbackModels: geminiFallbackModels,
-    generate: (candidateModel) => withRetry(label, () => gemini.models.generateContent({
-      model: candidateModel,
-      contents,
-      config
-    })),
+    generate: (candidateModel) => withRetry(label, () => runWithAbortTimeout(
+      (abortSignal) => gemini.models.generateContent({
+        model: candidateModel,
+        contents,
+        config: {
+          ...config,
+          abortSignal
+        }
+      }),
+      {
+        timeoutMs: geminiRequestTimeoutMs,
+        label: `${label}/${candidateModel}`
+      }
+    )),
     onModelFailure: ({ model: failedModel, nextModel, error }) => {
       logInfo(`${label}: model fallback`, {
         failedModel,
@@ -1700,6 +1714,14 @@ async function runFullVideoJob(job) {
     const firstReadyToRender = new Promise((resolve) => {
       firstReadyToRenderResolve = resolve;
     });
+    const codeSubmissionTurns = job.plan.segments.map(() => {
+      let resolve;
+      const promise = new Promise((turnResolve) => {
+        resolve = turnResolve;
+      });
+      return { promise, resolve };
+    });
+    codeSubmissionTurns[0]?.resolve();
     const prepareSegment = (segment, index) => (async () => {
       const segmentState = job.segments[index];
       const dbSegment = await persist(`${segment.id}/segment lookup`, () => getSegment({
@@ -1745,10 +1767,11 @@ async function runFullVideoJob(job) {
         const codePromise = (async () => {
           if (index > 0) {
             await firstReadyToRender;
+            await codeSubmissionTurns[index - 1].promise;
             segmentState.status = 'code';
             updateJob(job, { current: `${segment.id}: Manim kodu uretiliyor...` });
           }
-          return limitCode(() => createManimCode({
+          const queuedCode = limitCode(() => createManimCode({
             animation: segment.animation,
             durationSeconds: estimatedDuration,
             speech: {
@@ -1757,7 +1780,9 @@ async function runFullVideoJob(job) {
               cue_plan: speech.cue_plan || []
             },
             segmentId: segment.id
-          })).then((value) => {
+          }));
+          codeSubmissionTurns[index]?.resolve();
+          return queuedCode.then((value) => {
             if (index === 0) job.timings.firstCodeReadyAt ||= new Date().toISOString();
             return value;
           });
@@ -1817,6 +1842,7 @@ async function runFullVideoJob(job) {
         }
         return { ok: true, segment, dbSegment, speech, manimCode, code, tts, uploadedAudio };
       } catch (error) {
+        codeSubmissionTurns[index]?.resolve();
         if (index === 0) {
           firstParallelStartedResolve();
           firstReadyToRenderResolve();
