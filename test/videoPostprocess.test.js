@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildConcatArgs,
+  buildFilterConcatArgs,
   buildProgressiveAudioArgs,
   buildProgressivePartialArgs,
   buildTimedSubtitleSrt,
@@ -29,6 +30,31 @@ test('final MP4 birleştirmesinde hızlı başlatma metadata bayrağını kullan
     listPath: '/tmp/concat.txt',
     outputPath: '/tmp/final.mp4'
   });
+  assert.deepEqual(args.slice(-3), ['-movflags', '+faststart', '/tmp/final.mp4']);
+  assert.equal(args[args.indexOf('-c:v') + 1], 'libx264');
+  assert.equal(args[args.indexOf('-c:a') + 1], 'aac');
+  assert.ok(!args.includes('copy'));
+});
+
+test('sessiz Manim mikro parcalarini birlestirirken hayali ses streami istemez', () => {
+  const args = buildConcatArgs({
+    listPath: '/tmp/partials.txt',
+    outputPath: '/tmp/partials.mp4',
+    hasAudio: false
+  });
+  assert.ok(args.includes('-an'));
+  assert.ok(!args.includes('-af'));
+});
+
+test('final ders segmentlerinin ses ve video zamanlarini sifirlayarak filter concat yapar', () => {
+  const args = buildFilterConcatArgs({
+    inputPaths: ['/tmp/a.mp4', '/tmp/b.mp4'],
+    outputPath: '/tmp/final.mp4'
+  });
+  const filter = args[args.indexOf('-filter_complex') + 1];
+  assert.match(filter, /setpts=PTS-STARTPTS\[v0\]/);
+  assert.match(filter, /asetpts=PTS-STARTPTS\[a1\]/);
+  assert.match(filter, /concat=n=2:v=1:a=1/);
   assert.deepEqual(args.slice(-3), ['-movflags', '+faststart', '/tmp/final.mp4']);
 });
 

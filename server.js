@@ -5,7 +5,7 @@ import express from 'express';
 import OpenAI from 'openai';
 import { Agent, setGlobalDispatcher } from 'undici';
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -23,6 +23,7 @@ import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './ser
 import {
   buildBurnSubtitleArgs,
   buildConcatArgs,
+  buildFilterConcatArgs,
   buildMuxArgs,
   buildProgressiveAudioArgs,
   buildProgressivePartialArgs,
@@ -36,6 +37,7 @@ import {
   extensionFromContentType,
   fileNameFromLocalPath,
   getProfileForAccessToken,
+  getGenerationJobForUser,
   getOrCreateChat,
   getLessonForUser,
   getLessonDetailForUser,
@@ -197,10 +199,14 @@ const rendersDir = path.join(__dirname, 'renders');
 const downloadsDir = path.join(__dirname, 'downloads');
 const musicExtensions = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.mp4']);
 const fullVideoJobs = new Map();
-const speechConcurrency = Number(process.env.SPEECH_CONCURRENCY || 3);
-const ttsConcurrency = Number(process.env.TTS_CONCURRENCY || 4);
-const codeConcurrency = Number(process.env.CODE_CONCURRENCY || 2);
-const renderConcurrency = Number(process.env.RENDER_CONCURRENCY || 1);
+const positiveConcurrency = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+};
+const speechConcurrency = positiveConcurrency(process.env.SPEECH_CONCURRENCY, 3);
+const ttsConcurrency = positiveConcurrency(process.env.TTS_CONCURRENCY, 4);
+const codeConcurrency = positiveConcurrency(process.env.CODE_CONCURRENCY, 2);
+const renderConcurrency = positiveConcurrency(process.env.RENDER_CONCURRENCY, 2);
 const streamingPlanFirstSegmentEnabled = String(
   process.env.STREAMING_PLAN_FIRST_SEGMENT || 'false'
 ).toLowerCase() === 'true';
@@ -211,6 +217,13 @@ const progressiveArtifactTtlMs = Math.max(
   10 * 60 * 1000,
   Number(process.env.PROGRESSIVE_ARTIFACT_TTL_MS || 30 * 60 * 1000)
 );
+const completedJobTtlMs = Math.max(
+  progressiveArtifactTtlMs,
+  Number(process.env.COMPLETED_JOB_TTL_MS || 2 * 60 * 60 * 1000)
+);
+const localMediaSigningSecret = process.env.LOCAL_MEDIA_SIGNING_SECRET
+  || deepseekApiKey
+  || randomUUID();
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -229,7 +242,6 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static(publicDir));
-app.use('/renders', express.static(rendersDir));
 
 function createLimiter(maxConcurrent) {
   let active = 0;
@@ -276,6 +288,25 @@ async function persist(label, fn) {
     return await fn();
   } catch (error) {
     logInfo(`Supabase kaydi atlandi: ${label}`, { error: error.message });
+    return null;
+  }
+}
+
+async function persistRequired(label, fn) {
+  if (!supabaseConfigured) return null;
+  try {
+    return await fn();
+  } catch (error) {
+    logInfo(`Zorunlu kalici kayit basarisiz: ${label}`, { error: error.message });
+    throw new Error(`${label} kalici olarak kaydedilemedi: ${error.message}`, { cause: error });
+  }
+}
+
+async function createStorageAccessOrNull(label, options) {
+  try {
+    return await createStorageSignedUrl(options);
+  } catch (error) {
+    logInfo(`Imzali medya URL gecici olarak olusturulamadi: ${label}`, { error: error.message });
     return null;
   }
 }
@@ -332,6 +363,13 @@ async function requireOwnedLesson(lessonId, userContext) {
 async function createVideoAccessPayload(video) {
   const storagePath = video?.video_storage_path;
   if (!storagePath) {
+    if (video?.local_video_path) {
+      return {
+        videoUrl: createLocalMediaUrl(video.local_video_path, signedVideoUrlTtlSeconds),
+        videoUrlExpiresInSeconds: Number(signedVideoUrlTtlSeconds),
+        videoUrlExpiresAt: new Date(Date.now() + Number(signedVideoUrlTtlSeconds) * 1000).toISOString()
+      };
+    }
     return {
       videoUrl: null,
       videoUrlExpiresInSeconds: null,
@@ -511,7 +549,6 @@ async function generateLlmText({
   maxCompletionTokens = null,
   thinkingEnabled = true
 }) {
-  void temperature;
   const started = Date.now();
   logInfo(`${label || llmProvider}: istek basladi`, { provider: llmProvider, model });
   const client = requireDeepSeek();
@@ -523,6 +560,7 @@ async function generateLlmText({
     ],
     ...(thinkingEnabled ? { reasoning_effort: deepseekReasoningEffort } : {}),
     thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
+    temperature: Number(temperature),
     stream: false,
     ...(json ? { response_format: { type: 'json_object' } } : {}),
     ...(maxCompletionTokens ? { max_tokens: maxCompletionTokens } : {})
@@ -544,7 +582,6 @@ async function generateDeepSeekTextStream({
   onText,
   thinkingEnabled = true
 }) {
-  void temperature;
   const client = requireDeepSeek();
   const started = Date.now();
   logInfo(`${label}: istek basladi`, { provider: llmProvider, model, streaming: true });
@@ -556,6 +593,7 @@ async function generateDeepSeekTextStream({
     ],
     ...(thinkingEnabled ? { reasoning_effort: deepseekReasoningEffort } : {}),
     thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
+    temperature: Number(temperature),
     stream: true,
     ...(json ? { response_format: { type: 'json_object' } } : {})
   }, { timeout: timeoutMs }));
@@ -840,11 +878,46 @@ function sanitizeSegmentId(segmentId) {
 function resolveRenderRelative(relativePath) {
   const cleanRelativePath = String(relativePath || '').replace(/^\/?renders\//, '');
   const fullPath = path.resolve(rendersDir, cleanRelativePath);
-  if (!fullPath.startsWith(path.resolve(rendersDir))) {
+  const renderRoot = `${path.resolve(rendersDir)}${path.sep}`;
+  if (fullPath !== path.resolve(rendersDir) && !fullPath.startsWith(renderRoot)) {
     throw new Error('Gecersiz render dosya yolu.');
   }
   return fullPath;
 }
+
+function localMediaSignature(relativePath, expiresAt) {
+  return createHmac('sha256', localMediaSigningSecret)
+    .update(`${relativePath}\n${expiresAt}`)
+    .digest('hex');
+}
+
+function createLocalMediaUrl(relativePath, ttlSeconds = 3600) {
+  const cleanRelativePath = path.relative(rendersDir, resolveRenderRelative(relativePath))
+    .replaceAll(path.sep, '/');
+  const expiresAt = Math.floor(Date.now() / 1000) + Math.max(60, Number(ttlSeconds) || 3600);
+  const signature = localMediaSignature(cleanRelativePath, expiresAt);
+  return `/renders/${encodeURI(cleanRelativePath)}?expires=${expiresAt}&signature=${signature}`;
+}
+
+function validLocalMediaRequest(relativePath, expiresAt, signature) {
+  const expiry = Number(expiresAt);
+  if (!Number.isFinite(expiry) || expiry < Math.floor(Date.now() / 1000)) return false;
+  const expected = Buffer.from(localMediaSignature(relativePath, expiry), 'hex');
+  const supplied = Buffer.from(String(signature || ''), 'hex');
+  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+}
+
+app.get(/^\/renders\/(.+)$/, (req, res, next) => {
+  try {
+    const relativePath = decodeURIComponent(req.params[0] || '');
+    if (!validLocalMediaRequest(relativePath, req.query.expires, req.query.signature)) {
+      return res.status(403).json({ error: 'Medya baglantisi gecersiz veya suresi dolmus.' });
+    }
+    return res.sendFile(resolveRenderRelative(relativePath));
+  } catch (error) {
+    return next(error);
+  }
+});
 
 async function uploadRenderRelative({ bucket, userId, lessonId, segmentKey, kind, relativePath, contentType }) {
   if (!lessonId || !relativePath) {
@@ -924,6 +997,16 @@ function runCommand(command, args, options = {}) {
 
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    let forceKillTimer = null;
+
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearTimeout(forceKillTimer);
+      resolve({ stdout, stderr, ...payload });
+    };
 
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString();
@@ -935,11 +1018,17 @@ function runCommand(command, args, options = {}) {
     const timeout = setTimeout(() => {
       child.kill('SIGTERM');
       stderr += '\nRender zaman asimina ugradi.';
+      forceKillTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+      }, Math.max(1000, Number(options.killGraceMs || 5000)));
     }, options.timeoutMs || 180000);
 
     child.on('close', (code) => {
-      clearTimeout(timeout);
-      resolve({ code, stdout, stderr });
+      finish({ code });
+    });
+    child.on('error', (error) => {
+      stderr += `\nKomut baslatilamadi: ${error.message}`;
+      finish({ code: -1 });
     });
   });
 }
@@ -955,7 +1044,11 @@ async function getMediaDurationSeconds(filePath) {
     throw new Error(`ffprobe sure okuyamadi: ${result.stderr || result.stdout}`);
   }
 
-  return Number.parseFloat(result.stdout.trim());
+  const duration = Number.parseFloat(result.stdout.trim());
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new Error(`ffprobe gecersiz sure dondurdu: ${result.stdout.trim()}`);
+  }
+  return duration;
 }
 
 async function probeVideo(filePath) {
@@ -1094,37 +1187,57 @@ async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
   const speechDuration = audioPath ? await getMediaDurationSeconds(audioPath) : null;
   const targetDuration = speechDuration || videoDuration;
   const backgroundMusicPath = await pickBackgroundMusic();
+  if (!audioPath && !backgroundMusicPath) return null;
+
+  const logs = [];
+  const temporaryPaths = [];
+  let currentPath = videoPath;
+
+  if (audioPath) {
+    const speechMuxPath = backgroundMusicPath || speechText ? `${outputPath}.speech.mp4` : outputPath;
+    const speechMuxResult = await runCommand(
+      'ffmpeg',
+      buildMuxArgs({
+        videoPath,
+        audioPath,
+        outputPath: speechMuxPath,
+        videoDuration,
+        audioDuration: speechDuration,
+        volume: speechVolume
+      }),
+      { timeoutMs: 180000 }
+    );
+    if (speechMuxResult.code !== 0) {
+      const error = new Error('ffmpeg video ve sesi surelerini esitleyerek birlestiremedi.');
+      error.stdout = speechMuxResult.stdout;
+      error.stderr = speechMuxResult.stderr;
+      throw error;
+    }
+    logs.push(speechMuxResult);
+    currentPath = speechMuxPath;
+    if (speechMuxPath !== outputPath) temporaryPaths.push(speechMuxPath);
+  }
 
   if (backgroundMusicPath) {
     const fadeDuration = Math.min(musicFadeSeconds, Math.max(0, targetDuration / 2));
     const fadeOutStart = Math.max(0, targetDuration - fadeDuration);
-    const args = [
-      '-y',
-      '-i', videoPath
-    ];
-
-    if (audioPath) {
-      args.push('-i', audioPath);
-    }
-
-    args.push('-stream_loop', '-1', '-i', backgroundMusicPath);
-
-    const musicInputIndex = audioPath ? 2 : 1;
+    const mixedPath = speechText ? `${outputPath}.mixed.mp4` : outputPath;
     const filters = [
-      `[${musicInputIndex}:a]volume=${musicVolume},atrim=0:${ffmpegSeconds(targetDuration)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${ffmpegSeconds(fadeDuration)},afade=t=out:st=${ffmpegSeconds(fadeOutStart)}:d=${ffmpegSeconds(fadeDuration)}[bg]`
+      `[1:a]volume=${musicVolume},atrim=0:${ffmpegSeconds(targetDuration)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${ffmpegSeconds(fadeDuration)},afade=t=out:st=${ffmpegSeconds(fadeOutStart)}:d=${ffmpegSeconds(fadeDuration)}[bg]`
     ];
 
     if (audioPath) {
-      filters.push(`[1:a]volume=${speechVolume},atrim=0:${ffmpegSeconds(targetDuration)},asetpts=PTS-STARTPTS[speech]`);
-      filters.push('[speech][bg]amix=inputs=2:duration=first:dropout_transition=0[aout]');
+      filters.push('[0:a]anull[speech]');
+      filters.push('[speech][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]');
     } else {
       filters.push('[bg]anull[aout]');
     }
 
-    const result = await runCommand(
+    const musicResult = await runCommand(
       'ffmpeg',
       [
-        ...args,
+        '-y', '-i', currentPath,
+        '-stream_loop', '-1', '-i', backgroundMusicPath,
         '-filter_complex', filters.join(';'),
         '-map', '0:v:0',
         '-map', '[aout]',
@@ -1132,56 +1245,28 @@ async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
         '-c:v', 'copy',
         '-c:a', 'aac',
         '-movflags', '+faststart',
-        outputPath
+        mixedPath
       ],
       { timeoutMs: 180000 }
     );
 
-    if (result.code !== 0) {
+    if (musicResult.code !== 0) {
       const error = new Error('ffmpeg video, ses ve muzik birlestiremedi.');
-      error.stdout = result.stdout;
-      error.stderr = result.stderr;
+      error.stdout = musicResult.stdout;
+      error.stderr = musicResult.stderr;
       throw error;
     }
-
-    return {
-      ...result,
-      backgroundMusic: path.relative(__dirname, backgroundMusicPath).replaceAll(path.sep, '/')
-    };
+    logs.push(musicResult);
+    currentPath = mixedPath;
+    if (mixedPath !== outputPath) temporaryPaths.push(mixedPath);
   }
 
-  if (!audioPath) {
-    return null;
-  }
-
-  const muxedPath = speechText ? `${outputPath}.mux.mp4` : outputPath;
-  const result = await runCommand(
-    'ffmpeg',
-    buildMuxArgs({
-      videoPath,
-      audioPath,
-      outputPath: muxedPath,
-      videoDuration,
-      audioDuration: speechDuration
-    }),
-    { timeoutMs: 180000 }
-  );
-
-  if (result.code !== 0) {
-    const error = new Error('ffmpeg video ve sesi surelerini esitleyerek birlestiremedi.');
-    error.stdout = result.stdout;
-    error.stderr = result.stderr;
-    throw error;
-  }
-
-  let subtitlePath = null;
-  let subtitleResult = null;
-  if (speechText) {
-    subtitlePath = `${outputPath}.srt`;
+  const subtitlePath = speechText && audioPath ? `${outputPath}.srt` : null;
+  if (subtitlePath) {
     await fs.writeFile(subtitlePath, buildTimedSubtitleSrt(speechText, speechDuration), 'utf8');
-    subtitleResult = await runCommand(
+    const subtitleResult = await runCommand(
       'ffmpeg',
-      buildBurnSubtitleArgs({ inputPath: muxedPath, subtitlePath, outputPath }),
+      buildBurnSubtitleArgs({ inputPath: currentPath, subtitlePath, outputPath }),
       { timeoutMs: 180000 }
     );
     if (subtitleResult.code !== 0) {
@@ -1190,14 +1275,18 @@ async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
       error.stderr = subtitleResult.stderr;
       throw error;
     }
-    await fs.rm(muxedPath, { force: true });
+    logs.push(subtitleResult);
   }
 
+  await Promise.all(temporaryPaths.map((temporaryPath) => fs.rm(temporaryPath, { force: true })));
+
   return {
-    ...result,
-    stdout: [result.stdout, subtitleResult?.stdout].filter(Boolean).join('\n'),
-    stderr: [result.stderr, subtitleResult?.stderr].filter(Boolean).join('\n'),
-    backgroundMusic: null,
+    code: 0,
+    stdout: logs.map((result) => result.stdout).filter(Boolean).join('\n'),
+    stderr: logs.map((result) => result.stderr).filter(Boolean).join('\n'),
+    backgroundMusic: backgroundMusicPath
+      ? path.relative(__dirname, backgroundMusicPath).replaceAll(path.sep, '/')
+      : null,
     subtitlePath
   };
 }
@@ -1213,17 +1302,12 @@ async function concatVideos(videoRelativePaths) {
 
   const concatId = `${Date.now()}-${randomUUID().slice(0, 8)}-full-video`;
   const workDir = path.join(rendersDir, concatId);
-  const listPath = path.join(workDir, 'concat.txt');
   const outputPath = path.join(workDir, 'full-video.mp4');
   await fs.mkdir(workDir, { recursive: true });
-  const listContent = inputPaths
-    .map((filePath) => `file '${filePath.replaceAll("'", "'\\''")}'`)
-    .join('\n');
-  await fs.writeFile(listPath, listContent, 'utf8');
 
   const result = await runCommand(
     'ffmpeg',
-    buildConcatArgs({ listPath, outputPath }),
+    buildFilterConcatArgs({ inputPaths, outputPath }),
     { timeoutMs: 180000 }
   );
 
@@ -1235,7 +1319,7 @@ async function concatVideos(videoRelativePaths) {
   }
 
   const payload = {
-    videoUrl: `/renders/${path.relative(rendersDir, outputPath).replaceAll(path.sep, '/')}`,
+    videoUrl: createLocalMediaUrl(path.relative(rendersDir, outputPath)),
     videoRelativePath: path.relative(rendersDir, outputPath).replaceAll(path.sep, '/'),
     stdout: result.stdout,
     stderr: result.stderr
@@ -1329,7 +1413,7 @@ async function synthesizeSpeech(text, segmentId) {
     const relativeAudio = path.relative(rendersDir, filePath).replaceAll(path.sep, '/');
     logInfo(`${segmentId}: Edge TTS hazir`, { seconds: Number(durationSeconds || 0).toFixed(1) });
     return {
-      audioUrl: `/renders/${relativeAudio}`,
+      audioUrl: createLocalMediaUrl(relativeAudio),
       audioRelativePath: relativeAudio,
       durationSeconds,
       voiceName: edgeTtsVoice,
@@ -1369,7 +1453,7 @@ async function synthesizeSpeech(text, segmentId) {
   const relativeAudio = path.relative(rendersDir, filePath).replaceAll(path.sep, '/');
 
   const result = {
-    audioUrl: `/renders/${relativeAudio}`,
+    audioUrl: createLocalMediaUrl(relativeAudio),
     audioRelativePath: relativeAudio,
     durationSeconds,
     voiceName: googleTtsVoice,
@@ -1495,7 +1579,7 @@ async function renderManimVideo({
             await fs.writeFile(listPath, listContent, 'utf8');
             const concatResult = await runCommand(
               'ffmpeg',
-              buildConcatArgs({ listPath, outputPath: groupedPath }),
+              buildConcatArgs({ listPath, outputPath: groupedPath, hasAudio: false }),
               { timeoutMs: 60000 }
             );
             if (concatResult.code !== 0) {
@@ -1518,7 +1602,7 @@ async function renderManimVideo({
           const startSeconds = progressiveContext.job.progressive.readyDurationSeconds;
           const checksum = await sha256File(outputPath);
           const codec = `${avcCodecString(normalizedProbe)}, mp4a.40.2`;
-          localAudioCursor += probe.durationSeconds;
+          localAudioCursor += normalizedProbe.durationSeconds;
           return {
             id: `${progressiveContext.job.id}-${sequence}-${checksum.slice(0, 12)}`,
             jobId: progressiveContext.job.id,
@@ -1528,10 +1612,10 @@ async function renderManimVideo({
             segmentSequence,
             sequence,
             startSeconds,
-            durationSeconds: probe.durationSeconds,
-            width: probe.width,
-            height: probe.height,
-            fps: probe.fps,
+            durationSeconds: normalizedProbe.durationSeconds,
+            width: normalizedProbe.width,
+            height: normalizedProbe.height,
+            fps: normalizedProbe.fps,
             codec,
             mimeType: `video/mp4; codecs="${codec}"`,
             url: `/api/jobs/${encodeURIComponent(progressiveContext.job.id)}/partials/${sequence}`,
@@ -1591,6 +1675,17 @@ async function renderManimVideo({
 
     const renderOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
     logInfo(`${safeSegmentId}: Manim render hata verdi, duzeltme denenecek`, { attempt: attempt + 1 });
+    const publishedDuringAttempt = progressiveContext?.job?.progressive?.partials?.some((partial) => (
+      partial.sequence >= progressiveStartSequence
+      && partial.segmentIndex === progressiveContext.segmentIndex
+    ));
+    if (publishedDuringAttempt) {
+      progressiveContext.job.progressive.status = 'failed';
+      progressiveContext.job.progressive.error = 'Canli yayinlanan render sonradan hata verdi; farkli goruntuyle devam edilmedi.';
+      progressiveContext.job.eventChannel.emit('job', publicJob(progressiveContext.job));
+      repairLogs.push('Repair skipped because already-published frames cannot be replaced safely.');
+      break;
+    }
     if (attempt >= 2) {
       break;
     }
@@ -1608,6 +1703,8 @@ async function renderManimVideo({
         currentCode = optimizeManimForProgressiveRender(currentCode);
       }
       await fs.writeFile(path.join(workDir, `${className}.fixed-${attempt + 1}.py`), currentCode, 'utf8');
+      await fs.rm(mediaDir, { recursive: true, force: true });
+      await fs.mkdir(mediaDir, { recursive: true });
     } catch (repairError) {
       repairLogs.push(`DeepSeek repair failed: ${repairError.message}`);
       break;
@@ -1680,7 +1777,7 @@ async function renderManimVideo({
   const durationSeconds = await getMediaDurationSeconds(finalVideoPath).catch(() => null);
 
   const resultPayload = {
-    videoUrl: `/renders/${relativeVideo}`,
+    videoUrl: createLocalMediaUrl(relativeVideo),
     videoRelativePath: relativeVideo,
     durationSeconds,
     stdout: [result.stdout, muxResult?.stdout, ...repairLogs].filter(Boolean).join('\n'),
@@ -1727,7 +1824,7 @@ function updateJob(job, patch) {
       progress: `${job.progress}/${job.total}`
     });
   }
-  persist('generation-job/update', () => updateGenerationJob(job.id, {
+  const persistenceSnapshot = {
     status: job.status,
     progress: job.progress,
     total: job.total,
@@ -1735,21 +1832,31 @@ function updateJob(job, patch) {
     message: job.message,
     error: job.error,
     completedAt: job.completedAt
-  }));
-  persist('generation-event', () => appendGenerationEvent({
-    jobId: job.dbJobId || null,
-    lessonId: job.lessonId || null,
-    message: String(message),
-    payload: {
-      status: job.status,
-      progress: job.progress,
-      total: job.total
-    }
-  }));
+  };
+  job._persistenceChain = (job._persistenceChain || Promise.resolve())
+    .then(async () => {
+      await persist('generation-job/update', () => updateGenerationJob(job.id, persistenceSnapshot));
+      await persist('generation-event', () => appendGenerationEvent({
+        jobId: job.dbJobId || null,
+        lessonId: job.lessonId || null,
+        message: String(message),
+        payload: {
+          status: persistenceSnapshot.status,
+          progress: persistenceSnapshot.progress,
+          total: persistenceSnapshot.total
+        }
+      }));
+    })
+    .catch((error) => {
+      logInfo(`Job ${job.id}: durum kaydi tamamlanamadi`, { error: error.message });
+    });
   job.eventChannel?.emit('job', publicJob(job));
 }
 
 async function runFullVideoJob(job) {
+  const ensureJobActive = () => {
+    if (job._cancelled) throw new Error('Job sonlandigi icin bekleyen islem iptal edildi.');
+  };
   try {
     logInfo(`Job ${job.id}: tam ders uretimi basladi`, {
       topic: job.plan.topic,
@@ -1824,19 +1931,27 @@ async function runFullVideoJob(job) {
     const codeDeferreds = Array.from({ length: job.total }, () => createDeferredPromise());
     codeDeferreds.forEach((deferred) => void deferred.promise.catch(() => {}));
     const prepareSegment = (segment, index) => (async () => {
+      ensureJobActive();
       const segmentState = job.segments[index];
-      const dbSegment = await persist(`${segment.id}/segment lookup`, () => getSegment({
-        lessonId: job.lessonId,
-        segmentKey: segment.id
-      }));
+      let dbSegment = null;
 
       try {
+        dbSegment = await persistRequired(`${segment.id}/segment lookup`, () => getSegment({
+          lessonId: job.lessonId,
+          segmentKey: segment.id
+        }));
+        if (supabaseConfigured && job.lessonId && !dbSegment?.id) {
+          throw new Error(`${segment.id}: kalici lesson segment kaydi bulunamadi.`);
+        }
         segmentState.status = 'speech';
         updateJob(job, { current: `${segment.id}: speech uretiliyor...` });
         const earlySpeech = job._segmentPromises
           ? buildEarlySpeechScript(segment)
           : null;
-        const speech = earlySpeech || await limitSpeech(() => createSpeechScript(segment));
+        let speech = earlySpeech || await limitSpeech(() => {
+          ensureJobActive();
+          return createSpeechScript(segment);
+        });
         if (earlySpeech) {
           logInfo(`${segment.id}: streaming plandaki narration doğrudan kullanıldı`, {
             chars: earlySpeech.speech_text.length
@@ -1846,7 +1961,63 @@ async function runFullVideoJob(job) {
         if (index === 0) {
           job.timings.firstSpeechReadyAt ||= new Date().toISOString();
         }
-        await persist(`${segment.id}/speech`, async () => {
+        segmentState.status = 'tts_code';
+        updateJob(job, {
+          current: `${segment.id}: ses olculuyor, ardindan Manim kodu uretiliyor...`
+        });
+        let tts = await limitTts(() => {
+          ensureJobActive();
+          return synthesizeSpeech(speech.speech_text, segment.id);
+        });
+        job._artifactPaths.add(resolveRenderRelative(tts.audioRelativePath));
+        const durationBudget = speechDurationBudget(segment.duration_seconds);
+        const speechDurationOutsideBudget = () => (
+          tts.durationSeconds < durationBudget.minSeconds
+          || tts.durationSeconds > durationBudget.maxSeconds
+        );
+        if (speechDurationOutsideBudget()) {
+          logInfo(`${segment.id}: anlatim suresi hedef disinda, metin bir kez duzeltiliyor`, {
+            actual: Number(tts.durationSeconds).toFixed(1),
+            min: durationBudget.minSeconds,
+            max: durationBudget.maxSeconds
+          });
+          speech = await limitSpeech(() => {
+            ensureJobActive();
+            return createSpeechScript(segment);
+          });
+          tts = await limitTts(() => {
+            ensureJobActive();
+            return synthesizeSpeech(speech.speech_text, segment.id);
+          });
+          job._artifactPaths.add(resolveRenderRelative(tts.audioRelativePath));
+        }
+        if (speechDurationOutsideBudget()) {
+          logInfo(`${segment.id}: anlatim suresi ikinci kez hedef disinda, son duzeltme deneniyor`, {
+            actual: Number(tts.durationSeconds).toFixed(1)
+          });
+          speech = await limitSpeech(() => {
+            ensureJobActive();
+            return createSpeechScript(segment);
+          });
+          tts = await limitTts(() => {
+            ensureJobActive();
+            return synthesizeSpeech(speech.speech_text, segment.id);
+          });
+          job._artifactPaths.add(resolveRenderRelative(tts.audioRelativePath));
+        }
+        if (speechDurationOutsideBudget()) {
+          throw new Error(
+            `${segment.id}: anlatim suresi hedefe getirilemedi `
+            + `(${Number(tts.durationSeconds).toFixed(1)} sn, hedef ${durationBudget.minSeconds}-${durationBudget.maxSeconds} sn).`
+          );
+        }
+        if (index === 0) job.timings.firstTtsReadyAt ||= new Date().toISOString();
+        speech = {
+          ...speech,
+          estimated_seconds: tts.durationSeconds
+        };
+        segmentState.speech = speech;
+        await persistRequired(`${segment.id}/speech`, async () => {
           if (!dbSegment?.id) return null;
           await updateSegment(dbSegment.id, { status: 'speech_done' });
           return saveSpeechScript({
@@ -1857,31 +2028,20 @@ async function runFullVideoJob(job) {
           });
         });
 
-        const estimatedDuration = Math.max(
-          6,
-          Math.round(Number(speech.estimated_seconds || segment.duration_seconds || 70))
-        );
-
-        segmentState.status = 'tts_code';
-        updateJob(job, {
-          current: `${segment.id}: ses ve Manim kodu paralel uretiliyor...`
-        });
-        const ttsPromise = limitTts(() => synthesizeSpeech(speech.speech_text, segment.id))
-          .then((value) => {
-            if (index === 0) job.timings.firstTtsReadyAt ||= new Date().toISOString();
-            return value;
-          });
+        const actualDuration = Math.max(6, Number(tts.durationSeconds));
         const codePromise = (async () => {
           try {
             const previousManimCode = index > 0
               ? await codeDeferreds[index - 1].promise
               : '';
-            const queuedCode = limitCode(() => createManimCode({
+            const queuedCode = limitCode(() => {
+              ensureJobActive();
+              return createManimCode({
               animation: segment.animation,
-              durationSeconds: estimatedDuration,
+              durationSeconds: actualDuration,
               speech: {
                 speech_text: speech.speech_text,
-                duration_seconds: estimatedDuration,
+                duration_seconds: actualDuration,
                 cue_plan: speech.cue_plan || []
               },
               segmentId: segment.id,
@@ -1892,7 +2052,8 @@ async function runFullVideoJob(job) {
                 total: job.total,
                 previousManimCode
               })
-            }));
+              });
+            });
             const value = await queuedCode;
             codeDeferreds[index].resolve(value);
             if (index === 0) job.timings.firstCodeReadyAt ||= new Date().toISOString();
@@ -1906,8 +2067,8 @@ async function runFullVideoJob(job) {
           logInfo(`Job ${job.id}: ilk segment TTS ve Manim kodu kuyruğa girdi`);
         }
 
-        const [tts, code] = await Promise.all([ttsPromise, codePromise]);
-        const manimCode = await persist(`${segment.id}/manim-code`, () => (
+        const code = await codePromise;
+        const manimCode = await persistRequired(`${segment.id}/manim-code`, () => (
           dbSegment?.id
             ? saveManimCode({
                 segmentId: dbSegment.id,
@@ -1917,7 +2078,7 @@ async function runFullVideoJob(job) {
               })
             : null
         ));
-        const uploadedAudio = await persist(`${segment.id}/audio-upload`, () => (
+        const uploadedAudio = await persistRequired(`${segment.id}/audio-upload`, () => (
           job.lessonId
             ? uploadRenderRelative({
                 bucket: 'audio',
@@ -1930,12 +2091,13 @@ async function runFullVideoJob(job) {
               })
             : null
         ));
-        await persist(`${segment.id}/tts`, () => (
+        await persistRequired(`${segment.id}/tts`, () => (
           dbSegment?.id
             ? saveTtsOutput({
-                segmentId: dbSegment.id,
-                voiceName: tts.voiceName,
-                speakingRate: googleTtsSpeakingRate,
+              segmentId: dbSegment.id,
+              provider: ttsProvider === 'edge' ? 'edge_tts' : 'google_cloud',
+              voiceName: tts.voiceName,
+              speakingRate: ttsProvider === 'edge' ? null : googleTtsSpeakingRate,
                 durationSeconds: tts.durationSeconds,
                 storagePath: uploadedAudio?.storagePath || null,
                 publicUrl: uploadedAudio?.publicUrl || null
@@ -2000,6 +2162,7 @@ async function runFullVideoJob(job) {
     }
 
     for (let index = 0; index < job.total; index += 1) {
+      ensureJobActive();
       const prepared = await schedulePreparation(index);
       const segmentState = job.segments[index];
 
@@ -2025,7 +2188,7 @@ async function runFullVideoJob(job) {
       if (index === 0) {
         job.timings.firstSegmentCompletedAt ||= new Date().toISOString();
       }
-      const uploadedVideo = await persist(`${prepared.segment.id}/video-upload`, () => (
+      const uploadedVideo = await persistRequired(`${prepared.segment.id}/video-upload`, () => (
         job.lessonId
           ? uploadRenderRelative({
               bucket: 'videos',
@@ -2038,7 +2201,7 @@ async function runFullVideoJob(job) {
             })
           : null
       ));
-      const dbRender = await persist(`${prepared.segment.id}/video-render`, async () => {
+      const dbRender = await persistRequired(`${prepared.segment.id}/video-render`, async () => {
         if (!prepared.dbSegment?.id) return null;
         await updateSegment(prepared.dbSegment.id, { status: 'render_done' });
         return saveVideoRender({
@@ -2056,13 +2219,21 @@ async function runFullVideoJob(job) {
       });
 
       segmentState.status = 'done';
-      segmentState.videoUrl = render.videoUrl;
+      const segmentAccess = uploadedVideo?.storagePath
+        ? await createStorageAccessOrNull(`${prepared.segment.id}/video-url`, {
+            bucket: 'videos',
+            storagePath: uploadedVideo.storagePath,
+            expiresInSeconds: signedVideoUrlTtlSeconds
+          })
+        : null;
+      segmentState.videoUrl = segmentAccess?.signedUrl || render.videoUrl;
       segmentState.videoRelativePath = render.videoRelativePath;
       segmentState.durationSeconds = render.durationSeconds;
       segmentState.hasMusic = render.hasMusic;
       segmentState.backgroundMusic = render.backgroundMusic;
       segmentState.dbRenderId = dbRender?.id || null;
       videoPaths[index] = render.videoRelativePath;
+      job._artifactPaths.add(path.dirname(resolveRenderRelative(render.videoRelativePath)));
       job.progress += 1;
       updateJob(job, {
         message: `${job.progress}/${job.total} segment tamamlandi.`,
@@ -2077,10 +2248,11 @@ async function runFullVideoJob(job) {
     });
 
     const concat = await concatVideos(videoPaths);
+    job._artifactPaths.add(path.dirname(resolveRenderRelative(concat.videoRelativePath)));
     concat.source = job.progressive.enabled && job.progressive.status !== 'failed'
       ? 'progressive_partials'
       : 'traditional';
-    const uploadedFinalVideo = await persist('final-video/upload', () => (
+    const uploadedFinalVideo = await persistRequired('final-video/upload', () => (
       job.lessonId
         ? uploadRenderRelative({
             bucket: 'videos',
@@ -2092,7 +2264,7 @@ async function runFullVideoJob(job) {
           })
         : null
     ));
-    await persist('final-video/db', async () => {
+    await persistRequired('final-video/db', async () => {
       if (!job.lessonId) return null;
       const durationSeconds = concat.videoRelativePath
         ? await getMediaDurationSeconds(resolveRenderRelative(concat.videoRelativePath)).catch(() => null)
@@ -2106,6 +2278,18 @@ async function runFullVideoJob(job) {
         segmentRenderIds: job.segments.map((segment) => segment.dbRenderId).filter(Boolean)
       });
     });
+    if (uploadedFinalVideo?.storagePath) {
+      const finalAccess = await createStorageAccessOrNull('final-video/url', {
+        bucket: 'videos',
+        storagePath: uploadedFinalVideo.storagePath,
+        expiresInSeconds: signedVideoUrlTtlSeconds
+      });
+      if (finalAccess) {
+        concat.videoUrl = finalAccess.signedUrl;
+        concat.videoUrlExpiresInSeconds = finalAccess.expiresInSeconds;
+        concat.videoUrlExpiresAt = finalAccess.expiresAt;
+      }
+    }
     job.timings.finalVideoReadyAt = new Date().toISOString();
     if (job.progressive.enabled && job.progressive.status !== 'failed') {
       job.progressive.status = 'done';
@@ -2117,9 +2301,11 @@ async function runFullVideoJob(job) {
       completedAt: new Date().toISOString(),
       result: concat
     });
+    await job._persistenceChain;
     scheduleProgressiveCleanup(job);
     logInfo(`Job ${job.id}: tam ders uretimi bitti`, { videoUrl: concat.videoUrl });
   } catch (error) {
+    job._cancelled = true;
     logInfo(`Job ${job.id}: tam ders uretimi hata verdi`, { error: error.message });
     await persist('lesson/status-failed', () => (
       job.lessonId ? updateLesson(job.lessonId, { status: 'failed' }) : null
@@ -2129,6 +2315,7 @@ async function runFullVideoJob(job) {
       error: error.message || 'Tam ders uretimi basarisiz oldu.',
       completedAt: new Date().toISOString()
     });
+    await job._persistenceChain;
     scheduleProgressiveCleanup(job);
   }
 }
@@ -2163,9 +2350,11 @@ app.get('/api/config', async (_req, res, next) => {
       deepseekReasoningEffort,
       deepseekPipelineThinkingEnabled,
       supportsVision: false,
-      hasTtsCredentials: Boolean(googleCredentialsPath),
-      ttsProvider: 'Google Cloud',
-      ttsVoice: googleTtsVoice,
+      hasTtsCredentials: ttsProvider === 'edge'
+        ? true
+        : Boolean(ttsClient),
+      ttsProvider: ttsProvider === 'edge' ? 'Edge TTS' : 'Google Cloud',
+      ttsVoice: ttsProvider === 'edge' ? edgeTtsVoice : googleTtsVoice,
       ttsVoiceId: null,
       manimFont,
       manimQuality,
@@ -2351,8 +2540,8 @@ app.get('/api/lessons/:id/video-url', async (req, res, next) => {
     if (!result) {
       return res.status(404).json({ error: 'Ders bulunamadi.' });
     }
-    if (!result.video?.video_storage_path) {
-      return res.status(404).json({ error: 'Bu ders icin kalici video kaydi bulunamadi.' });
+    if (!result.video?.video_storage_path && !result.video?.local_video_path) {
+      return res.status(404).json({ error: 'Bu ders icin video kaydi bulunamadi.' });
     }
     const videoAccess = await createVideoAccessPayload(result.video);
     res.setHeader('Cache-Control', 'private, no-store');
@@ -2394,8 +2583,8 @@ async function buildTraditionalPlannerRequest(body) {
   const targetMinutes = input.target_video_minutes;
   const segmentCount = input.target_segment_count;
   const durationBudget = segmentDurationBudget(targetMinutes, segmentCount);
-  const narrationWordTarget = Math.max(20, Math.round(durationBudget.averageSeconds * 1.55));
-  const narrationWordMaximum = Math.max(narrationWordTarget + 5, Math.round(durationBudget.maxSeconds * 1.65));
+  const narrationWordTarget = Math.max(20, Math.round(durationBudget.averageSeconds * 2.05));
+  const narrationWordMaximum = Math.max(narrationWordTarget + 5, Math.round(durationBudget.maxSeconds * 2.25));
   logInfo('Plan uretimi basladi', {
     topic,
     targetMinutes,
@@ -2462,7 +2651,7 @@ async function createTraditionalLessonPlan(body, userContext) {
     topic: plan.topic || topic,
     segments: Array.isArray(plan.segments) ? plan.segments.length : 0
   });
-  const lesson = await persist('lesson/plan', async () => {
+  const lesson = await persistRequired('lesson/plan', async () => {
     const createdLesson = await createLesson({
       userId: userContext.profileId,
       title: plan.topic || topic,
@@ -2561,28 +2750,51 @@ Beklenen sekil:
     role: route[index],
     previousCount: previousSegments.length
   });
-  const responseText = await generateLlmText({
-    label: `DeepSeek segment plan ${segmentId}`,
-    model: planModel,
-    systemInstruction: prompt,
-    userText: JSON.stringify(request, null, 2),
-    json: true,
-    temperature: 0.55,
-    maxCompletionTokens: 3500,
-    thinkingEnabled: false
-  });
-  const parsed = parseLlmJson(responseText || '', `${segmentId}: baglamli plan`);
-  const candidate = parsed?.segment || parsed?.segments?.[0] || parsed;
-  const segment = { ...candidate, id: segmentId };
-  if (!isUsableLessonSegment(segment) || !String(segment.narration || '').trim()) {
-    throw new Error(`${segmentId}: baglamli planlayici kullanilabilir segment dondurmedi.`);
+  let lastError = null;
+  let previousInvalidResponse = '';
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const responseText = await generateLlmText({
+      label: `DeepSeek segment plan ${segmentId}`,
+      model: planModel,
+      systemInstruction: prompt,
+      userText: [
+        JSON.stringify(request, null, 2),
+        ...(previousInvalidResponse ? [
+          '\nOnceki cevap semaya uymadi. Eksik alanlari tamamlayip yalnizca beklenen JSON objesini yeniden uret.',
+          `Gecersiz cevap ozeti: ${previousInvalidResponse.slice(0, 1200)}`
+        ] : [])
+      ].join('\n'),
+      json: true,
+      temperature: Math.max(0.2, 0.6 - attempt * 0.1),
+      maxCompletionTokens: 3500,
+      thinkingEnabled: false
+    });
+    try {
+      const parsed = parseLlmJson(responseText || '', `${segmentId}: baglamli plan`);
+      const candidate = parsed?.segment || parsed?.segments?.[0] || parsed;
+      const segment = { ...candidate, id: segmentId };
+      if (!isUsableLessonSegment(segment) || !String(segment.narration || '').trim()) {
+        throw new Error('title, animation veya narration alani eksik.');
+      }
+      logInfo('Baglamli segment planlama tamamlandi', {
+        segmentId,
+        attempt,
+        ms: Date.now() - started,
+        chars: responseText.length
+      });
+      return { segment, rawResponse: responseText };
+    } catch (error) {
+      lastError = error;
+      previousInvalidResponse = responseText;
+      logInfo(`${segmentId}: gecersiz plan cevabi yeniden denenecek`, {
+        attempt,
+        error: error.message
+      });
+    }
   }
-  logInfo('Baglamli segment planlama tamamlandi', {
-    segmentId,
-    ms: Date.now() - started,
-    chars: responseText.length
-  });
-  return { segment, rawResponse: responseText };
+  throw new Error(
+    `${segmentId}: baglamli planlayici 3 denemede kullanilabilir segment dondurmedi: ${lastError?.message || 'gecersiz cevap'}`
+  );
 }
 
 async function startStreamingTraditionalLessonPlan(body, userContext) {
@@ -2593,13 +2805,13 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     segmentCount
   } = await buildTraditionalPlannerRequest(body);
   const durationBudget = segmentDurationBudget(targetMinutes, segmentCount);
-  const narrationWordTarget = Math.max(20, Math.round(durationBudget.averageSeconds * 1.55));
+  const narrationWordTarget = Math.max(20, Math.round(durationBudget.averageSeconds * 2.05));
   const narrationWordMaximum = Math.max(
     narrationWordTarget + 5,
-    Math.round(durationBudget.maxSeconds * 1.65)
+    Math.round(durationBudget.maxSeconds * 2.25)
   );
   const route = buildIncrementalLessonRoute(segmentCount);
-  const lesson = await persist('lesson/streaming-plan-create', () => createLesson({
+  const lesson = await persistRequired('lesson/streaming-plan-create', () => createLesson({
     userId: userContext.profileId,
     title: topic,
     topic,
@@ -2629,7 +2841,7 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     }, index, streamedSegments[index - 1] || null, segmentCount);
     streamedSegments[index] = segment;
     segmentPublishPromises[index] = (async () => {
-      await persist(`lesson/streaming-segment-${index + 1}`, () => (
+      await persistRequired(`lesson/streaming-segment-${index + 1}`, () => (
         lessonId
           ? saveSegments({ lessonId, segments: [segment], startIndex: index })
           : null
@@ -2679,7 +2891,7 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
         plan._lesson_id = lessonId;
       }
 
-      await persist('lesson/streaming-plan-complete', async () => {
+      await persistRequired('lesson/streaming-plan-complete', async () => {
         if (!lessonId) return null;
         await updateLesson(lessonId, { title: plan.topic || topic });
         await savePlan({
@@ -2745,7 +2957,7 @@ app.post('/api/question-plan', async (req, res, next) => {
       studentLevel: req.body.student_level || 'beginner',
       note: req.body.note || ''
     });
-    const lesson = await persist('lesson/question-plan', async () => {
+    const lesson = await persistRequired('lesson/question-plan', async () => {
       const createdLesson = await createLesson({
         userId: userContext.profileId,
         title: plan.topic || 'Soru cozum videosu',
@@ -2967,7 +3179,9 @@ async function queueTraditionalVideoJob({
   requestTimings = {},
   fullPlanPromise = null,
   segmentPromises = null,
-  expectedSegmentCount = null
+  expectedSegmentCount = null,
+  appJobId = null,
+  existingDbJobId = null
 }) {
   if (!plan || !Array.isArray(plan.segments) || !plan.segments.length) {
     const error = new Error('Tam ders icin gecerli plan.segments gerekli.');
@@ -2982,10 +3196,10 @@ async function queueTraditionalVideoJob({
     Number(expectedSegmentCount || plan.segments.length)
   );
   const job = {
-    id: `${Date.now()}-${randomUUID().slice(0, 8)}`,
+    id: appJobId || `${Date.now()}-${randomUUID().slice(0, 8)}`,
     lessonId,
     userId: userContext.profileId,
-    dbJobId: null,
+    dbJobId: existingDbJobId,
     status: 'queued',
     progress: 0,
     total: expectedTotal,
@@ -3021,17 +3235,22 @@ async function queueTraditionalVideoJob({
       finalVideoReadyAt: null
     },
     _fullPlanPromise: fullPlanPromise,
-    _segmentPromises: segmentPromises
+    _segmentPromises: segmentPromises,
+    _persistenceChain: Promise.resolve(),
+    _artifactPaths: new Set(),
+    _cancelled: false
   };
 
-  const dbJob = await persist('generation-job/create', () => createGenerationJob({
-    appJobId: job.id,
-    lessonId,
-    total: job.total,
-    current: job.current,
-    message: job.message
-  }));
-  job.dbJobId = dbJob?.id || null;
+  if (!job.dbJobId) {
+    const dbJob = await persistRequired('generation-job/create', () => createGenerationJob({
+      appJobId: job.id,
+      lessonId,
+      total: job.total,
+      current: job.current,
+      message: job.message
+    }));
+    job.dbJobId = dbJob?.id || null;
+  }
   await persist('lesson/status-running', () => (
     lessonId ? updateLesson(lessonId, { status: 'generating' }) : null
   ));
@@ -3102,9 +3321,61 @@ app.post('/api/full-video', async (req, res, next) => {
 app.get('/api/jobs/:id', async (req, res, next) => {
   try {
     const userContext = await resolveRequestUser(req);
-    const job = fullVideoJobs.get(req.params.id);
+    let job = fullVideoJobs.get(req.params.id);
     if (!job) {
-      return res.status(404).json({ error: 'Job bulunamadi.' });
+      const durableJob = await persist('generation-job/recover', () => getGenerationJobForUser({
+        appJobId: req.params.id,
+        userId: userContext.profileId
+      }));
+      if (!durableJob) {
+        return res.status(404).json({ error: 'Job bulunamadi.' });
+      }
+      if (['queued', 'running', 'concat'].includes(durableJob.status) && durableJob.lesson_id) {
+        const detail = await getLessonDetailForUser({
+          lessonId: durableJob.lesson_id,
+          userId: userContext.profileId
+        });
+        if (detail?.plan?.segments?.length) {
+          job = await queueTraditionalVideoJob({
+            plan: detail.plan,
+            lessonId: durableJob.lesson_id,
+            userContext,
+            appJobId: req.params.id,
+            existingDbJobId: durableJob.id
+          });
+          logInfo(`Job ${job.id}: process restart sonrasi bastan guvenli bicimde yeniden kuyruklandi`);
+        }
+      }
+      if (!job) {
+        if (durableJob.status === 'done' && durableJob.lesson_id) {
+          const storedVideo = await getLessonVideoForUser({
+            lessonId: durableJob.lesson_id,
+            userId: userContext.profileId
+          });
+          const access = await createVideoAccessPayload(storedVideo?.video);
+          return res.json({
+            id: durableJob.app_job_id,
+            lessonId: durableJob.lesson_id,
+            status: 'done',
+            progress: durableJob.progress,
+            total: durableJob.total,
+            current: durableJob.current,
+            message: durableJob.message,
+            completedAt: durableJob.completed_at,
+            result: access.videoUrl ? { videoUrl: access.videoUrl, source: 'durable_storage' } : null,
+            segments: [],
+            progressive: null
+          });
+        }
+        return res.json({
+          id: durableJob.app_job_id,
+          lessonId: durableJob.lesson_id,
+          status: 'failed',
+          progress: durableJob.progress,
+          total: durableJob.total,
+          error: durableJob.error || 'Worker yeniden basladi ve job plani kurtarilamadi.'
+        });
+      }
     }
     if (job.userId && job.userId !== userContext.profileId) {
       return res.status(403).json({ error: 'Bu job bu kullaniciya ait degil.' });
@@ -3137,19 +3408,30 @@ function publicPartial(partial) {
 }
 
 function scheduleProgressiveCleanup(job) {
-  if (!job?.progressive?.partials?.length || job.progressive.cleanupScheduled) return;
+  if (!job || job.progressive.cleanupScheduled) return;
   job.progressive.cleanupScheduled = true;
-  const directories = new Set(
-    job.progressive.partials
+  const artifactPaths = new Set([
+    ...(job._artifactPaths || []),
+    ...job.progressive.partials
       .map((partial) => partial._filePath ? path.dirname(partial._filePath) : null)
       .filter(Boolean)
-  );
+  ]);
   const timer = setTimeout(() => {
-    void Promise.all([...directories].map((directory) => (
-      fs.rm(directory, { recursive: true, force: true })
+    const safeArtifactPaths = [...artifactPaths].filter((artifactPath) => {
+      const resolved = path.resolve(artifactPath);
+      const renderRoot = `${path.resolve(rendersDir)}${path.sep}`;
+      if (!resolved.startsWith(renderRoot)) {
+        logInfo(`Job ${job.id}: guvensiz temizlik hedefi atlandi`, { path: resolved });
+        return false;
+      }
+      return true;
+    });
+    void Promise.all(safeArtifactPaths.map((artifactPath) => (
+      fs.rm(path.resolve(artifactPath), { recursive: true, force: true })
     ))).then(() => {
+      job.progressive.partials = [];
       logInfo(`Job ${job.id}: progressive gecici dosyalari temizlendi`, {
-        directories: directories.size
+        artifacts: artifactPaths.size
       });
     }).catch((error) => {
       logInfo(`Job ${job.id}: progressive dosya temizligi basarisiz`, {
@@ -3158,6 +3440,12 @@ function scheduleProgressiveCleanup(job) {
     });
   }, progressiveArtifactTtlMs);
   timer.unref?.();
+
+  const jobTimer = setTimeout(() => {
+    fullVideoJobs.delete(job.id);
+    logInfo(`Job ${job.id}: bellek kaydi TTL sonunda temizlendi`);
+  }, completedJobTtlMs);
+  jobTimer.unref?.();
 }
 
 function writeSse(res, event) {

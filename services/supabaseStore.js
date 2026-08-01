@@ -623,10 +623,10 @@ export function storagePathFor({ userId = devUserId, lessonId, segmentKey, kind,
   return parts.join('/');
 }
 
-export async function saveTtsOutput({ segmentId, voiceName, speakingRate, durationSeconds, storagePath, publicUrl }) {
+export async function saveTtsOutput({ segmentId, provider = 'google_cloud', voiceName, speakingRate, durationSeconds, storagePath, publicUrl }) {
   return insertRow('tts_outputs', {
     segment_id: segmentId,
-    provider: 'google_cloud',
+    provider,
     voice_name: voiceName || null,
     speaking_rate: speakingRate || null,
     duration_seconds: durationSeconds || null,
@@ -688,6 +688,21 @@ export async function updateGenerationJob(appJobId, patch) {
   return rows?.[0] || null;
 }
 
+export async function getGenerationJobForUser({ appJobId, userId }) {
+  if (!appJobId || !userId) return null;
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('generation_jobs')
+    .select('*, lessons!inner(id,user_id)')
+    .eq('app_job_id', appJobId)
+    .eq('lessons.user_id', userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const { lessons, ...job } = data;
+  return job;
+}
+
 export async function appendGenerationEvent({ jobId, lessonId, segmentId, level = 'info', message, payload }) {
   return insertRow('generation_events', {
     job_id: jobId || null,
@@ -723,7 +738,7 @@ export async function saveChatMessage({ chatId, role, content, timestampSeconds,
     chat_id: chatId,
     role,
     content,
-    timestamp_seconds: timestampSeconds || null,
+    timestamp_seconds: timestampSeconds ?? null,
     timestamp_label: timestampLabel || null,
     frame_attachment_id: frameAttachmentId || null,
     provider: provider || null,

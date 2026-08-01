@@ -121,3 +121,19 @@ test('mikro Manim parcalari hedef sureli yayin bloklarinda gruplanir', async () 
   ]);
   await fs.rm(tempDir, { recursive: true, force: true });
 });
+
+test('collector tarama hatasini unhandled rejection yerine finish uzerinden bildirir', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kara-partial-error-'));
+  const filePath = path.join(tempDir, 'not-a-directory');
+  await fs.writeFile(filePath, 'x');
+  const collector = new ManimPartialCollector({
+    mediaDir: filePath,
+    validate: async () => true,
+    normalize: async () => ({}),
+    onPartial: async () => {},
+    pollIntervalMs: 1
+  });
+  collector.start();
+  await assert.rejects(collector.finish(), /ENOTDIR/);
+  await fs.rm(tempDir, { recursive: true, force: true });
+});

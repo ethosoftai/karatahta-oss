@@ -183,19 +183,32 @@ export class ManimPartialCollector {
     this.processing = Promise.resolve();
     this.timer = null;
     this.error = null;
+    this.scanPromise = null;
   }
 
   start() {
     if (this.running) return;
     this.running = true;
     this.timer = setInterval(() => {
-      void this.scan();
+      void this.scan().catch((error) => {
+        this.error ||= error;
+      });
     }, this.pollIntervalMs);
-    void this.scan();
+    void this.scan().catch((error) => {
+      this.error ||= error;
+    });
   }
 
   async scan() {
     if (!this.running || this.error) return;
+    if (this.scanPromise) return this.scanPromise;
+    this.scanPromise = this.scanOnce().finally(() => {
+      this.scanPromise = null;
+    });
+    return this.scanPromise;
+  }
+
+  async scanOnce() {
     const files = await walkPartialMovieFiles(this.mediaDir);
     for (const file of files) {
       if (this.seen.has(file.path)) continue;
@@ -230,10 +243,15 @@ export class ManimPartialCollector {
 
   async finish() {
     if (!this.running) return;
-    await this.scan();
-    clearInterval(this.timer);
-    this.timer = null;
-    this.running = false;
+    try {
+      await this.scan();
+    } catch (error) {
+      this.error ||= error;
+    } finally {
+      clearInterval(this.timer);
+      this.timer = null;
+      this.running = false;
+    }
     await this.processing;
     if (!this.error) {
       try {

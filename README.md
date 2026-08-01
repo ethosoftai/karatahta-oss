@@ -86,10 +86,11 @@ temizlenir. Kalıcı sonuç Railway Bucket'taki final videodur.
 ## Önemli runtime sınırlamaları
 
 - Aktif job nesneleri ve SSE event geçmişi `fullVideoJobs` içinde bellekte
-  tutulur.
+  tutulur; tamamlanan kayıtlar TTL sonunda temizlenir.
 - Progressive partial dosyalar instance'ın geçici diskindedir.
-- Railway restart/deploy sırasında aktif job ve canlı partial akışı
-  kaybolabilir. Supabase job metadata'sı bunu tek başına devam ettirmez.
+- Railway restart/deploy sırasında canlı partial tamponu kaybolur. Frontend
+  polling'e düştüğünde backend Supabase'deki lesson planını bulur ve yarım
+  job'ı aynı uygulama job kimliğiyle güvenli biçimde baştan kuyruğa alır.
 - Mevcut mimaride birden fazla replica güvenli değildir: sonraki HTTP/SSE
   isteği job'ın bulunmadığı başka replica'ya düşebilir. Redis/durable queue,
   ortak object storage partial'ları ve worker ayrımı yapılana kadar
@@ -219,6 +220,7 @@ ancak video karesini görmez.
 | --- | --- |
 | `TTS_PROVIDER` | `edge` veya Google TTS |
 | `EDGE_TTS_COMMAND`, `EDGE_TTS_VOICE`, `EDGE_TTS_RATE` | Edge ayarları |
+| `EDGE_TTS_TIMEOUT_MS` | Takılan Edge TTS process'i için üst süre |
 | `GOOGLE_*` | Opsiyonel Google Cloud TTS credential/voice |
 | `MANIM_QUALITY=-qm` | 720p/30 FPS medium kalite |
 | `MANIM_FONT` | Üretilen sahnelerin varsayılan fontu |
@@ -227,6 +229,8 @@ ancak video karesini görmez.
 | `PROGRESSIVE_MANIM_PARTIALS=true` | Gerçek Manim partial canlı akışı |
 | `PROGRESSIVE_BUFFER_SECONDS=18` | Oynatma öncesi hedef tampon; segment geçişleri için güvenli pay |
 | `PROGRESSIVE_ARTIFACT_TTL_MS` | Geçici partial saklama süresi |
+| `COMPLETED_JOB_TTL_MS` | Tamamlanmış job'ın bellekten silinme süresi |
+| `LOCAL_MEDIA_SIGNING_SECRET` | Geçici lokal medya URL imza anahtarı |
 | `TARGET_VIDEO_MINUTES` | Varsayılan hedef ders süresi |
 | `TARGET_SEGMENT_COUNT` | Varsayılan plan segment sayısı |
 | `SPEECH_VOLUME` | Final mux içindeki konuşma sesi seviyesi |

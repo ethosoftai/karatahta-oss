@@ -81,9 +81,9 @@ export function buildProgressivePartialArgs({
   ];
 }
 
-export function buildMuxArgs({ videoPath, audioPath, outputPath, videoDuration, audioDuration }) {
+export function buildMuxArgs({ videoPath, audioPath, outputPath, videoDuration, audioDuration, volume = 1 }) {
   const factor = calculateVideoStretchFactor(videoDuration, audioDuration);
-  return ['-y', '-i', videoPath, '-i', audioPath, '-filter_complex', `[0:v]setpts=${factor}*PTS[v]`, '-map', '[v]', '-map', '1:a:0', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', outputPath];
+  return ['-y', '-i', videoPath, '-i', audioPath, '-filter_complex', `[0:v]setpts=${factor}*PTS[v];[1:a]volume=${Number(volume) || 1}[a]`, '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', outputPath];
 }
 
 export function buildBurnSubtitleArgs({ inputPath, subtitlePath, outputPath }) {
@@ -91,13 +91,56 @@ export function buildBurnSubtitleArgs({ inputPath, subtitlePath, outputPath }) {
   return ['-y', '-i', inputPath, '-vf', `subtitles='${escapeSubtitlePath(subtitlePath)}':force_style='${style}'`, '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'copy', '-movflags', '+faststart', outputPath];
 }
 
-export function buildConcatArgs({ listPath, outputPath }) {
+export function buildConcatArgs({ listPath, outputPath, hasAudio = true }) {
   return [
     '-y',
     '-f', 'concat',
     '-safe', '0',
     '-i', listPath,
-    '-c', 'copy',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-crf', '20',
+    '-pix_fmt', 'yuv420p',
+    '-r', '30',
+    ...(hasAudio ? [
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-ar', '48000',
+      '-af', 'aresample=async=1:first_pts=0'
+    ] : ['-an']),
+    '-movflags', '+faststart',
+    outputPath
+  ];
+}
+
+export function buildFilterConcatArgs({ inputPaths, outputPath, width = 1280, height = 720 }) {
+  const paths = Array.isArray(inputPaths) ? inputPaths.filter(Boolean) : [];
+  if (!paths.length) throw new Error('Filter concat icin en az bir video gerekli.');
+  const filters = [];
+  const inputs = [];
+  paths.forEach((inputPath, index) => {
+    inputs.push('-i', inputPath);
+    filters.push(
+      `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,`
+      + `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,setpts=PTS-STARTPTS[v${index}]`
+    );
+    filters.push(`[${index}:a]aresample=48000:async=1:first_pts=0,asetpts=PTS-STARTPTS[a${index}]`);
+  });
+  const concatInputs = paths.map((_, index) => `[v${index}][a${index}]`).join('');
+  filters.push(`${concatInputs}concat=n=${paths.length}:v=1:a=1[vout][aout]`);
+  return [
+    '-y',
+    ...inputs,
+    '-filter_complex', filters.join(';'),
+    '-map', '[vout]',
+    '-map', '[aout]',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-crf', '20',
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac',
+    '-b:a', '192k',
+    '-ar', '48000',
     '-movflags', '+faststart',
     outputPath
   ];
