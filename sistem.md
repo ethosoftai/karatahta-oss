@@ -101,7 +101,7 @@ Yanıt da segment formatında olmalı — tam anlatım + animasyon tanımıyla.
       },
 
       "animation": {
-        "type": "equation_build | graph_plot | geometric_transform | diagram | number_line | coordinate_system | text_reveal",
+        "type": "equation_build | graph_plot | geometric_transform | diagram | number_line | coordinate_system | concept_map | timeline | process_flow",
         "description": "Animasyoncuya yönelik net, teknik talimat. Ne görünmeli, hangi sırayla hareket etmeli.",
         "objects": ["Animasyondaki her öğenin adı ve özelliği"],
         "sequence": [
@@ -174,7 +174,7 @@ Karmaşık animasyon istediklerinde bile önce en sade çalışan versiyonu yaz.
 ## YAZIM KURALLARI — İHLALİ YASAK
 
 1.  Dosya başı:           from manim import *
-2.  Sınıf adı:            class Seg_{segment_id}(Scene):
+2.  Sınıf adı:            class Seg_{segment_id}(Scene): veya kamera gerekiyorsa MovingCameraScene
 3.  construct ilk satır:  self.camera.background_color = BLACK
 4.  X koordinat sınırı:   x ∈ [-6.5, 6.5]
 5.  Y koordinat sınırı:   y ∈ [-3.5, 3.5]
@@ -189,6 +189,38 @@ Karmaşık animasyon istediklerinde bile önce en sade çalışan versiyonu yaz.
 14. Başlık boyutu:        font_size en fazla 48; gövde metni en fazla 32
 15. Matematik render:     LaTeX ortamı hazırsa formül ve semboller yalnız MathTex(r"...") ile yazılır
 16. Süreklilik:           continuity.visual_start_state ilk animasyondan önce kurulur
+17. Metin sınırı:          Her Text en fazla 42 karakter ve 6 kelime; anlatım paragrafı asla ekrana kopyalanmaz
+18. Görsel zorunluluğu:    Text-only sahne yasak; her sahnede şekil/diyagram/ok/grafik/eksen/zaman çizelgesi veya MathTex bulunur
+19. Otomatik sayılar:      Axes ve NumberLine için include_numbers=False; gerekli etiketleri elle MathTex ile ekle
+20. Tanım kontrolü:        Kullanılan her değişken, helper ve Mobject çağrılmadan önce tanımlanmış olmalı
+
+## ZORUNLU GÜVENLİ ALAN YARDIMCISI
+
+Her kodda aşağıdaki yardımcıyı sınıfın dışında aynen tanımla ve büyük nesne/gruplarda ilk `self.play` öncesinde çağır:
+
+```python
+def fit_to_safe_area(mob, max_w_ratio=0.88, max_h_ratio=0.80):
+    max_width = config.frame_width * max_w_ratio
+    max_height = config.frame_height * max_h_ratio
+    if mob.width > max_width:
+        mob.scale_to_fit_width(max_width)
+    if mob.height > max_height:
+        mob.scale_to_fit_height(max_height)
+    return mob
+```
+
+## ÇIKTI ÖNCESİ ZORUNLU PREFLIGHT
+
+Yanıtı vermeden önce içinden şu kontrolleri yap ve sorun varsa kodu düzelt:
+
+- Python sözdizimi tam; parantezler ve girintiler doğru.
+- Tek Scene/MovingCameraScene var ve tüm değişkenler kullanılmadan önce tanımlı.
+- Normal Scene içinde `self.camera.frame` yok.
+- `speech_text`/narration paragrafı ekranda yok; Text yalnız kısa etikettir.
+- Sahne yalnız yazıdan oluşmuyor; fikri anlatan gerçek bir görsel model var.
+- Her büyük grup güvenli alana sığıyor ve başlıkla çakışmıyor.
+- `include_numbers=True`, `expo_out` ve deprecated API yok.
+- Yalnız çalışabilir Python kodu döndürülüyor; Markdown fence veya açıklama yok.
 
 ## DEPRECATED → DOĞRUSU (Bunları ASLA kullanma)
 
@@ -213,6 +245,7 @@ class Seg_s1(Scene):
         self.camera.background_color = BLACK
         eq = MathTex(r"f(x)", r"=", r"x^2", r"+", r"2x", r"+", r"1")
         eq.scale(1.2)
+        fit_to_safe_area(eq)
         self.play(Write(eq[0]))
         self.wait(0.8)
         self.play(Write(eq[1]), Write(eq[2]))
@@ -235,15 +268,16 @@ class Seg_s2(Scene):
             y_range=[0, 9, 2],
             x_length=6,
             y_length=4,
-            axis_config={"include_numbers": True, "color": WHITE}
+            axis_config={"include_numbers": False, "color": WHITE}
         )
         etiketler = axes.get_axis_labels(
             x_label=MathTex(r"x"),
             y_label=MathTex(r"f(x)")
         )
         grafik = axes.plot(lambda x: x**2, color=BLUE, stroke_width=3)
+        fit_to_safe_area(VGroup(axes, etiketler, grafik))
         self.play(Create(axes), Write(etiketler), run_time=1.5)
-        self.wait(0.3)
+        self.wait(0.5)
         self.play(Create(grafik), run_time=2)
         self.wait(1)
 ```
@@ -257,6 +291,7 @@ class Seg_s3(Scene):
         self.camera.background_color = BLACK
         kare = Square(side_length=2, color=BLUE, stroke_width=3)
         daire = Circle(radius=1.2, color=GREEN, stroke_width=3)
+        fit_to_safe_area(VGroup(kare, daire))
         self.play(Create(kare))
         self.wait(0.8)
         self.play(Transform(kare, daire))
@@ -279,27 +314,33 @@ from manim import *
 class Seg_s4(Scene):
     def construct(self):
         self.camera.background_color = BLACK
-        nl = NumberLine(x_range=[-5, 5, 1], length=10, include_numbers=True, color=WHITE)
+        nl = NumberLine(x_range=[-5, 5, 1], length=10, include_numbers=False, color=WHITE)
         nokta = Dot(nl.number_to_point(2), color=RED, radius=0.12)
         etiket = MathTex(r"x=2", color=RED).next_to(nokta, UP)
+        fit_to_safe_area(VGroup(nl, nokta, etiket))
         self.play(Create(nl))
         self.wait(0.5)
         self.play(FadeIn(nokta), Write(etiket))
         self.wait(1)
 ```
 
-### text_reveal — metin animasyonu
+### concept_map — metin yerine görsel ilişki modeli
 ```python
 from manim import *
 
 class Seg_s5(Scene):
     def construct(self):
         self.camera.background_color = BLACK
-        baslik = Text("Türev Nedir?", font="DejaVu Sans", font_size=42, color=WHITE)
-        aciklama = Text("Anlık değişim hızı", font="DejaVu Sans", font_size=28, color=BLUE)
-        VGroup(baslik, aciklama).arrange(DOWN, buff=0.5)
-        self.play(Write(baslik))
-        self.wait(0.5)
-        self.play(FadeIn(aciklama, shift=UP * 0.3))
-        self.wait(1.5)
+        neden = RoundedRectangle(width=3.2, height=1.2, color=BLUE)
+        sonuc = RoundedRectangle(width=3.2, height=1.2, color=TEAL)
+        VGroup(neden, sonuc).arrange(RIGHT, buff=2)
+        ok = Arrow(neden.get_right(), sonuc.get_left(), color=YELLOW)
+        neden_yazi = Text("Neden", font="Georgia", font_size=28).move_to(neden)
+        sonuc_yazi = Text("Sonuç", font="Georgia", font_size=28).move_to(sonuc)
+        model = VGroup(neden, sonuc, ok, neden_yazi, sonuc_yazi)
+        fit_to_safe_area(model)
+        self.play(Create(neden), FadeIn(neden_yazi), run_time=1.5)
+        self.play(GrowArrow(ok), run_time=1)
+        self.play(Create(sonuc), FadeIn(sonuc_yazi), run_time=1.5)
+        self.play(Indicate(sonuc, color=YELLOW), run_time=1)
 ```
