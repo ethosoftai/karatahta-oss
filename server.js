@@ -80,7 +80,6 @@ import {
   speechDurationBudget
 } from './services/segmentPipeline.js';
 import {
-  buildProgressiveRecoveryScene,
   optimizeManimForProgressiveRender
 } from './services/manimProgressiveCode.js';
 import {
@@ -886,6 +885,8 @@ async function repairManimCodeWithLlm(code, renderOutput, segmentId) {
       'include_numbers=True kullanma.',
       'self.camera.frame kullaniliyorsa sinif MovingCameraScene olmali.',
       'Animasyonun pedagojik niyetini koru, yalnizca hatalari duzelt.',
+      'Hata durumunda anlatim metnini veya uzun paragraflari Text, Paragraph ya da MarkupText ile ekrana basan fallback sahnesi yazma.',
+      'Bozuk gorseli metin-only sahneye cevirme; mevcut sekilleri, diyagramlari, donusumleri ve pedagojik animasyonlari koru.',
       'skill/skill.md, math_rendering.md ve layout_safety.md kurallarini; uygulamanin tek dosya/tek Scene sozlesmesiyle birlikte zorunlu uygula.'
     ],
     mandatory_skill_contract: buildMandatoryManimContract({
@@ -1581,36 +1582,6 @@ async function renderManimVideo({
       break;
     }
 
-    if (
-      attempt === 0
-      && progressiveContext?.job?.progressive?.enabled
-      && audioRelativePath
-    ) {
-      const publishedSeconds = (progressiveContext.job.progressive.partials || [])
-        .filter((partial) => partial.segmentIndex === progressiveContext.segmentIndex)
-        .reduce((sum, partial) => sum + Number(partial.durationSeconds || 0), 0);
-      const audioDurationSeconds = await getMediaDurationSeconds(
-        resolveRenderRelative(audioRelativePath)
-      ).catch(() => publishedSeconds + 6);
-      const remainingSeconds = Math.max(2, audioDurationSeconds - publishedSeconds);
-      currentCode = buildProgressiveRecoveryScene({
-        segmentId: safeSegmentId,
-        speechText,
-        durationSeconds: remainingSeconds,
-        font: manimFont
-      });
-      progressiveContext.job.progressive.status = progressiveContext.job.progressive.playbackReadyAt
-        ? 'ready'
-        : 'buffering';
-      progressiveContext.job.progressive.error = null;
-      repairLogs.push(`Manim render attempt ${attempt + 1} failed. Progressive recovery scene started.`);
-      logInfo(`${safeSegmentId}: progressive kurtarma sahnesi baslatildi`, {
-        publishedSeconds: Number(publishedSeconds).toFixed(1),
-        remainingSeconds: Number(remainingSeconds).toFixed(1)
-      });
-      continue;
-    }
-
     if (progressiveContext?.job?.progressive?.readyCount) {
       progressiveContext.job.progressive.status = 'failed';
       progressiveContext.job.progressive.error = 'Manim render onarima gecti; yari kalan canli akis durduruldu.';
@@ -1620,6 +1591,9 @@ async function renderManimVideo({
     repairLogs.push(`Manim render attempt ${attempt + 1} failed. DeepSeek repair started.`);
     try {
       currentCode = await repairManimCodeWithLlm(currentCode, renderOutput, safeSegmentId);
+      if (progressiveContext?.job?.progressive?.enabled) {
+        currentCode = optimizeManimForProgressiveRender(currentCode);
+      }
       await fs.writeFile(path.join(workDir, `${className}.fixed-${attempt + 1}.py`), currentCode, 'utf8');
     } catch (repairError) {
       repairLogs.push(`DeepSeek repair failed: ${repairError.message}`);

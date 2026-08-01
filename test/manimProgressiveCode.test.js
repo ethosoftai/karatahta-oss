@@ -1,10 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
-  buildProgressiveRecoveryScene,
-  optimizeManimForProgressiveRender
-} from '../services/manimProgressiveCode.js';
+import { optimizeManimForProgressiveRender } from '../services/manimProgressiveCode.js';
 
 test('uzun play suresini kuculturken toplam sureyi wait parcalariyla korur', () => {
   const code = `class Demo(Scene):
@@ -30,17 +27,4 @@ test('yorumlari ve kisa cagirilari degistirmez', () => {
         self.play(Write(Text("(test)")), run_time=4)
         self.wait(2)`;
   assert.equal(optimizeManimForProgressiveRender(code), code);
-});
-
-test('yarida kalan render icin kisa parcalara ayrilmis devam sahnesi kurar', () => {
-  const code = buildProgressiveRecoveryScene({
-    segmentId: 's-2',
-    speechText: 'Türev bir fonksiyonun anlık değişim hızını açıklar ve teğet eğimiyle görselleştirilir.',
-    durationSeconds: 8.5,
-    font: 'Noto Sans'
-  });
-  assert.match(code, /class Seg_s_2_Recovery\(Scene\)/);
-  assert.match(code, /font="Noto Sans"/);
-  assert.match(code, /run_time=1\.5/);
-  assert.match(code, /self\.wait\(3\)\n        self\.wait\(3\)\n        self\.wait\(1\)/);
 });
