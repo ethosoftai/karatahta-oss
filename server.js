@@ -84,6 +84,7 @@ import {
   speechDurationBudget
 } from './services/segmentPipeline.js';
 import {
+  fitManimTimingToDuration,
   optimizeManimForProgressiveRender
 } from './services/manimProgressiveCode.js';
 import {
@@ -1584,6 +1585,16 @@ async function renderManimVideo({
 }) {
   logInfo(`${segmentId}: Manim render hazirlaniyor`, { quality: manimQuality });
   let currentCode = sanitizeManimForLocalRender(stripCodeFence(String(code || '')));
+  if (audioRelativePath) {
+    const targetDuration = await getMediaDurationSeconds(resolveRenderRelative(audioRelativePath));
+    const fittedCode = fitManimTimingToDuration(currentCode, targetDuration);
+    if (fittedCode !== currentCode) {
+      logInfo(`${segmentId}: Manim zamanlamasi gercek sese uyarlandi`, {
+        seconds: Number(targetDuration).toFixed(1)
+      });
+      currentCode = fittedCode;
+    }
+  }
   if (progressiveContext?.job?.progressive?.enabled) {
     currentCode = optimizeManimForProgressiveRender(currentCode);
   }
@@ -1813,7 +1824,32 @@ async function renderManimVideo({
           && partial.segmentIndex === progressiveContext.segmentIndex
         ))
     : [];
-  if (progressivePartials.length) {
+  const progressiveDuration = progressivePartials.reduce(
+    (sum, partial) => sum + Number(partial.durationSeconds || 0),
+    0
+  );
+  const audioDuration = audioPath
+    ? await getMediaDurationSeconds(audioPath).catch(() => null)
+    : null;
+  const progressiveDurationMismatch = Boolean(
+    progressivePartials.length
+    && audioDuration
+    && Math.abs(progressiveDuration - audioDuration) > 0.5
+  );
+  if (progressiveDurationMismatch) {
+    progressiveContext.job.progressive.status = 'failed';
+    progressiveContext.job.progressive.error = (
+      `Canli goruntu ${progressiveDuration.toFixed(1)} sn, ses ${audioDuration.toFixed(1)} sn; `
+      + 'kesintisiz tam segmente geciliyor.'
+    );
+    progressiveContext.job.eventChannel.emit('job', publicJob(progressiveContext.job));
+    repairLogs.push(progressiveContext.job.progressive.error);
+    logInfo(`${safeSegmentId}: progressive sure uyusmazligi`, {
+      videoSeconds: progressiveDuration.toFixed(1),
+      audioSeconds: audioDuration.toFixed(1)
+    });
+  }
+  if (progressivePartials.length && !progressiveDurationMismatch) {
     const listPath = path.join(workDir, 'progressive-partials.txt');
     const listContent = progressivePartials
       .sort((left, right) => left.sequence - right.sequence)

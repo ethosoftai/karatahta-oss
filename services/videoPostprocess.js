@@ -82,8 +82,23 @@ export function buildProgressivePartialArgs({
 }
 
 export function buildMuxArgs({ videoPath, audioPath, outputPath, videoDuration, audioDuration, volume = 1 }) {
-  const factor = calculateVideoStretchFactor(videoDuration, audioDuration);
-  return ['-y', '-i', videoPath, '-i', audioPath, '-filter_complex', `[0:v]setpts=${factor}*PTS[v];[1:a]volume=${Number(volume) || 1}[a]`, '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', outputPath];
+  calculateVideoStretchFactor(videoDuration, audioDuration);
+  const target = ffmpegNumber(audioDuration);
+  const padding = ffmpegNumber(Math.max(0, audioDuration - videoDuration));
+  const videoFilter = Number(padding) > 0
+    ? `tpad=stop_mode=clone:stop_duration=${padding},trim=duration=${target}`
+    : `trim=duration=${target}`;
+  return [
+    '-y', '-i', videoPath, '-i', audioPath,
+    '-filter_complex',
+    `[0:v]${videoFilter},setpts=PTS-STARTPTS[v];`
+      + `[1:a]volume=${Number(volume) || 1},atrim=duration=${target},asetpts=PTS-STARTPTS[a]`,
+    '-map', '[v]', '-map', '[a]',
+    '-t', target,
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', '20',
+    '-c:a', 'aac', '-b:a', '192k',
+    '-movflags', '+faststart', outputPath
+  ];
 }
 
 export function buildBurnSubtitleArgs({ inputPath, subtitlePath, outputPath }) {

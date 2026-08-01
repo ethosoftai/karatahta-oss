@@ -44,6 +44,80 @@ function findCallEnd(source, openParenIndex) {
   return -1;
 }
 
+export function fitManimTimingToDuration(code, targetDurationSeconds, {
+  defaultPlaySeconds = 1,
+  defaultWaitSeconds = 1,
+  minimumFactor = 0.5,
+  maximumFactor = 4
+} = {}) {
+  const source = String(code || '');
+  const target = Number(targetDurationSeconds);
+  if (!(target > 0)) return source;
+  const calls = [];
+  const callPattern = /\bself\.(play|wait)\s*\(/g;
+  let match;
+  while ((match = callPattern.exec(source))) {
+    const lineStart = source.lastIndexOf('\n', match.index - 1) + 1;
+    if (source.slice(lineStart, match.index).trimStart().startsWith('#')) continue;
+    const openParenIndex = source.indexOf('(', match.index);
+    const callEnd = findCallEnd(source, openParenIndex);
+    if (callEnd === -1) continue;
+    const call = source.slice(match.index, callEnd);
+    const explicit = match[1] === 'play'
+      ? /\brun_time\s*=\s*(\d+(?:\.\d+)?)/.exec(call)
+      : /^self\.wait\(\s*(\d+(?:\.\d+)?)?\s*\)$/s.exec(call);
+    const duration = Number(explicit?.[1] || (
+      match[1] === 'play' ? defaultPlaySeconds : defaultWaitSeconds
+    ));
+    if (!(duration > 0)) continue;
+    calls.push({
+      type: match[1],
+      start: match.index,
+      openParenIndex,
+      end: callEnd,
+      call,
+      explicit,
+      duration
+    });
+    callPattern.lastIndex = callEnd;
+  }
+  const estimatedDuration = calls.reduce((sum, call) => sum + call.duration, 0);
+  if (!(estimatedDuration > 0)) return source;
+  const factor = Math.max(minimumFactor, Math.min(maximumFactor, target / estimatedDuration));
+  if (Math.abs(factor - 1) < 0.03) return source;
+  const edits = [];
+  for (const call of calls) {
+    const scaled = numberText(call.duration * factor);
+    if (call.explicit?.[1]) {
+      const relativeStart = call.explicit.index
+        + call.explicit[0].lastIndexOf(call.explicit[1]);
+      edits.push({
+        start: call.start + relativeStart,
+        end: call.start + relativeStart + call.explicit[1].length,
+        replacement: scaled
+      });
+    } else if (call.type === 'play') {
+      const body = source.slice(call.openParenIndex + 1, call.end - 1).trimEnd();
+      edits.push({
+        start: call.end - 1,
+        end: call.end - 1,
+        replacement: `${body.endsWith(',') ? ' ' : ', '}run_time=${scaled}`
+      });
+    } else {
+      edits.push({
+        start: call.openParenIndex + 1,
+        end: call.end - 1,
+        replacement: scaled
+      });
+    }
+  }
+  return edits
+    .sort((left, right) => right.start - left.start || right.end - left.end)
+    .reduce((output, edit) => (
+      `${output.slice(0, edit.start)}${edit.replacement}${output.slice(edit.end)}`
+    ), source);
+}
+
 export function optimizeManimForProgressiveRender(code, {
   maxPlaySeconds = 5,
   maxWaitSeconds = 3

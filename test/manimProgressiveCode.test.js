@@ -1,7 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { optimizeManimForProgressiveRender } from '../services/manimProgressiveCode.js';
+import {
+  fitManimTimingToDuration,
+  optimizeManimForProgressiveRender
+} from '../services/manimProgressiveCode.js';
+
+test('LLM Manim zamanlamasini gercek ses suresine orantilar', () => {
+  const code = `        self.play(Write(title))
+        self.play(Transform(a, b), run_time=2)
+        self.wait(1)`;
+  const fitted = fitManimTimingToDuration(code, 8);
+  assert.match(fitted, /self\.play\(Write\(title\), run_time=2\)/);
+  assert.match(fitted, /run_time=4/);
+  assert.match(fitted, /self\.wait\(2\)/);
+});
 
 test('uzun play suresini kuculturken toplam sureyi wait parcalariyla korur', () => {
   const code = `class Demo(Scene):

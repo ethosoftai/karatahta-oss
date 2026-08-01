@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildConcatArgs,
   buildFilterConcatArgs,
+  buildMuxArgs,
   buildProgressiveAudioArgs,
   buildProgressivePartialArgs,
   buildTimedSubtitleSrt,
@@ -11,6 +12,21 @@ import {
 
 test('video süresini ses süresine eşitleyen katsayıyı hesaplar', () => {
   assert.equal(calculateVideoStretchFactor(72.966667, 91.536), 91.536 / 72.966667);
+});
+
+test('kisa Manim videosunu sesi kesmeden son kareyle tamamlar', () => {
+  const args = buildMuxArgs({
+    videoPath: '/tmp/video.mp4',
+    audioPath: '/tmp/audio.mp3',
+    outputPath: '/tmp/output.mp4',
+    videoDuration: 14.6,
+    audioDuration: 28.2
+  });
+  const filter = args[args.indexOf('-filter_complex') + 1];
+  assert.match(filter, /tpad=stop_mode=clone:stop_duration=13\.600/);
+  assert.match(filter, /trim=duration=28\.200/);
+  assert.equal(args[args.indexOf('-t') + 1], '28.200');
+  assert.ok(!args.includes('-shortest'));
 });
 
 test('konuşma metnini tüm ses süresine yayılan SRT bloklarına dönüştürür', () => {
