@@ -128,7 +128,7 @@ export async function waitForClosedMp4(filePath, {
   validate,
   checks = 2,
   intervalMs = 120,
-  maxAttempts = 30
+  maxAttempts = 150
 } = {}) {
   let stableChecks = 0;
   let previousSize = -1;

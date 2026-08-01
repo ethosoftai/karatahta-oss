@@ -19,7 +19,10 @@ import {
 } from './services/lessonContinuity.js';
 import { safeJsonParse } from './services/llmJson.js';
 import { buildMandatoryManimContract } from './services/manimPromptContract.js';
-import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
+import {
+  replaceNaturalLanguageMathTex,
+  sanitizeManimForLocalRender as sanitizeManimCompatibility
+} from './services/manimSanitizer.js';
 import {
   buildBurnSubtitleArgs,
   buildConcatArgs,
@@ -837,6 +840,7 @@ function toPlainTextFromTex(value) {
 
 function sanitizeManimForLocalRender(code) {
   let sanitized = sanitizeManimCompatibility(code);
+  sanitized = replaceNaturalLanguageMathTex(sanitized, { font: manimFont });
 
   // DecimalNumber axis labels are fragile in generated code; keep labels explicit.
   sanitized = sanitized.replace(/(["']?include_numbers["']?\s*:\s*)True/g, '$1False');
