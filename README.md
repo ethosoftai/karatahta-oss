@@ -202,9 +202,13 @@ CORS_ORIGIN=https://karatahta.ethosoft.org,http://localhost:3001,http://127.0.0.
 | `DEEPSEEK_PLAN_MODEL` | Plan modeli; varsayılan `deepseek-v4-flash` |
 | `DEEPSEEK_CODE_MODEL` | Manim kod modeli; varsayılan `deepseek-v4-flash` |
 | `DEEPSEEK_REASONING_EFFORT` | `high` veya `max` |
+| `DEEPSEEK_PIPELINE_THINKING` | Plan/speech/Manim kodu için thinking modu; düşük gecikme için `false` |
 | `DEEPSEEK_REQUEST_TIMEOUT_MS` | İstek timeout'u; varsayılan `120000` |
 
-DeepSeek çağrıları thinking modu açık ve `high` reasoning effort ile çalışır.
+Kara soru-cevap gibi genel DeepSeek çağrıları thinking modu açık ve `high`
+reasoning effort ile çalışır. Video üretim pipeline'ı düşük ilk-kare
+gecikmesi için varsayılan olarak non-thinking modunda çalışır;
+`DEEPSEEK_PIPELINE_THINKING=true` eski davranışı geri getirir.
 Model metin tabanlıdır; soru fotoğrafı çözümü için soru metni `Ek not` alanında
 verilmelidir. Video içi Kara soruları timestamp ve ders planı bağlamını kullanır,
 ancak video karesini görmez.

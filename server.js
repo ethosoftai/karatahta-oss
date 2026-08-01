@@ -69,6 +69,11 @@ import {
   publicProgressiveState
 } from './services/progressiveManim.js';
 import {
+  scheduleRemainingSegmentPreparations,
+  segmentDurationBudget,
+  speechDurationBudget
+} from './services/segmentPipeline.js';
+import {
   buildEarlySpeechScript,
   extractFirstArrayObject,
   isUsableLessonSegment,
@@ -124,6 +129,9 @@ const planModel = String(process.env.DEEPSEEK_PLAN_MODEL || process.env.DEEPSEEK
 const codeModel = String(process.env.DEEPSEEK_CODE_MODEL || process.env.DEEPSEEK_MODEL || defaultDeepSeekModel).trim();
 const deepseekBaseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
 const deepseekReasoningEffort = process.env.DEEPSEEK_REASONING_EFFORT === 'max' ? 'max' : 'high';
+const deepseekPipelineThinkingEnabled = String(
+  process.env.DEEPSEEK_PIPELINE_THINKING || 'false'
+).toLowerCase() === 'true';
 const manimQuality = process.env.MANIM_QUALITY || '-qm';
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
@@ -457,7 +465,8 @@ async function generateLlmText({
   userText,
   json = false,
   temperature = 0.4,
-  maxCompletionTokens = null
+  maxCompletionTokens = null,
+  thinkingEnabled = true
 }) {
   void temperature;
   const started = Date.now();
@@ -469,8 +478,8 @@ async function generateLlmText({
       ...(systemInstruction ? [{ role: 'system', content: systemInstruction }] : []),
       { role: 'user', content: userText }
     ],
-    reasoning_effort: deepseekReasoningEffort,
-    thinking: { type: 'enabled' },
+    ...(thinkingEnabled ? { reasoning_effort: deepseekReasoningEffort } : {}),
+    thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
     stream: false,
     ...(json ? { response_format: { type: 'json_object' } } : {}),
     ...(maxCompletionTokens ? { max_tokens: maxCompletionTokens } : {})
@@ -489,7 +498,8 @@ async function generateDeepSeekTextStream({
   json = false,
   temperature = 0.4,
   timeoutMs = deepseekRequestTimeoutMs,
-  onText
+  onText,
+  thinkingEnabled = true
 }) {
   void temperature;
   const client = requireDeepSeek();
@@ -501,8 +511,8 @@ async function generateDeepSeekTextStream({
       ...(systemInstruction ? [{ role: 'system', content: systemInstruction }] : []),
       { role: 'user', content: userText }
     ],
-    reasoning_effort: deepseekReasoningEffort,
-    thinking: { type: 'enabled' },
+    ...(thinkingEnabled ? { reasoning_effort: deepseekReasoningEffort } : {}),
+    thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
     stream: true,
     ...(json ? { response_format: { type: 'json_object' } } : {})
   }, { timeout: timeoutMs }));
@@ -846,7 +856,8 @@ async function repairManimCodeWithLlm(code, renderOutput, segmentId) {
     model: codeModel,
     systemInstruction: buildManimSystemInstruction('', manimGuide),
     userText: JSON.stringify(prompt, null, 2),
-    temperature: 0.15
+    temperature: 0.15,
+    thinkingEnabled: deepseekPipelineThinkingEnabled
   });
 
   const fixedCode = sanitizeManimForLocalRender(stripCodeFence(responseText || ''));
@@ -1186,6 +1197,7 @@ async function createSpeechScript(segment) {
     throw error;
   }
 
+  const speechBudget = speechDurationBudget(segment.duration_seconds);
   const prompt = {
     task: 'Segment icin TTS konusma metni ve animasyon senkron ipuclari uret.',
     language: 'tr-TR',
@@ -1196,7 +1208,7 @@ async function createSpeechScript(segment) {
       'Formulleri konusma diline cevir.',
       'cue_plan animasyoncu icindir; speech_text icine karismasin.',
       'Konusma segmentin tek fikrine odaklansin.',
-      'Bu uzun ders videosunun bir parcasi; speech_text 60-90 saniyelik dolu bir anlatim olsun.',
+      `Bu dersin kisa, oynatilabilir bir parcasi; speech_text ${speechBudget.minSeconds}-${speechBudget.maxSeconds} saniye olsun ve ${speechBudget.targetSeconds} saniyeyi hedeflesin.`,
       'Eger segment ornek cozumu ise adimlari atlama; problemi kur, cozumu adim adim anlat, sonucu yorumla.',
       'Eger segment kavram anlatimi ise sezgi, somut benzetme ve net tanimi birlikte ver.'
     ],
@@ -1219,7 +1231,8 @@ async function createSpeechScript(segment) {
     model: planModel,
     userText: JSON.stringify(prompt, null, 2),
     json: true,
-    temperature: 0.45
+    temperature: 0.45,
+    thinkingEnabled: deepseekPipelineThinkingEnabled
   });
 
   const speech = parseLlmJson(responseText || '', `${segment.id}: speech`);
@@ -1330,7 +1343,9 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId }
     model: codeModel,
     systemInstruction: buildManimSystemInstruction(coder, manimGuide),
     userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun bir bolumu. Basit bir giris animasyonu degil; segment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nPROGRESSIVE RENDER KURALLARI: Ilk self.play() 2-3 saniyeyi gecmesin. Sonraki gorsel akis anlamli 2-5 saniyelik self.play()/self.wait() bloklarindan olussun. Tek bir run_time=10/15 gibi dev animasyon kullanma. Ilk blokta binlerce obje, agir 3D veya gereksiz always_redraw kullanma; sonraki bloklarda gorsel zenginligi ve pedagojik kaliteyi koru. Kod satir satir calistirilmayacak; partial sinirlari yalnizca normal self.play()/self.wait() cagrilaridir.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
-    temperature: 0.35
+    temperature: 0.35,
+    maxCompletionTokens: 6000,
+    thinkingEnabled: deepseekPipelineThinkingEnabled
   });
 
   const code = sanitizeManimForLocalRender(stripCodeFence(responseText || ''));
@@ -1689,7 +1704,6 @@ async function runFullVideoJob(job) {
       }
       return segment;
     };
-    let scheduleNextPreparation = () => {};
     const prepareSegment = (segment, index) => (async () => {
       const segmentState = job.segments[index];
       const dbSegment = await persist(`${segment.id}/segment lookup`, () => getSegment({
@@ -1759,7 +1773,6 @@ async function runFullVideoJob(job) {
         }
 
         const [tts, code] = await Promise.all([ttsPromise, codePromise]);
-        scheduleNextPreparation(index + 1, segment.id);
         const manimCode = await persist(`${segment.id}/manim-code`, () => (
           dbSegment?.id
             ? saveManimCode({
@@ -1829,17 +1842,24 @@ async function runFullVideoJob(job) {
       void task.catch(() => {});
       return task;
     };
-    scheduleNextPreparation = (nextIndex, previousSegmentId) => {
-      if (nextIndex >= job.total || preparationTasks[nextIndex]) {
-        return;
-      }
-      logInfo(`Job ${job.id}: ${previousSegmentId} TTS ve Manim kodu hazir; ${nextIndex + 1}. segment hazirligi render ile es zamanli basliyor`);
-      schedulePreparation(nextIndex);
-    };
-
     if (job.plan.segments.length) {
       logInfo(`Job ${job.id}: ilk segment oncelikli hazirlaniyor`);
       schedulePreparation(0);
+    }
+    const scheduleRemaining = () => {
+      const tasks = scheduleRemainingSegmentPreparations(job.total, schedulePreparation);
+      if (tasks.length) {
+        logInfo(`Job ${job.id}: kalan segment hazirliklari paralel kuyruga alindi`, {
+          count: tasks.length,
+          codeConcurrency,
+          ttsConcurrency
+        });
+      }
+    };
+    if (job._fullPlanPromise) {
+      void fullPlanReadyTask.then(scheduleRemaining).catch(() => {});
+    } else {
+      scheduleRemaining();
     }
 
     for (let index = 0; index < job.total; index += 1) {
@@ -2004,6 +2024,7 @@ app.get('/api/config', async (_req, res, next) => {
       hasApiKey: Boolean(apiKey),
       hasDeepSeekApiKey: Boolean(deepseekApiKey),
       deepseekReasoningEffort,
+      deepseekPipelineThinkingEnabled,
       supportsVision: false,
       hasTtsCredentials: Boolean(googleCredentialsPath),
       ttsProvider: 'Google Cloud',
@@ -2234,6 +2255,7 @@ async function buildTraditionalPlannerRequest(body) {
 
   const targetMinutes = input.target_video_minutes;
   const segmentCount = input.target_segment_count;
+  const durationBudget = segmentDurationBudget(targetMinutes, segmentCount);
   logInfo('Plan uretimi basladi', {
     topic,
     targetMinutes,
@@ -2249,7 +2271,7 @@ Bu uygulamada hedef kisa giris degil, yaklasik ${targetMinutes} dakikalik tam bi
 ZORUNLU:
 - estimated_duration_minutes degeri ${targetMinutes} civarinda olsun.
 - segments dizisi tam olarak ${segmentCount} segment icersin.
-- Her segment 55-95 saniye araliginda olsun; toplam sure ${targetMinutes} dakikaya yaklassin.
+- Her segment ${durationBudget.minSeconds}-${durationBudget.maxSeconds} saniye araliginda olsun ve ortalama ${durationBudget.averageSeconds} saniyeyi hedeflesin; toplam sure ${targetMinutes} dakikaya yaklassin.
 - Sadece tanitim yapma. Konuyu gercekten ogret: sezgi, tanim, gorsel model, adim adim ornek, ikinci ornek, tipik hata, mini alistirma ve toparlama bolumleri olsun.
 - Matematik konularinda en az 2 cozumlu ornek segmenti uret. Fen konularinda en az 2 somut senaryo/deney/uygulama segmenti uret.
 - Segment basliklari ders akisi gibi olsun: Giris, Sezgi, Model, Yontem, Ornek 1, Ornek 2, Yanlis Anlama, Pratik, Ozet gibi.
@@ -2282,7 +2304,8 @@ async function createTraditionalLessonPlan(body, userContext) {
     systemInstruction: fullLessonPlanner,
     userText: JSON.stringify(input, null, 2),
     json: true,
-    temperature: 0.7
+    temperature: 0.7,
+    thinkingEnabled: deepseekPipelineThinkingEnabled
   });
 
   const plan = parseLlmJson(responseText || '', 'Ders plani');
@@ -2394,6 +2417,7 @@ segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazil
         json: true,
         temperature: 0.7,
         timeoutMs: Math.min(120000, Math.max(30000, segmentCount * 3000)),
+        thinkingEnabled: deepseekPipelineThinkingEnabled,
         onText: async ({ text }) => {
           if (firstSegmentPublishPromise) return;
           const extracted = extractFirstArrayObject(text, 'segments');
