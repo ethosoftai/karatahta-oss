@@ -40,7 +40,7 @@ export function createJobEventChannel({ historyLimit = 200 } = {}) {
   };
 }
 
-export function createProgressiveState({ enabled, bufferTargetSeconds = 6 } = {}) {
+export function createProgressiveState({ enabled, bufferTargetSeconds = 0 } = {}) {
   return {
     enabled: Boolean(enabled),
     status: enabled ? 'waiting' : 'disabled',

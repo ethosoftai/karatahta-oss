@@ -49,6 +49,18 @@ test('feature flag kapaliyken partial legacy statei degistirmez', () => {
   assert.equal(state.status, 'disabled');
 });
 
+test('tampon kapaliyken ilk gercek partial oynatmaya hazirdir', () => {
+  const state = createProgressiveState({ enabled: true, bufferTargetSeconds: 0 });
+  assert.equal(state.status, 'waiting');
+  appendPartialMetadata(state, {
+    id: 'p0',
+    sequence: 0,
+    durationSeconds: 0.5
+  });
+  assert.equal(state.status, 'ready');
+  assert.ok(state.playbackReadyAt);
+});
+
 test('SSE event kanali reconnect sirasinda kacirilan olaylari tekrarlar', () => {
   const channel = createJobEventChannel();
   channel.emit('job', { status: 'running' });

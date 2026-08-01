@@ -204,7 +204,7 @@ const streamingPlanFirstSegmentEnabled = String(
   process.env.STREAMING_PLAN_FIRST_SEGMENT || 'false'
 ).toLowerCase() === 'true';
 const progressiveManimEnabled = String(process.env.PROGRESSIVE_MANIM_PARTIALS || 'false').toLowerCase() === 'true';
-const progressiveBufferSeconds = Math.max(2, Number(process.env.PROGRESSIVE_BUFFER_SECONDS || 18));
+const progressiveBufferSeconds = Math.max(0, Number(process.env.PROGRESSIVE_BUFFER_SECONDS || 0));
 const progressiveChunkSeconds = Math.max(3, Number(process.env.PROGRESSIVE_CHUNK_SECONDS || 6));
 const progressiveArtifactTtlMs = Math.max(
   10 * 60 * 1000,
