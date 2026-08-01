@@ -24,6 +24,8 @@ import {
   buildBurnSubtitleArgs,
   buildConcatArgs,
   buildMuxArgs,
+  buildProgressiveAudioArgs,
+  buildProgressivePartialArgs,
   buildTimedSubtitleSrt
 } from './services/videoPostprocess.js';
 import {
@@ -1016,25 +1018,13 @@ async function normalizeProgressivePartial({
   audioStartSeconds,
   durationSeconds
 }) {
-  const args = [
-    '-y',
-    '-i', sourcePath,
-    '-ss', ffmpegSeconds(audioStartSeconds),
-    '-i', audioPath,
-    '-filter_complex',
-    `[1:a]volume=${speechVolume},apad,atrim=0:${ffmpegSeconds(durationSeconds)},asetpts=PTS-STARTPTS[aout]`,
-    '-map', '0:v:0',
-    '-map', '[aout]',
-    '-t', ffmpegSeconds(durationSeconds),
-    '-c:v', 'copy',
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-ar', '48000',
-    '-movflags', '+empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset',
-    '-frag_duration', '1000000',
-    '-video_track_timescale', '90000',
-    outputPath
-  ];
+  const args = buildProgressivePartialArgs({
+    sourcePath,
+    audioPath,
+    outputPath,
+    audioStartSeconds,
+    durationSeconds
+  });
   const result = await runCommand('ffmpeg', args, { timeoutMs: 60000 });
   if (result.code !== 0) {
     const error = new Error('Manim partial fMP4 olarak hazirlanamadi.');
@@ -1042,7 +1032,25 @@ async function normalizeProgressivePartial({
     error.stderr = result.stderr;
     throw error;
   }
-  await probeVideo(outputPath);
+  return probeVideo(outputPath);
+}
+
+async function prepareProgressiveAudio({ inputPath, outputPath }) {
+  if (existsSync(outputPath)) return;
+  const inputDuration = await getMediaDurationSeconds(inputPath);
+  const args = buildProgressiveAudioArgs({
+    inputPath,
+    outputPath,
+    volume: speechVolume,
+    durationSeconds: inputDuration + 30
+  });
+  const result = await runCommand('ffmpeg', args, { timeoutMs: 60000 });
+  if (result.code !== 0) {
+    const error = new Error('Progressive ses tek parca AAC olarak hazirlanamadi.');
+    error.stdout = result.stdout;
+    error.stderr = result.stderr;
+    throw error;
+  }
 }
 
 async function listMusicFiles(dir) {
@@ -1452,10 +1460,15 @@ async function renderManimVideo({
     ) {
       const progressiveDir = path.join(workDir, 'progressive');
       const audioPath = resolveRenderRelative(audioRelativePath);
+      const progressiveAudioPath = path.join(progressiveDir, 'speech-continuous.m4a');
       let localAudioCursor = (progressiveContext.job.progressive.partials || [])
         .filter((partial) => partial.segmentIndex === progressiveContext.segmentIndex)
         .reduce((sum, partial) => sum + Number(partial.durationSeconds || 0), 0);
       await fs.mkdir(progressiveDir, { recursive: true });
+      await prepareProgressiveAudio({
+        inputPath: audioPath,
+        outputPath: progressiveAudioPath
+      });
       partialCollector = new ManimPartialCollector({
         mediaDir,
         validate: async (partialPath) => {
@@ -1495,16 +1508,16 @@ async function renderManimVideo({
           }
           const probe = await probeVideo(partialPath);
           const outputPath = path.join(progressiveDir, `partial-${String(sequence).padStart(5, '0')}.mp4`);
-          await normalizeProgressivePartial({
+          const normalizedProbe = await normalizeProgressivePartial({
             sourcePath: partialPath,
             outputPath,
-            audioPath,
+            audioPath: progressiveAudioPath,
             audioStartSeconds: localAudioCursor,
             durationSeconds: probe.durationSeconds
           });
           const startSeconds = progressiveContext.job.progressive.readyDurationSeconds;
           const checksum = await sha256File(outputPath);
-          const codec = `${avcCodecString(probe)}, mp4a.40.2`;
+          const codec = `${avcCodecString(normalizedProbe)}, mp4a.40.2`;
           localAudioCursor += probe.durationSeconds;
           return {
             id: `${progressiveContext.job.id}-${sequence}-${checksum.slice(0, 12)}`,

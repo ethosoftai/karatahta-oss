@@ -44,6 +44,43 @@ function escapeSubtitlePath(filePath) {
   return filePath.replaceAll('\\', '/').replaceAll(':', '\\:').replaceAll("'", "\\'");
 }
 
+function ffmpegNumber(value) {
+  return Math.max(0, Number(value) || 0).toFixed(3);
+}
+
+export function buildProgressiveAudioArgs({ inputPath, outputPath, volume = 1, durationSeconds }) {
+  return [
+    '-y', '-i', inputPath,
+    '-af', `volume=${Number(volume) || 1},apad=pad_dur=30`,
+    '-t', ffmpegNumber(durationSeconds),
+    '-c:a', 'aac', '-b:a', '128k', '-ar', '48000',
+    outputPath
+  ];
+}
+
+export function buildProgressivePartialArgs({
+  sourcePath,
+  audioPath,
+  outputPath,
+  audioStartSeconds,
+  durationSeconds
+}) {
+  const duration = ffmpegNumber(durationSeconds);
+  return [
+    '-y', '-i', sourcePath,
+    '-ss', ffmpegNumber(audioStartSeconds), '-i', audioPath,
+    '-filter_complex', `[0:v]trim=duration=${duration},setpts=PTS-STARTPTS[v]`,
+    '-map', '[v]', '-map', '1:a:0', '-t', duration,
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
+    '-bf', '0', '-g', '30', '-keyint_min', '30', '-sc_threshold', '0',
+    '-fps_mode', 'cfr', '-r', '30',
+    '-c:a', 'copy',
+    '-movflags', '+empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset',
+    '-frag_duration', '1000000', '-video_track_timescale', '90000',
+    outputPath
+  ];
+}
+
 export function buildMuxArgs({ videoPath, audioPath, outputPath, videoDuration, audioDuration }) {
   const factor = calculateVideoStretchFactor(videoDuration, audioDuration);
   return ['-y', '-i', videoPath, '-i', audioPath, '-filter_complex', `[0:v]setpts=${factor}*PTS[v]`, '-map', '[v]', '-map', '1:a:0', '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', outputPath];
