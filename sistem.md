@@ -1,6 +1,6 @@
 # Kara Tahta — Sistem Promptları
 
-## 1. Planlayıcı AI (Gemini)
+## 1. Planlayıcı AI (DeepSeek)
 
 ```
 Sen Kara Tahta'nın Pedagojik Planlama Motorusun.
@@ -124,7 +124,7 @@ Yanıt da segment formatında olmalı — tam anlatım + animasyon tanımıyla.
 
 ---
 
-## 2. Manim Coder AI (Gemini)
+## 2. Manim Coder AI (DeepSeek)
 
 ```
 Sen Athena'nın Animasyon Mühendisisin.

@@ -1,7 +1,7 @@
 # Kara Tahta Backend
 
 Kara Tahta'nın Express API, kullanıcı/veri katmanı ve yapay zekâ video üretim
-servisidir. Gemini/Groq ile plan ve Manim kodu üretir, Edge/Google TTS ile
+servisidir. DeepSeek ile plan ve Manim kodu üretir, Edge/Google TTS ile
 seslendirir, Manim + FFmpeg ile videoyu oluşturur ve kalıcı medyayı private
 Railway Bucket'a yazar.
 
@@ -36,9 +36,8 @@ Railway / Express (server.js)
   │    ├─ profiles / lessons / plans / segments
   │    ├─ speech / TTS / Manim / render metadata
   │    └─ chats / messages / jobs / events
-  ├─ LLM router
-  │    ├─ Gemini primary + quota/capacity fallback
-  │    └─ opsiyonel Groq
+  ├─ DeepSeek V4 Flash
+  │    └─ OpenAI uyumlu Chat Completions API
   ├─ TTS
   │    ├─ Edge TTS
   │    └─ opsiyonel Google Cloud TTS
@@ -59,7 +58,7 @@ içindir.
 
 1. Frontend `POST /api/generate-lesson` gönderir.
 2. Backend kullanıcıyı doğrular ve Supabase'de ders kaydını oluşturur.
-3. `STREAMING_PLAN_FIRST_SEGMENT=true` ise Gemini JSON akışından ilk tamamlanmış
+3. `STREAMING_PLAN_FIRST_SEGMENT=true` ise DeepSeek JSON akışından ilk tamamlanmış
    segment çıkarılır. İlk segment bekletilmeden job'a verilir; kalan plan
    aynı sırada arka planda tamamlanır.
 4. Segment narration'ı uygunsa ilk speech script yeniden LLM çağrısı
@@ -105,7 +104,6 @@ temizlenir. Kalıcı sonuç Railway Bucket'taki final videodur.
 ```text
 server.js                         Express endpointleri ve pipeline orkestrasyonu
 services/
-├── geminiRouter.js               model fallback ve cooldown
 ├── streamingPlan.js              stream içinden ilk segmenti çıkarma
 ├── llmJson.js                    JSON temizleme/repair
 ├── edgeTts.js                    Edge TTS işlemleri
@@ -198,19 +196,18 @@ CORS_ORIGIN=https://karatahta.ethosoft.org,http://localhost:3001,http://127.0.0.
 
 | Değişken | Açıklama |
 | --- | --- |
-| `LLM_PROVIDER` | `gemini` veya opsiyonel `groq` |
-| `GEMINI_API_KEY` | Gemini API anahtarı |
-| `GEMINI_PLAN_MODEL` | Plan modeli |
-| `GEMINI_CODE_MODEL` | Manim kod modeli |
-| `GEMINI_FALLBACK_MODELS` | Virgülle ayrılmış fallback sırası |
-| `GEMINI_REQUEST_TIMEOUT_MS` | Her model denemesi timeout'u |
-| `GROQ_*` | Groq seçilirse API/model/reasoning ayarları |
+| `LLM_PROVIDER` | Sabit değer: `deepseek` |
+| `DEEPSEEK_API_KEY` | DeepSeek API anahtarı (`DEEPSEEK_API` da desteklenir) |
+| `DEEPSEEK_BASE_URL` | Varsayılan: `https://api.deepseek.com` |
+| `DEEPSEEK_PLAN_MODEL` | Plan modeli; varsayılan `deepseek-v4-flash` |
+| `DEEPSEEK_CODE_MODEL` | Manim kod modeli; varsayılan `deepseek-v4-flash` |
+| `DEEPSEEK_REASONING_EFFORT` | `high` veya `max` |
+| `DEEPSEEK_REQUEST_TIMEOUT_MS` | İstek timeout'u; varsayılan `120000` |
 
-Model adları sağlayıcı tarafından değiştirilebilir. Deploy öncesi kullanılabilir
-modelleri doğrulayın; kaldırılmış bir modeli yalnız fallback listesine güvenerek
-birincil model bırakmayın. Router `404`, `429`, `503`, `504`, timeout ve kota
-türü hatalarda sonraki modele geçer; normal schema/kod hatasında model
-değiştirmez.
+DeepSeek çağrıları thinking modu açık ve `high` reasoning effort ile çalışır.
+Model metin tabanlıdır; soru fotoğrafı çözümü için soru metni `Ek not` alanında
+verilmelidir. Video içi Kara soruları timestamp ve ders planı bağlamını kullanır,
+ancak video karesini görmez.
 
 ### TTS, Manim ve pipeline
 
@@ -322,25 +319,17 @@ node scripts/migrate_supabase_media_to_railway.js --delete-source --delete-bucke
 | `GET /api/jobs/:id/events` | Authenticated SSE job akışı |
 | `GET /api/jobs/:id/stream-manifest` | Sıralı progressive partial metadata |
 | `GET /api/jobs/:id/partials/:sequence` | Authenticated fMP4 partial |
-| `POST /api/ask-kara` | Video karesi ve chat bağlamıyla soru-cevap |
+| `POST /api/ask-kara` | Timestamp, ders planı ve chat bağlamıyla soru-cevap |
 
 Auth açıkken kullanıcıya ait endpointler Bearer token ister. Job ve lesson
 sahiplik kontrollerini kaldırmayın.
 
-## Gemini model router
+## DeepSeek istemcisi
 
-Birincil modeller `GEMINI_PLAN_MODEL` ve `GEMINI_CODE_MODEL` ile seçilir.
-Kota, kaldırılma, geçici kapasite veya timeout hatasında
-`GEMINI_FALLBACK_MODELS` sırasına geçilir. Hata alan model geçici cooldown'a
-alınır:
-
-- `404`: uzun cooldown
-- `429`: kota cooldown'ı
-- `503/504`: kısa kapasite/timeout cooldown'ı
-
-LLM JSON hataları `llmJson.js` tarafından temizlenip onarılmaya çalışılır.
-Schema/kod kalitesini düşüren her hatayı router fallback sebebi yapmak doğru
-değildir.
+Backend, OpenAI SDK ile `https://api.deepseek.com` Chat Completions endpoint'ini
+kullanır. Plan ve kod çağrıları `deepseek-v4-flash`, thinking modu ve `high`
+reasoning effort ile yapılır. LLM JSON hataları `llmJson.js` tarafından
+temizlenip onarılmaya çalışılır.
 
 ## Test ve doğrulama
 

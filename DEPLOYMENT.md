@@ -23,7 +23,7 @@ MANIM_QUALITY=-qm
 PROGRESSIVE_MANIM_PARTIALS=true
 PROGRESSIVE_BUFFER_SECONDS=12
 PROGRESSIVE_ARTIFACT_TTL_MS=1800000
-GEMINI_REQUEST_TIMEOUT_MS=20000
+DEEPSEEK_REQUEST_TIMEOUT_MS=120000
 STREAMING_PLAN_FIRST_SEGMENT=true
 ```
 
@@ -32,7 +32,7 @@ tamamlanmış ve `ffprobe` doğrulamasından geçen `partial_movie_files` çıkt
 authenticated fMP4 manifestine ekler. Flag kapatıldığında traditional segment
 render + final concat akışı değişmeden çalışır.
 
-`STREAMING_PLAN_FIRST_SEGMENT=true` olduğunda Gemini plan JSON'unu akış halinde
+`STREAMING_PLAN_FIRST_SEGMENT=true` olduğunda DeepSeek plan JSON'unu akış halinde
 döndürür. İlk tamamlanmış segment TTS + Manim hazırlığına hemen girerken kalan
 plan arka planda tamamlanır. Sorun halinde bu değişken `false` yapılarak tam-plan
 bekleyen eski akışa kod değişikliği olmadan dönülebilir.
@@ -44,12 +44,13 @@ PORT=8080
 CORS_ORIGIN=https://karatahta.ethosoft.org
 AUTH_REQUIRED=false
 
-LLM_PROVIDER=gemini
-GEMINI_API_KEY=
-GEMINI_PLAN_MODEL=gemini-3-flash-preview
-GEMINI_CODE_MODEL=gemini-3-flash-preview
-GEMINI_FALLBACK_MODELS=gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-3-flash-preview
-GEMINI_REQUEST_TIMEOUT_MS=20000
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_PLAN_MODEL=deepseek-v4-flash
+DEEPSEEK_CODE_MODEL=deepseek-v4-flash
+DEEPSEEK_REASONING_EFFORT=high
+DEEPSEEK_REQUEST_TIMEOUT_MS=120000
 STREAMING_PLAN_FIRST_SEGMENT=true
 
 TTS_PROVIDER=edge

@@ -1,8 +1,8 @@
 import 'dotenv/config';
 
-import { GoogleGenAI } from '@google/genai';
 import textToSpeech from '@google-cloud/text-to-speech';
 import express from 'express';
+import OpenAI from 'openai';
 import { Agent, setGlobalDispatcher } from 'undici';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -11,11 +11,6 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
-import {
-  DEFAULT_GEMINI_FALLBACK_MODELS,
-  runWithAbortTimeout,
-  runGeminiModelRoute
-} from './services/geminiRouter.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
 import { safeJsonParse } from './services/llmJson.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
@@ -123,26 +118,12 @@ function authCallbackUrl(flow) {
   url.searchParams.set('auth', flow);
   return url.toString();
 }
-const llmProvider = String(process.env.LLM_PROVIDER || (process.env.GROQ_API_KEY ? 'groq' : 'gemini')).toLowerCase();
-const defaultGeminiModel = 'gemini-3-flash-preview';
-const legacyGeminiModels = new Set(['gemini-2.5-flash', 'gemini-2.5-pro']);
-const resolveGeminiModel = (model) => {
-  const requestedModel = String(model || defaultGeminiModel).trim();
-  return legacyGeminiModels.has(requestedModel) ? defaultGeminiModel : requestedModel;
-};
-const geminiPlanModel = resolveGeminiModel(process.env.GEMINI_PLAN_MODEL || process.env.GEMINI_MODEL);
-const geminiCodeModel = resolveGeminiModel(process.env.GEMINI_CODE_MODEL || process.env.GEMINI_MODEL);
-const geminiFallbackModels = String(
-  process.env.GEMINI_FALLBACK_MODELS || DEFAULT_GEMINI_FALLBACK_MODELS.join(',')
-)
-  .split(',')
-  .map(resolveGeminiModel)
-  .filter(Boolean);
-const groqPlanModel = process.env.GROQ_PLAN_MODEL || 'openai/gpt-oss-120b';
-const groqCodeModel = process.env.GROQ_CODE_MODEL || 'qwen/qwen3-32b';
-const planModel = llmProvider === 'groq' ? groqPlanModel : geminiPlanModel;
-const codeModel = llmProvider === 'groq' ? groqCodeModel : geminiCodeModel;
-const groqBaseUrl = process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1';
+const llmProvider = 'deepseek';
+const defaultDeepSeekModel = 'deepseek-v4-flash';
+const planModel = String(process.env.DEEPSEEK_PLAN_MODEL || process.env.DEEPSEEK_MODEL || defaultDeepSeekModel).trim();
+const codeModel = String(process.env.DEEPSEEK_CODE_MODEL || process.env.DEEPSEEK_MODEL || defaultDeepSeekModel).trim();
+const deepseekBaseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
+const deepseekReasoningEffort = process.env.DEEPSEEK_REASONING_EFFORT === 'max' ? 'max' : 'high';
 const manimQuality = process.env.MANIM_QUALITY || '-qm';
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
@@ -152,14 +133,20 @@ const musicFadeSeconds = Number(process.env.BACKGROUND_MUSIC_FADE_SECONDS || 1);
 const speechVolume = Number(process.env.SPEECH_VOLUME || 1.25);
 const targetVideoMinutes = Number(process.env.TARGET_VIDEO_MINUTES || 10);
 const targetSegmentCount = Number(process.env.TARGET_SEGMENT_COUNT || 8);
-const geminiApiKey = process.env.GEMINI_API_KEY;
-const geminiRequestTimeoutMs = Math.max(
+const deepseekApiKey = process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API;
+const deepseekRequestTimeoutMs = Math.max(
   5000,
-  Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 20000)
+  Number(process.env.DEEPSEEK_REQUEST_TIMEOUT_MS || 120000)
 );
-const groqApiKey = process.env.GROQ_API_KEY;
-const apiKey = llmProvider === 'groq' ? groqApiKey : geminiApiKey;
-const ai = geminiApiKey ? new GoogleGenAI({ apiKey: geminiApiKey }) : null;
+const apiKey = deepseekApiKey;
+const deepseek = deepseekApiKey
+  ? new OpenAI({
+      apiKey: deepseekApiKey,
+      baseURL: deepseekBaseUrl,
+      timeout: deepseekRequestTimeoutMs,
+      maxRetries: 2
+    })
+  : null;
 const googleCredentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS
   ? path.resolve(__dirname, process.env.GOOGLE_APPLICATION_CREDENTIALS)
   : null;
@@ -453,53 +440,14 @@ ${mathRule}
   return `${coderPrompt}\n\n${appRules}\n\n## Yerel Manim Rehberleri\nAsagidaki rehberleri yalnizca yukaridaki uygulama kurallariyla uyumlu olan gorsel kalite, animasyon tasarimi, layout guvenligi, sahne akisi ve hata onleme onerileri icin kullan. ${mathGuideNote}\n\n${manimGuide}`;
 }
 
-function requireGemini() {
-  if (!ai) {
-    const error = new Error('.env icindeki GEMINI_API_KEY bos. Once API anahtarini girin.');
+function requireDeepSeek() {
+  if (!deepseek) {
+    const error = new Error('.env icindeki DEEPSEEK_API_KEY veya DEEPSEEK_API bos. Once API anahtarini girin.');
     error.statusCode = 400;
     throw error;
   }
 
-  return ai;
-}
-
-function requireGroq() {
-  if (!groqApiKey) {
-    const error = new Error('.env icindeki GROQ_API_KEY bos. Once API anahtarini girin.');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  return groqApiKey;
-}
-
-async function generateGeminiContent({ label = 'Gemini', model, contents, config }) {
-  const gemini = requireGemini();
-  return runGeminiModelRoute({
-    primaryModel: model,
-    fallbackModels: geminiFallbackModels,
-    generate: (candidateModel) => withRetry(label, () => runWithAbortTimeout(
-      (abortSignal) => gemini.models.generateContent({
-        model: candidateModel,
-        contents,
-        config: {
-          ...config,
-          abortSignal
-        }
-      }),
-      {
-        timeoutMs: geminiRequestTimeoutMs,
-        label: `${label}/${candidateModel}`
-      }
-    )),
-    onModelFailure: ({ model: failedModel, nextModel, error }) => {
-      logInfo(`${label}: model fallback`, {
-        failedModel,
-        nextModel,
-        reason: String(error?.message || error?.status || 'unknown').slice(0, 240)
-      });
-    }
-  });
+  return deepseek;
 }
 
 async function generateLlmText({
@@ -511,136 +459,68 @@ async function generateLlmText({
   temperature = 0.4,
   maxCompletionTokens = null
 }) {
+  void temperature;
   const started = Date.now();
   logInfo(`${label || llmProvider}: istek basladi`, { provider: llmProvider, model });
-  if (llmProvider === 'groq') {
-    requireGroq();
-    const body = {
-      model,
-      messages: [
-        ...(systemInstruction ? [{ role: 'system', content: systemInstruction }] : []),
-        { role: 'user', content: userText }
-      ],
-      temperature
-    };
-
-    // Groq JSON mode can reject long schema-like prompts; prompts already demand JSON,
-    // and safeJsonParse extracts the first valid object from normal chat output.
-    if (maxCompletionTokens) {
-      body.max_completion_tokens = maxCompletionTokens;
-    }
-    if (model.includes('gpt-oss')) {
-      body.reasoning_effort = process.env.GROQ_REASONING_EFFORT || 'medium';
-    }
-    if (model.includes('qwen')) {
-      body.reasoning_effort = process.env.GROQ_QWEN_REASONING_EFFORT || 'none';
-    }
-
-    const response = await withRetry(label || 'Groq', async () => {
-      const groqResponse = await fetch(`${groqBaseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${groqApiKey}`
-        },
-        body: JSON.stringify(body)
-      });
-
-      const data = await groqResponse.json().catch(() => ({}));
-      if (!groqResponse.ok) {
-        const message = data.error?.message || data.message || `Groq istegi basarisiz oldu (${groqResponse.status}).`;
-        const error = new Error(message);
-        error.statusCode = groqResponse.status;
-        error.details = data;
-        throw error;
-      }
-      return data;
-    });
-
-    const text = response.choices?.[0]?.message?.content || '';
-    logInfo(`${label || 'Groq'}: yanit geldi`, { model, ms: Date.now() - started, chars: text.length });
-    return text;
-  }
-
-  const { response, model: usedModel } = await generateGeminiContent({
-    label: label || 'Gemini',
+  const client = requireDeepSeek();
+  const body = {
     model,
-    contents: [{ role: 'user', parts: [{ text: userText }] }],
-    config: {
-      ...(systemInstruction ? { systemInstruction } : {}),
-      ...(json ? { responseMimeType: 'application/json' } : {}),
-      temperature
-    }
-  });
-
-  const text = response.text || '';
-  logInfo(`${label || 'Gemini'}: yanit geldi`, { model: usedModel, ms: Date.now() - started, chars: text.length });
+    messages: [
+      ...(systemInstruction ? [{ role: 'system', content: systemInstruction }] : []),
+      { role: 'user', content: userText }
+    ],
+    reasoning_effort: deepseekReasoningEffort,
+    thinking: { type: 'enabled' },
+    stream: false,
+    ...(json ? { response_format: { type: 'json_object' } } : {}),
+    ...(maxCompletionTokens ? { max_tokens: maxCompletionTokens } : {})
+  };
+  const response = await withRetry(label || 'DeepSeek', () => client.chat.completions.create(body));
+  const text = String(response.choices?.[0]?.message?.content || '');
+  logInfo(`${label || 'DeepSeek'}: yanit geldi`, { model, ms: Date.now() - started, chars: text.length });
   return text;
 }
 
-async function generateGeminiTextStream({
-  label = 'Gemini stream',
+async function generateDeepSeekTextStream({
+  label = 'DeepSeek stream',
   model,
   systemInstruction,
   userText,
   json = false,
   temperature = 0.4,
-  timeoutMs = geminiRequestTimeoutMs,
+  timeoutMs = deepseekRequestTimeoutMs,
   onText
 }) {
-  const gemini = requireGemini();
+  void temperature;
+  const client = requireDeepSeek();
   const started = Date.now();
-  logInfo(`${label}: istek basladi`, { provider: 'gemini', model, streaming: true });
-
-  const { response: text, model: usedModel } = await runGeminiModelRoute({
-    primaryModel: model,
-    fallbackModels: geminiFallbackModels,
-    generate: (candidateModel) => withRetry(label, () => runWithAbortTimeout(
-      async (abortSignal) => {
-        const stream = await gemini.models.generateContentStream({
-          model: candidateModel,
-          contents: [{ role: 'user', parts: [{ text: userText }] }],
-          config: {
-            ...(systemInstruction ? { systemInstruction } : {}),
-            ...(json ? { responseMimeType: 'application/json' } : {}),
-            temperature,
-            abortSignal
-          }
-        });
-        let accumulatedText = '';
-        for await (const chunk of stream) {
-          const delta = String(chunk.text || '');
-          if (!delta) continue;
-          accumulatedText += delta;
-          await onText?.({
-            text: accumulatedText,
-            delta,
-            model: candidateModel
-          });
-        }
-        return accumulatedText;
-      },
-      {
-        timeoutMs,
-        label: `${label}/${candidateModel}`
-      }
-    )),
-    onModelFailure: ({ model: failedModel, nextModel, error }) => {
-      logInfo(`${label}: model fallback`, {
-        failedModel,
-        nextModel,
-        reason: String(error?.message || error?.status || 'unknown').slice(0, 240)
-      });
-    }
-  });
+  logInfo(`${label}: istek basladi`, { provider: llmProvider, model, streaming: true });
+  const stream = await withRetry(label, () => client.chat.completions.create({
+    model,
+    messages: [
+      ...(systemInstruction ? [{ role: 'system', content: systemInstruction }] : []),
+      { role: 'user', content: userText }
+    ],
+    reasoning_effort: deepseekReasoningEffort,
+    thinking: { type: 'enabled' },
+    stream: true,
+    ...(json ? { response_format: { type: 'json_object' } } : {})
+  }, { timeout: timeoutMs }));
+  let text = '';
+  for await (const chunk of stream) {
+    const delta = String(chunk.choices?.[0]?.delta?.content || '');
+    if (!delta) continue;
+    text += delta;
+    await onText?.({ text, delta, model });
+  }
 
   logInfo(`${label}: yanit geldi`, {
-    model: usedModel,
+    model,
     ms: Date.now() - started,
     chars: text.length,
     streaming: true
   });
-  return { text, model: usedModel };
+  return { text, model };
 }
 
 function requireTts() {
@@ -721,10 +601,16 @@ function normalizeImagePayload(image) {
 }
 
 async function createQuestionSolutionPlan({ image, studentLevel = 'beginner', note = '' }) {
-  const normalizedImage = normalizeImagePayload(image);
-  const prompt = `Bu gorselde bir ogrencinin test kitabindan cozemedigi soru var.
+  normalizeImagePayload(image);
+  const questionText = String(note || '').trim();
+  if (!questionText) {
+    const error = new Error('deepseek-v4-flash gorsel girdiyi desteklemiyor. Soruyu Ek not alanina metin olarak yazin.');
+    error.statusCode = 422;
+    throw error;
+  }
+  const prompt = `Bir ogrencinin cozemedigi soru asagida metin olarak veriliyor.
 
-Gorev: Soruyu oku, cozumunu yap ve mevcut Manim video pipeline'ina uygun 1 dakikalik Turkce cozum videosu plani uret.
+Gorev: Soru metnini cozumle ve mevcut Manim video pipeline'ina uygun 1 dakikalik Turkce cozum videosu plani uret.
 
 ZORUNLU KURALLAR:
 - Sadece gecerli JSON dondur. Markdown yazma.
@@ -732,7 +618,7 @@ ZORUNLU KURALLAR:
 - segments dizisi tam olarak 1 segment icersin.
 - Segment id degeri "s1" olsun.
 - Anlatim ogrenciye dogrudan yardim eden, adim adim cozum diliyle olsun.
-- Eger soru tam okunamiyorsa bunu belirtip gorunen kisimdan makul cozum stratejisi anlat.
+- Soru metni eksikse bunu belirtip verilen kisimdan makul cozum stratejisi anlat.
 - Cevabi sadece soyleme; hangi ipucunun neden kullanildigini acikla.
 - Manim icin animation.description ve sequence alanlari ayrintili olsun.
 - Ekranda soru metninin tamamini basma; gerekli verilenleri, islem adimlarini ve sonucu goster.
@@ -764,29 +650,21 @@ JSON sekli:
 }
 
 Ogrenci seviyesi: ${studentLevel}
-Ek not: ${note || 'Yok'}`;
+Soru metni: ${questionText}`;
 
-  logInfo('Soru fotografi icin Gemini cozum plani basladi', { model: geminiPlanModel });
+  logInfo('Soru metni icin DeepSeek cozum plani basladi', { model: planModel });
   const started = Date.now();
-  const { response, model: usedModel } = await generateGeminiContent({
-    model: geminiPlanModel,
-    contents: [{
-      role: 'user',
-      parts: [
-        { text: prompt },
-        { inlineData: normalizedImage }
-      ]
-    }],
-    config: {
-      responseMimeType: 'application/json',
-      temperature: 0.35
-    }
+  const responseText = await generateLlmText({
+    label: 'DeepSeek soru cozumu',
+    model: planModel,
+    userText: prompt,
+    json: true
   });
 
-  const plan = parseLlmJson(response.text || '', 'Soru fotografi plani');
-  logInfo('Soru fotografi cozum plani tamamlandi', {
+  const plan = parseLlmJson(responseText, 'Soru metni plani');
+  logInfo('Soru metni cozum plani tamamlandi', {
     ms: Date.now() - started,
-    model: usedModel,
+    model: planModel,
     topic: plan.topic,
     segments: Array.isArray(plan.segments) ? plan.segments.length : 0
   });
@@ -802,22 +680,22 @@ async function answerKaraQuestion({
   lessonPlan = null,
   chatHistory = []
 }) {
-  const normalizedFrame = normalizeImagePayload(frame);
+  normalizeImagePayload(frame);
   const safeHistory = compactChatHistory(chatHistory);
   const compactLessonPlan = compactLessonPlanContext(lessonPlan);
 
   const prompt = `Sen Kara Tahta icindeki "Kara" adli egitim asistanisin.
 
-Ogrenci video izlerken bir soru sordu. Sana videonun o anki karesi, timestamp'i ve onceki soru-cevap gecmisi veriliyor.
+Ogrenci video izlerken bir soru sordu. DeepSeek gorsel girdiyi desteklemedigi icin video karesi modele aktarilmiyor; timestamp, ders plani ve onceki soru-cevap gecmisi veriliyor.
 
 ZORUNLU CEVAP KURALLARI:
 - Turkce cevap ver.
-- O anki goruntuyu ve timestamp'i dikkate al.
+- Timestamp ve ders plani baglamini dikkate al; karede gormedigin bir ayrintiyi gordugunu iddia etme.
 - Ilk once soruyu kisa cevapla, sonra gerekiyorsa adim adim acikla.
 - Matematiksel ifadeleri LaTeX ile yaz: satir ici icin \\(...\\), ayri denklem icin \\[...\\].
 - Gereksiz uzun cevap verme; ogrencinin takildigi yeri ac.
 - Onceki konusmalar varsa baglami koru, ama eski cevabi aynen tekrar etme.
-- Goruntu yeterli degilse bunu nazikce soyle ve yine de eldeki bilgiyle yardim et.
+- Baglam yeterli degilse bunu nazikce soyle ve yine de eldeki bilgiyle yardim et.
 
 Ders basligi: ${lessonTitle || 'Bilinmiyor'}
 Timestamp: ${timestampLabel} (${Number(timestampSeconds || 0).toFixed(1)} saniye)
@@ -831,35 +709,25 @@ ${safeHistory.length ? JSON.stringify(safeHistory, null, 2) : 'Yok'}
 Ogrencinin yeni sorusu:
 ${String(question || '').trim()}`;
 
-  logInfo('Kara soru-cevap Gemini istegi basladi', {
-    model: geminiPlanModel,
+  logInfo('Kara soru-cevap DeepSeek istegi basladi', {
+    model: planModel,
     timestamp: timestampLabel,
     history: safeHistory.length
   });
 
   const started = Date.now();
-  const { response, model: usedModel } = await generateGeminiContent({
-    model: geminiPlanModel,
-    contents: [{
-      role: 'user',
-      parts: [
-        { text: prompt },
-        { inlineData: normalizedFrame }
-      ]
-    }],
-    config: {
-      temperature: 0.35
-    }
-  });
-
-  const answer = String(response.text || '').trim();
-  logInfo('Kara soru-cevap Gemini yaniti geldi', {
+  const answer = String(await generateLlmText({
+    label: 'DeepSeek Kara soru-cevap',
+    model: planModel,
+    userText: prompt
+  })).trim();
+  logInfo('Kara soru-cevap DeepSeek yaniti geldi', {
     ms: Date.now() - started,
-    model: usedModel,
+    model: planModel,
     chars: answer.length
   });
 
-  return { answer, model: usedModel };
+  return { answer, model: planModel };
 }
 
 function toPlainTextFromTex(value) {
@@ -974,7 +842,7 @@ async function repairManimCodeWithLlm(code, renderOutput, segmentId) {
   };
 
   const responseText = await generateLlmText({
-    label: llmProvider === 'groq' ? 'Groq' : 'Gemini',
+    label: 'DeepSeek',
     model: codeModel,
     systemInstruction: buildManimSystemInstruction('', manimGuide),
     userText: JSON.stringify(prompt, null, 2),
@@ -1347,7 +1215,7 @@ async function createSpeechScript(segment) {
   };
 
   const responseText = await generateLlmText({
-    label: llmProvider === 'groq' ? 'Groq' : 'Gemini',
+    label: 'DeepSeek',
     model: planModel,
     userText: JSON.stringify(prompt, null, 2),
     json: true,
@@ -1356,7 +1224,7 @@ async function createSpeechScript(segment) {
 
   const speech = parseLlmJson(responseText || '', `${segment.id}: speech`);
   if (!speech || typeof speech.speech_text !== 'string' || !speech.speech_text.trim()) {
-    const error = new Error(`${segment.id}: Gemini gecerli bir speech_text dondurmedi.`);
+    const error = new Error(`${segment.id}: DeepSeek gecerli bir speech_text dondurmedi.`);
     error.statusCode = 502;
     throw error;
   }
@@ -1458,7 +1326,7 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId }
   }
 
   const responseText = await generateLlmText({
-    label: llmProvider === 'groq' ? 'Groq' : 'Gemini',
+    label: 'DeepSeek',
     model: codeModel,
     systemInstruction: buildManimSystemInstruction(coder, manimGuide),
     userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun bir bolumu. Basit bir giris animasyonu degil; segment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nPROGRESSIVE RENDER KURALLARI: Ilk self.play() 2-3 saniyeyi gecmesin. Sonraki gorsel akis anlamli 2-5 saniyelik self.play()/self.wait() bloklarindan olussun. Tek bir run_time=10/15 gibi dev animasyon kullanma. Ilk blokta binlerce obje, agir 3D veya gereksiz always_redraw kullanma; sonraki bloklarda gorsel zenginligi ve pedagojik kaliteyi koru. Kod satir satir calistirilmayacak; partial sinirlari yalnizca normal self.play()/self.wait() cagrilaridir.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
@@ -1621,12 +1489,12 @@ async function renderManimVideo({
       progressiveContext.job.eventChannel.emit('job', publicJob(progressiveContext.job));
     }
 
-    repairLogs.push(`Manim render attempt ${attempt + 1} failed. Gemini repair started.`);
+    repairLogs.push(`Manim render attempt ${attempt + 1} failed. DeepSeek repair started.`);
     try {
       currentCode = await repairManimCodeWithLlm(currentCode, renderOutput, safeSegmentId);
       await fs.writeFile(path.join(workDir, `${className}.fixed-${attempt + 1}.py`), currentCode, 'utf8');
     } catch (repairError) {
-      repairLogs.push(`Gemini repair failed: ${repairError.message}`);
+      repairLogs.push(`DeepSeek repair failed: ${repairError.message}`);
       break;
     }
   }
@@ -1782,26 +1650,6 @@ async function runFullVideoJob(job) {
     });
 
     const videoPaths = new Array(job.total);
-    let firstParallelStartedResolve = null;
-    const firstParallelStarted = new Promise((resolve) => {
-      firstParallelStartedResolve = resolve;
-    });
-    let firstReadyToRenderResolve = null;
-    const firstReadyToRender = new Promise((resolve) => {
-      firstReadyToRenderResolve = resolve;
-    });
-    const codeSubmissionTurns = [];
-    const ensureCodeSubmissionTurn = (index) => {
-      if (!codeSubmissionTurns[index]) {
-        let resolve;
-        const promise = new Promise((turnResolve) => {
-          resolve = turnResolve;
-        });
-        codeSubmissionTurns[index] = { promise, resolve };
-      }
-      return codeSubmissionTurns[index];
-    };
-    ensureCodeSubmissionTurn(0).resolve();
     const fullPlanReadyTask = (async () => {
       if (!job._fullPlanPromise) return job.plan;
       const fullPlan = await job._fullPlanPromise;
@@ -1820,9 +1668,6 @@ async function runFullVideoJob(job) {
         }
       ));
       videoPaths.length = job.total;
-      for (let index = 0; index < job.total; index += 1) {
-        ensureCodeSubmissionTurn(index);
-      }
       job.timings.fullPlanReadyAt = new Date().toISOString();
       updateJob(job, {
         message: `Tam plan hazir: ${job.total} segment.`
@@ -1833,6 +1678,18 @@ async function runFullVideoJob(job) {
       return fullPlan;
     })();
     void fullPlanReadyTask.catch(() => {});
+    const getPipelineSegment = async (index) => {
+      if (job.plan.segments[index]) {
+        return job.plan.segments[index];
+      }
+      const fullPlan = await fullPlanReadyTask;
+      const segment = fullPlan.segments[index];
+      if (!segment) {
+        throw new Error(`Pipeline segmenti bulunamadi: ${index + 1}/${job.total}`);
+      }
+      return segment;
+    };
+    let scheduleNextPreparation = () => {};
     const prepareSegment = (segment, index) => (async () => {
       const segmentState = job.segments[index];
       const dbSegment = await persist(`${segment.id}/segment lookup`, () => getSegment({
@@ -1872,11 +1729,9 @@ async function runFullVideoJob(job) {
           Math.round(Number(speech.estimated_seconds || segment.duration_seconds || 70))
         );
 
-        segmentState.status = index === 0 ? 'tts_code' : 'tts';
+        segmentState.status = 'tts_code';
         updateJob(job, {
-          current: index === 0
-            ? `${segment.id}: ses ve Manim kodu paralel uretiliyor...`
-            : `${segment.id}: ses uretiliyor; Manim kodu ilk segmentten sonra baslayacak...`
+          current: `${segment.id}: ses ve Manim kodu paralel uretiliyor...`
         });
         const ttsPromise = limitTts(() => synthesizeSpeech(speech.speech_text, segment.id))
           .then((value) => {
@@ -1884,12 +1739,6 @@ async function runFullVideoJob(job) {
             return value;
           });
         const codePromise = (async () => {
-          if (index > 0) {
-            await firstReadyToRender;
-            await ensureCodeSubmissionTurn(index - 1).promise;
-            segmentState.status = 'code';
-            updateJob(job, { current: `${segment.id}: Manim kodu uretiliyor...` });
-          }
           const queuedCode = limitCode(() => createManimCode({
             animation: segment.animation,
             durationSeconds: estimatedDuration,
@@ -1900,7 +1749,6 @@ async function runFullVideoJob(job) {
             },
             segmentId: segment.id
           }));
-          ensureCodeSubmissionTurn(index).resolve();
           return queuedCode.then((value) => {
             if (index === 0) job.timings.firstCodeReadyAt ||= new Date().toISOString();
             return value;
@@ -1908,10 +1756,10 @@ async function runFullVideoJob(job) {
         })();
         if (index === 0) {
           logInfo(`Job ${job.id}: ilk segment TTS ve Manim kodu kuyruğa girdi`);
-          firstParallelStartedResolve();
         }
 
         const [tts, code] = await Promise.all([ttsPromise, codePromise]);
+        scheduleNextPreparation(index + 1, segment.id);
         const manimCode = await persist(`${segment.id}/manim-code`, () => (
           dbSegment?.id
             ? saveManimCode({
@@ -1957,15 +1805,9 @@ async function runFullVideoJob(job) {
         updateJob(job, { current: `${segment.id}: render sirasini bekliyor...` });
         if (index === 0) {
           logInfo(`Job ${job.id}: ilk segment render icin hazir; diger Manim kodlari baslayabilir`);
-          firstReadyToRenderResolve();
         }
         return { ok: true, segment, dbSegment, speech, manimCode, code, tts, uploadedAudio };
       } catch (error) {
-        ensureCodeSubmissionTurn(index).resolve();
-        if (index === 0) {
-          firstParallelStartedResolve();
-          firstReadyToRenderResolve();
-        }
         logInfo(`${segment.id}: segment hazirlanamadi`, { error: error.message });
         segmentState.status = 'failed';
         segmentState.error = error.message || 'Segment hazirlanamadi.';
@@ -1974,25 +1816,34 @@ async function runFullVideoJob(job) {
     })();
 
     const preparationTasks = new Array(job.total);
+    const schedulePreparation = (index) => {
+      if (preparationTasks[index]) {
+        return preparationTasks[index];
+      }
+
+      const task = (async () => {
+        const segment = await getPipelineSegment(index);
+        return prepareSegment(segment, index);
+      })();
+      preparationTasks[index] = task;
+      void task.catch(() => {});
+      return task;
+    };
+    scheduleNextPreparation = (nextIndex, previousSegmentId) => {
+      if (nextIndex >= job.total || preparationTasks[nextIndex]) {
+        return;
+      }
+      logInfo(`Job ${job.id}: ${previousSegmentId} TTS ve Manim kodu hazir; ${nextIndex + 1}. segment hazirligi render ile es zamanli basliyor`);
+      schedulePreparation(nextIndex);
+    };
+
     if (job.plan.segments.length) {
       logInfo(`Job ${job.id}: ilk segment oncelikli hazirlaniyor`);
-      preparationTasks[0] = prepareSegment(job.plan.segments[0], 0);
-      await firstParallelStarted;
+      schedulePreparation(0);
     }
 
-    const remainingPreparationSetup = (async () => {
-      const fullPlan = await fullPlanReadyTask;
-      for (let index = 1; index < fullPlan.segments.length; index += 1) {
-        preparationTasks[index] = prepareSegment(fullPlan.segments[index], index);
-      }
-    })();
-    void remainingPreparationSetup.catch(() => {});
-
     for (let index = 0; index < job.total; index += 1) {
-      if (index === 1) {
-        await remainingPreparationSetup;
-      }
-      const prepared = await preparationTasks[index];
+      const prepared = await schedulePreparation(index);
       const segmentState = job.segments[index];
 
       if (!prepared.ok) {
@@ -2150,10 +2001,10 @@ app.get('/api/config', async (_req, res, next) => {
       llmProvider,
       planModel,
       codeModel,
-      geminiFallbackModels,
       hasApiKey: Boolean(apiKey),
-      hasGeminiApiKey: Boolean(geminiApiKey),
-      hasGroqApiKey: Boolean(groqApiKey),
+      hasDeepSeekApiKey: Boolean(deepseekApiKey),
+      deepseekReasoningEffort,
+      supportsVision: false,
       hasTtsCredentials: Boolean(googleCredentialsPath),
       ttsProvider: 'Google Cloud',
       ttsVoice: googleTtsVoice,
@@ -2426,7 +2277,7 @@ async function createTraditionalLessonPlan(body, userContext) {
   } = await buildTraditionalPlannerRequest(body);
 
   const responseText = await generateLlmText({
-    label: llmProvider === 'groq' ? 'Groq' : 'Gemini',
+    label: 'DeepSeek',
     model: planModel,
     systemInstruction: fullLessonPlanner,
     userText: JSON.stringify(input, null, 2),
@@ -2535,8 +2386,8 @@ segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazil
 
   const fullPlanPromise = (async () => {
     try {
-      const { text: responseText, model: usedModel } = await generateGeminiTextStream({
-        label: 'Gemini streaming plan',
+      const { text: responseText, model: usedModel } = await generateDeepSeekTextStream({
+        label: 'DeepSeek streaming plan',
         model: planModel,
         systemInstruction: streamingPlanner,
         userText: JSON.stringify(input, null, 2),
@@ -2642,8 +2493,8 @@ app.post('/api/question-plan', async (req, res, next) => {
       });
       await savePlan({
         lessonId: createdLesson.id,
-        provider: 'gemini',
-        model: geminiPlanModel,
+        provider: llmProvider,
+        model: planModel,
         prompt: 'question-image-solution-plan',
         plan,
         rawResponse: null
@@ -2766,8 +2617,8 @@ app.post('/api/ask-kara', async (req, res, next) => {
                 timestampSeconds: req.body.timestamp_seconds,
                 timestampLabel: req.body.timestamp_label,
                 frameAttachmentId: frameAttachment?.id || null,
-                provider: 'gemini',
-                model: result.model || geminiPlanModel,
+                provider: llmProvider,
+                model: result.model || planModel,
                 context: {
                   lesson_id: lessonId,
                   history_count: Array.isArray(req.body.chat_history) ? req.body.chat_history.length : 0
@@ -2927,7 +2778,7 @@ app.post('/api/generate-lesson', async (req, res, next) => {
   try {
     const promptReceivedAt = new Date().toISOString();
     const userContext = await resolveRequestUser(req);
-    if (llmProvider === 'gemini' && streamingPlanFirstSegmentEnabled) {
+    if (streamingPlanFirstSegmentEnabled) {
       const streamingPlan = await startStreamingTraditionalLessonPlan(req.body, userContext);
       const job = await queueTraditionalVideoJob({
         plan: streamingPlan.initialPlan,
@@ -3133,7 +2984,7 @@ app.listen(port, () => {
     provider: llmProvider,
     planModel,
     codeModel,
-    geminiFallbackModels,
+    reasoningEffort: deepseekReasoningEffort,
     quality: manimQuality
   });
 });
