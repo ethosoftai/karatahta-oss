@@ -58,10 +58,10 @@ içindir.
 
 1. Frontend `POST /api/generate-lesson` gönderir.
 2. Backend kullanıcıyı doğrular ve Supabase'de ders kaydını oluşturur.
-3. `STREAMING_PLAN_FIRST_SEGMENT=true` ise DeepSeek JSON akışından ilk tamamlanmış
-   segment çıkarılır. İlk segment bekletilmeden job'a verilir; kalan plan
-   aynı sırada arka planda tamamlanır.
-4. Segment narration'ı uygunsa ilk speech script yeniden LLM çağrısı
+3. `STREAMING_PLAN_FIRST_SEGMENT=true` ise DeepSeek JSON akışından tamamlanan
+   her segment anında çıkarılıp job'a verilir; pipeline tam planın bitmesini
+   beklemeden sonraki segmentlerin hazırlığına başlar.
+4. Streaming segment narration'ı uygunsa speech script yeniden LLM çağrısı
    yapılmadan hazırlanır. TTS, Manim kod üretimi ve uygun işler concurrency
    limitlerine göre yürür.
 5. Manim normal `self.play()` / `self.wait()` sınırlarında
@@ -225,7 +225,7 @@ ancak video karesini görmez.
 | `MANIM_ENABLE_MATHTEX` | LaTeX kullanım kontrolü |
 | `STREAMING_PLAN_FIRST_SEGMENT=true` | Tam planı beklemeden ilk segmenti başlatır |
 | `PROGRESSIVE_MANIM_PARTIALS=true` | Gerçek Manim partial canlı akışı |
-| `PROGRESSIVE_BUFFER_SECONDS=12` | Oynatma öncesi hedef tampon |
+| `PROGRESSIVE_BUFFER_SECONDS=18` | Oynatma öncesi hedef tampon; segment geçişleri için güvenli pay |
 | `PROGRESSIVE_ARTIFACT_TTL_MS` | Geçici partial saklama süresi |
 | `TARGET_VIDEO_MINUTES` | Varsayılan hedef ders süresi |
 | `TARGET_SEGMENT_COUNT` | Varsayılan plan segment sayısı |

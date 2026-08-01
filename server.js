@@ -75,9 +75,8 @@ import {
 } from './services/segmentPipeline.js';
 import {
   buildEarlySpeechScript,
-  extractFirstArrayObject,
-  isUsableLessonSegment,
-  mergeFirstSegment
+  extractArrayObjects,
+  isUsableLessonSegment
 } from './services/streamingPlan.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -186,7 +185,7 @@ const streamingPlanFirstSegmentEnabled = String(
   process.env.STREAMING_PLAN_FIRST_SEGMENT || 'false'
 ).toLowerCase() === 'true';
 const progressiveManimEnabled = String(process.env.PROGRESSIVE_MANIM_PARTIALS || 'false').toLowerCase() === 'true';
-const progressiveBufferSeconds = Math.max(2, Number(process.env.PROGRESSIVE_BUFFER_SECONDS || 6));
+const progressiveBufferSeconds = Math.max(2, Number(process.env.PROGRESSIVE_BUFFER_SECONDS || 18));
 const progressiveArtifactTtlMs = Math.max(
   10 * 60 * 1000,
   Number(process.env.PROGRESSIVE_ARTIFACT_TTL_MS || 30 * 60 * 1000)
@@ -1672,7 +1671,9 @@ async function runFullVideoJob(job) {
         throw new Error('Streaming tam ders plani gecersiz.');
       }
 
-      const previousStates = new Map(job.segments.map((segment) => [segment.id, segment]));
+      const previousStates = new Map(
+        job.segments.filter(Boolean).map((segment) => [segment.id, segment])
+      );
       job.plan = fullPlan;
       job.total = fullPlan.segments.length;
       job.segments = fullPlan.segments.map((segment) => (
@@ -1697,6 +1698,21 @@ async function runFullVideoJob(job) {
       if (job.plan.segments[index]) {
         return job.plan.segments[index];
       }
+      if (job._segmentPromises?.[index]) {
+        const segment = await job._segmentPromises[index];
+        if (!job.plan.segments[index]) {
+          job.plan.segments[index] = segment;
+          job.segments[index] ||= {
+            id: segment.id,
+            title: segment.title,
+            status: 'queued'
+          };
+          updateJob(job, {
+            message: `Plan segmenti hazır: ${index + 1}/${job.total}`
+          });
+        }
+        return segment;
+      }
       const fullPlan = await fullPlanReadyTask;
       const segment = fullPlan.segments[index];
       if (!segment) {
@@ -1714,12 +1730,12 @@ async function runFullVideoJob(job) {
       try {
         segmentState.status = 'speech';
         updateJob(job, { current: `${segment.id}: speech uretiliyor...` });
-        const earlySpeech = index === 0 && job._fullPlanPromise
+        const earlySpeech = job._segmentPromises
           ? buildEarlySpeechScript(segment)
           : null;
         const speech = earlySpeech || await limitSpeech(() => createSpeechScript(segment));
         if (earlySpeech) {
-          logInfo(`${segment.id}: streaming plandaki narration dogrudan kullanildi`, {
+          logInfo(`${segment.id}: streaming plandaki narration doğrudan kullanıldı`, {
             chars: earlySpeech.speech_text.length
           });
         }
@@ -1856,7 +1872,9 @@ async function runFullVideoJob(job) {
         });
       }
     };
-    if (job._fullPlanPromise) {
+    if (job._segmentPromises) {
+      scheduleRemaining();
+    } else if (job._fullPlanPromise) {
       void fullPlanReadyTask.then(scheduleRemaining).catch(() => {});
     } else {
       scheduleRemaining();
@@ -2256,6 +2274,8 @@ async function buildTraditionalPlannerRequest(body) {
   const targetMinutes = input.target_video_minutes;
   const segmentCount = input.target_segment_count;
   const durationBudget = segmentDurationBudget(targetMinutes, segmentCount);
+  const narrationWordTarget = Math.max(20, Math.round(durationBudget.averageSeconds * 1.55));
+  const narrationWordMaximum = Math.max(narrationWordTarget + 5, Math.round(durationBudget.maxSeconds * 1.65));
   logInfo('Plan uretimi basladi', {
     topic,
     targetMinutes,
@@ -2276,6 +2296,7 @@ ZORUNLU:
 - Matematik konularinda en az 2 cozumlu ornek segmenti uret. Fen konularinda en az 2 somut senaryo/deney/uygulama segmenti uret.
 - Segment basliklari ders akisi gibi olsun: Giris, Sezgi, Model, Yontem, Ornek 1, Ornek 2, Yanlis Anlama, Pratik, Ozet gibi.
 - narration alanlari TTS icin dolu, dogal ve aciklayici olsun. Tek cumlelik kisa metin yazma.
+- Her narration yaklaşık ${narrationWordTarget} kelimeyi hedeflesin ve ${narrationWordMaximum} kelimeyi kesinlikle geçmesin; böylece ses, segment süresini aşmasın.
 - animation.description ve sequence alanlari uzun video sahnesini tasiyacak kadar ayrintili olsun.
 - Her segment tek ana fikre odaklansin ama o fikri yeterince anlatsin.
 - JSON disinda hicbir sey yazma.`;
@@ -2368,34 +2389,44 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     sourceType: 'topic'
   }));
   const lessonId = lesson?.id || null;
-  const firstSegmentDeferred = createDeferredPromise();
-  let firstSegment = null;
-  let firstSegmentPublishPromise = null;
+  const segmentDeferreds = Array.from({ length: segmentCount }, () => createDeferredPromise());
+  const streamedSegments = new Array(segmentCount);
+  const segmentPublishPromises = new Array(segmentCount);
+  segmentDeferreds.forEach((deferred) => void deferred.promise.catch(() => {}));
 
-  const publishFirstSegment = (candidate) => {
-    if (firstSegmentPublishPromise || !isUsableLessonSegment(candidate)) {
-      return firstSegmentPublishPromise;
+  const publishSegment = (candidate, index) => {
+    if (
+      index < 0
+      || index >= segmentCount
+      || segmentPublishPromises[index]
+      || !isUsableLessonSegment(candidate)
+    ) {
+      return segmentPublishPromises[index];
     }
-    firstSegment = {
+    const segment = {
       ...candidate,
-      id: candidate.id || 's1'
+      id: candidate.id || `s${index + 1}`
     };
-    firstSegmentPublishPromise = (async () => {
-      await persist('lesson/streaming-first-segment', () => (
-        lessonId ? saveSegments({ lessonId, segments: [firstSegment] }) : null
+    streamedSegments[index] = segment;
+    segmentPublishPromises[index] = (async () => {
+      await persist(`lesson/streaming-segment-${index + 1}`, () => (
+        lessonId
+          ? saveSegments({ lessonId, segments: [segment], startIndex: index })
+          : null
       ));
       const readyAt = new Date().toISOString();
-      logInfo('Streaming plan: ilk segment hazir', {
-        segmentId: firstSegment.id,
-        title: firstSegment.title || null
+      logInfo('Streaming plan: segment hazir', {
+        segmentIndex: index,
+        segmentId: segment.id,
+        title: segment.title || null
       });
-      firstSegmentDeferred.resolve({ segment: firstSegment, readyAt });
-      return firstSegment;
+      segmentDeferreds[index].resolve({ segment, readyAt });
+      return segment;
     })().catch((error) => {
-      firstSegmentDeferred.reject(error);
+      segmentDeferreds[index].reject(error);
       throw error;
     });
-    return firstSegmentPublishPromise;
+    return segmentPublishPromises[index];
   };
 
   const streamingPlanner = `${fullLessonPlanner}
@@ -2405,6 +2436,7 @@ Kullanici ilk segment tamamlanir tamamlanmaz uretime baslayacak.
 Bu nedenle root JSON nesnesinin ILK alani "segments" olmak zorunda.
 Yaniti tam olarak {"segments":[{s1...},{s2...},...], ...diger root alanlari...} sirasiyla yaz.
 Once s1 objesini eksiksiz kapat, sonra s2 ve diger segmentlere gec.
+Her segment objesini tamamlanır tamamlanmaz kapat; sonraki segmente ait alanları önceki objeye taşıma. Sistem kapanan her segmenti anında üretim kuyruğuna alacak.
 segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazilacak diye pedagojik kaliteyi veya gerekli alanlari azaltma.`;
 
   const fullPlanPromise = (async () => {
@@ -2419,24 +2451,24 @@ segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazil
         timeoutMs: Math.min(120000, Math.max(30000, segmentCount * 3000)),
         thinkingEnabled: deepseekPipelineThinkingEnabled,
         onText: async ({ text }) => {
-          if (firstSegmentPublishPromise) return;
-          const extracted = extractFirstArrayObject(text, 'segments');
-          if (isUsableLessonSegment(extracted)) {
-            await publishFirstSegment(extracted);
+          const extractedSegments = extractArrayObjects(text, 'segments');
+          for (let index = 0; index < extractedSegments.length; index += 1) {
+            await publishSegment(extractedSegments[index], index);
           }
         }
       });
 
       let plan = parseLlmJson(responseText || '', 'Streaming ders plani');
-      if (!firstSegmentPublishPromise) {
-        const completedFirstSegment = plan.segments?.[0];
-        if (!completedFirstSegment) {
-          throw new Error('Streaming ders planinda ilk segment bulunamadi.');
-        }
-        publishFirstSegment(completedFirstSegment);
+      if (!plan.segments?.[0]) {
+        throw new Error('Streaming ders planinda ilk segment bulunamadi.');
       }
-      await firstSegmentPublishPromise;
-      plan = mergeFirstSegment(plan, firstSegment);
+      for (let index = 0; index < plan.segments.length; index += 1) {
+        await publishSegment(plan.segments[index], index);
+      }
+      plan = {
+        ...plan,
+        segments: plan.segments.map((segment, index) => streamedSegments[index] || segment)
+      };
       if (lessonId) plan._lesson_id = lessonId;
 
       await persist('lesson/streaming-plan-complete', async () => {
@@ -2463,7 +2495,9 @@ segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazil
       });
       return plan;
     } catch (error) {
-      firstSegmentDeferred.reject(error);
+      segmentDeferreds.forEach((deferred, index) => {
+        if (!segmentPublishPromises[index]) deferred.reject(error);
+      });
       await persist('lesson/streaming-plan-failed', () => (
         lessonId ? updateLesson(lessonId, { status: 'failed' }) : null
       ));
@@ -2472,7 +2506,7 @@ segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazil
   })();
   void fullPlanPromise.catch(() => {});
 
-  const firstReady = await firstSegmentDeferred.promise;
+  const firstReady = await segmentDeferreds[0].promise;
   const initialPlan = {
     topic,
     estimated_duration_minutes: targetMinutes,
@@ -2482,6 +2516,9 @@ segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazil
   return {
     initialPlan,
     fullPlanPromise,
+    segmentPromises: segmentDeferreds.map((deferred) => (
+      deferred.promise.then(({ segment }) => segment)
+    )),
     lessonId,
     expectedSegmentCount: segmentCount,
     firstSegmentReadyAt: firstReady.readyAt
@@ -2726,6 +2763,7 @@ async function queueTraditionalVideoJob({
   userContext,
   requestTimings = {},
   fullPlanPromise = null,
+  segmentPromises = null,
   expectedSegmentCount = null
 }) {
   if (!plan || !Array.isArray(plan.segments) || !plan.segments.length) {
@@ -2778,7 +2816,8 @@ async function queueTraditionalVideoJob({
       firstSegmentCompletedAt: null,
       finalVideoReadyAt: null
     },
-    _fullPlanPromise: fullPlanPromise
+    _fullPlanPromise: fullPlanPromise,
+    _segmentPromises: segmentPromises
   };
 
   const dbJob = await persist('generation-job/create', () => createGenerationJob({
@@ -2809,6 +2848,7 @@ app.post('/api/generate-lesson', async (req, res, next) => {
         lessonId: streamingPlan.lessonId,
         userContext,
         fullPlanPromise: streamingPlan.fullPlanPromise,
+        segmentPromises: streamingPlan.segmentPromises,
         expectedSegmentCount: streamingPlan.expectedSegmentCount,
         requestTimings: {
           promptReceivedAt,

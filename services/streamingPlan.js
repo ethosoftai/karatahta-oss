@@ -23,25 +23,17 @@ function findArrayStart(text, propertyName) {
   return -1;
 }
 
-export function extractFirstArrayObject(text, propertyName = 'segments') {
+export function extractArrayObjects(text, propertyName = 'segments') {
   const source = String(text || '');
   const arrayStart = findArrayStart(source, propertyName);
-  if (arrayStart === -1) return null;
+  if (arrayStart === -1) return [];
 
+  const objects = [];
   let objectStart = -1;
-  for (let cursor = arrayStart + 1; cursor < source.length; cursor += 1) {
-    const char = source[cursor];
-    if (/\s|,/.test(char)) continue;
-    if (char !== '{') return null;
-    objectStart = cursor;
-    break;
-  }
-  if (objectStart === -1) return null;
-
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (let cursor = objectStart; cursor < source.length; cursor += 1) {
+  for (let cursor = arrayStart + 1; cursor < source.length; cursor += 1) {
     const char = source[cursor];
     if (escaped) {
       escaped = false;
@@ -58,16 +50,28 @@ export function extractFirstArrayObject(text, propertyName = 'segments') {
     if (inString) continue;
 
     if (char === '{') {
+      if (depth === 0) objectStart = cursor;
       depth += 1;
     } else if (char === '}') {
+      if (depth === 0) return objects;
       depth -= 1;
       if (depth === 0) {
-        return safeJsonParse(source.slice(objectStart, cursor + 1));
+        const parsed = safeJsonParse(source.slice(objectStart, cursor + 1));
+        if (parsed) objects.push(parsed);
+        objectStart = -1;
       }
+    } else if (char === ']' && depth === 0) {
+      return objects;
+    } else if (depth === 0 && !/\s|,/.test(char)) {
+      return objects;
     }
   }
 
-  return null;
+  return objects;
+}
+
+export function extractFirstArrayObject(text, propertyName = 'segments') {
+  return extractArrayObjects(text, propertyName)[0] || null;
 }
 
 export function isUsableLessonSegment(segment) {
