@@ -1388,6 +1388,80 @@ async function createSpeechScript(segment) {
   return speech;
 }
 
+function countSpeechWords(value) {
+  return String(value || '')
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean)
+    .length;
+}
+
+async function resizeSpeechScript({ segment, speech, actualDurationSeconds, durationBudget, attempt }) {
+  const currentText = String(speech?.speech_text || '').trim();
+  const currentWords = countSpeechWords(currentText);
+  const measuredWordsPerSecond = currentWords / Math.max(1, Number(actualDurationSeconds));
+  const targetWords = Math.max(
+    currentWords + 8,
+    Math.round(durationBudget.targetSeconds * Math.max(1.45, measuredWordsPerSecond))
+  );
+  const minimumWords = Math.max(currentWords + 5, Math.floor(targetWords * 0.9));
+  const maximumWords = Math.max(minimumWords + 5, Math.ceil(targetWords * 1.12));
+  const prompt = {
+    task: 'Mevcut TTS metnini ayni dusuncenin kesintisiz devami olarak hedef sureye yeniden yaz.',
+    language: 'tr-TR',
+    attempt,
+    measured: {
+      current_text: currentText,
+      current_words: currentWords,
+      actual_duration_seconds: actualDurationSeconds,
+      target_duration_seconds: durationBudget.targetSeconds,
+      required_word_range: [minimumWords, maximumWords]
+    },
+    hard_rules: [
+      'Sadece gecerli JSON dondur.',
+      `speech_text ${minimumWords}-${maximumWords} kelime arasinda olmak ZORUNDA.`,
+      'Mevcut metni aynen tekrar etme; somut sezgi, gerekce veya adim ekleyerek dogal bicimde genislet.',
+      'Yeni bir giris, selamlama, bolum basligi, ozet veya kapanis ekleme.',
+      'Dersin ve komsu segmentlerin anlamsal akisindan kopma.',
+      'speech_text icine sahne yonergesi, markdown ya da zaman kodu koyma.',
+      'cue_plan yeni speech_text boyunca 0-100 sirali gorsel aksiyonlar icersin.'
+    ],
+    segment_context: segment,
+    output_schema: {
+      speech_text: 'string',
+      estimated_seconds: 'number',
+      cue_plan: [{
+        at_percent: 'number 0-100',
+        spoken_anchor: 'speech_text icinden kisa ifade',
+        visual_action: 'net gorsel aksiyon'
+      }]
+    }
+  };
+  const responseText = await generateLlmText({
+    label: `${segment.id}: speech sure duzeltme`,
+    model: planModel,
+    userText: JSON.stringify(prompt, null, 2),
+    json: true,
+    temperature: Math.max(0.2, 0.4 - (attempt * 0.08)),
+    thinkingEnabled: false
+  });
+  const resized = parseLlmJson(responseText || '', `${segment.id}: speech sure duzeltme`);
+  const resizedWords = countSpeechWords(resized?.speech_text);
+  if (!resized?.speech_text || resizedWords < minimumWords || resizedWords > maximumWords) {
+    throw new Error(
+      `${segment.id}: duzeltilen speech_text kelime araligi disinda `
+      + `(${resizedWords}, hedef ${minimumWords}-${maximumWords}).`
+    );
+  }
+  logInfo(`${segment.id}: speech suresi icin metin yeniden yazildi`, {
+    attempt,
+    previousWords: currentWords,
+    words: resizedWords,
+    targetWords
+  });
+  return resized;
+}
+
 async function synthesizeSpeech(text, segmentId) {
   const cleanText = String(text || '').trim();
   if (!cleanText) {
@@ -1975,16 +2049,33 @@ async function runFullVideoJob(job) {
           tts.durationSeconds < durationBudget.minSeconds
           || tts.durationSeconds > durationBudget.maxSeconds
         );
-        if (speechDurationOutsideBudget()) {
-          logInfo(`${segment.id}: anlatim suresi hedef disinda, metin bir kez duzeltiliyor`, {
+        for (let correctionAttempt = 1;
+          correctionAttempt <= 2 && speechDurationOutsideBudget();
+          correctionAttempt += 1) {
+          logInfo(`${segment.id}: anlatim suresi hedef disinda, metin yeniden yaziliyor`, {
+            attempt: correctionAttempt,
             actual: Number(tts.durationSeconds).toFixed(1),
             min: durationBudget.minSeconds,
             max: durationBudget.maxSeconds
           });
-          speech = await limitSpeech(() => {
-            ensureJobActive();
-            return createSpeechScript(segment);
-          });
+          try {
+            speech = await limitSpeech(() => {
+              ensureJobActive();
+              return resizeSpeechScript({
+                segment,
+                speech,
+                actualDurationSeconds: tts.durationSeconds,
+                durationBudget,
+                attempt: correctionAttempt
+              });
+            });
+          } catch (error) {
+            logInfo(`${segment.id}: speech sure duzeltme denemesi reddedildi`, {
+              attempt: correctionAttempt,
+              error: error.message
+            });
+            continue;
+          }
           tts = await limitTts(() => {
             ensureJobActive();
             return synthesizeSpeech(speech.speech_text, segment.id);
@@ -1992,24 +2083,11 @@ async function runFullVideoJob(job) {
           job._artifactPaths.add(resolveRenderRelative(tts.audioRelativePath));
         }
         if (speechDurationOutsideBudget()) {
-          logInfo(`${segment.id}: anlatim suresi ikinci kez hedef disinda, son duzeltme deneniyor`, {
-            actual: Number(tts.durationSeconds).toFixed(1)
+          logInfo(`${segment.id}: anlatim suresi hedef disinda; gercek ses suresiyle devam ediliyor`, {
+            actual: Number(tts.durationSeconds).toFixed(1),
+            min: durationBudget.minSeconds,
+            max: durationBudget.maxSeconds
           });
-          speech = await limitSpeech(() => {
-            ensureJobActive();
-            return createSpeechScript(segment);
-          });
-          tts = await limitTts(() => {
-            ensureJobActive();
-            return synthesizeSpeech(speech.speech_text, segment.id);
-          });
-          job._artifactPaths.add(resolveRenderRelative(tts.audioRelativePath));
-        }
-        if (speechDurationOutsideBudget()) {
-          throw new Error(
-            `${segment.id}: anlatim suresi hedefe getirilemedi `
-            + `(${Number(tts.durationSeconds).toFixed(1)} sn, hedef ${durationBudget.minSeconds}-${durationBudget.maxSeconds} sn).`
-          );
         }
         if (index === 0) job.timings.firstTtsReadyAt ||= new Date().toISOString();
         speech = {
@@ -2037,21 +2115,21 @@ async function runFullVideoJob(job) {
             const queuedCode = limitCode(() => {
               ensureJobActive();
               return createManimCode({
-              animation: segment.animation,
-              durationSeconds: actualDuration,
-              speech: {
-                speech_text: speech.speech_text,
-                duration_seconds: actualDuration,
-                cue_plan: speech.cue_plan || []
-              },
-              segmentId: segment.id,
-              continuityContext: buildSegmentGenerationContext({
-                plan: job.plan,
-                segment,
-                index,
-                total: job.total,
-                previousManimCode
-              })
+                animation: segment.animation,
+                durationSeconds: actualDuration,
+                speech: {
+                  speech_text: speech.speech_text,
+                  duration_seconds: actualDuration,
+                  cue_plan: speech.cue_plan || []
+                },
+                segmentId: segment.id,
+                continuityContext: buildSegmentGenerationContext({
+                  plan: job.plan,
+                  segment,
+                  index,
+                  total: job.total,
+                  previousManimCode
+                })
               });
             });
             const value = await queuedCode;
@@ -2306,6 +2384,7 @@ async function runFullVideoJob(job) {
     logInfo(`Job ${job.id}: tam ders uretimi bitti`, { videoUrl: concat.videoUrl });
   } catch (error) {
     job._cancelled = true;
+    if (job._planControl) job._planControl.cancelled = true;
     logInfo(`Job ${job.id}: tam ders uretimi hata verdi`, { error: error.message });
     await persist('lesson/status-failed', () => (
       job.lessonId ? updateLesson(job.lessonId, { status: 'failed' }) : null
@@ -2822,6 +2901,7 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
   }));
   const lessonId = lesson?.id || null;
   const segmentDeferreds = Array.from({ length: segmentCount }, () => createDeferredPromise());
+  const planControl = { cancelled: false };
   const streamedSegments = new Array(segmentCount);
   const segmentPublishPromises = new Array(segmentCount);
   segmentDeferreds.forEach((deferred) => void deferred.promise.catch(() => {}));
@@ -2865,6 +2945,9 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     const rawResponses = [];
     try {
       for (let index = 0; index < segmentCount; index += 1) {
+        if (planControl.cancelled) {
+          throw new Error('Video isi sonlandigi icin plan uretimi iptal edildi.');
+        }
         const result = await createIncrementalLessonSegment({
           topic,
           input,
@@ -2876,6 +2959,9 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
           narrationWordTarget,
           narrationWordMaximum
         });
+        if (planControl.cancelled) {
+          throw new Error('Video isi sonlandigi icin plan uretimi iptal edildi.');
+        }
         rawResponses.push(result.rawResponse);
         await publishSegment(result.segment, index);
       }
@@ -2934,6 +3020,7 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     segmentPromises: segmentDeferreds.map((deferred) => (
       deferred.promise.then(({ segment }) => segment)
     )),
+    planControl,
     lessonId,
     expectedSegmentCount: segmentCount,
     firstSegmentReadyAt: firstReady.readyAt
@@ -3179,6 +3266,7 @@ async function queueTraditionalVideoJob({
   requestTimings = {},
   fullPlanPromise = null,
   segmentPromises = null,
+  planControl = null,
   expectedSegmentCount = null,
   appJobId = null,
   existingDbJobId = null
@@ -3236,6 +3324,7 @@ async function queueTraditionalVideoJob({
     },
     _fullPlanPromise: fullPlanPromise,
     _segmentPromises: segmentPromises,
+    _planControl: planControl,
     _persistenceChain: Promise.resolve(),
     _artifactPaths: new Set(),
     _cancelled: false
@@ -3272,6 +3361,7 @@ app.post('/api/generate-lesson', async (req, res, next) => {
         userContext,
         fullPlanPromise: streamingPlan.fullPlanPromise,
         segmentPromises: streamingPlan.segmentPromises,
+        planControl: streamingPlan.planControl,
         expectedSegmentCount: streamingPlan.expectedSegmentCount,
         requestTimings: {
           promptReceivedAt,
