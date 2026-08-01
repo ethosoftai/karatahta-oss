@@ -84,6 +84,22 @@ Yanıt da segment formatında olmalı — tam anlatım + animasyon tanımıyla.
 
       "narration": "TTS'e doğrudan gidecek tam anlatım metni. Doğal Türkçe konuşma diliyle yaz — yazılı anlatım değil, söylenecek şey. 'Şimdi dikkat et', 'Bunu bir düşün', 'İşte burada' gibi yönlendirici ifadeler kullan. Formüller köşeli parantez içinde: [f apostrop x eşittir 2x]. Animasyon geçişlerinde 'şimdi ekrana bak' veya 'grafikte görüyorsun' gibi göndermeler yap.",
 
+      "continuity": {
+        "role": "opening | continuation | closing",
+        "narrative_bridge": "Önceki cümlenin fikrini bu segmente doğal biçimde bağlayan kısa köprü",
+        "visual_start_state": "İlk karede önceki segmentten aynen korunacak nesneler, renkler ve konumlar",
+        "visual_end_state": "Son karede sonraki segmente bırakılacak nesneler, renkler ve konumlar",
+        "transition": "opening | match_continuation | transform | closing",
+        "visual_style": {
+          "background": "BLACK",
+          "primary": "BLUE",
+          "secondary": "TEAL",
+          "accent": "YELLOW",
+          "text": "WHITE",
+          "font": "Georgia"
+        }
+      },
+
       "animation": {
         "type": "equation_build | graph_plot | geometric_transform | diagram | number_line | coordinate_system | text_reveal",
         "description": "Animasyoncuya yönelik net, teknik talimat. Ne görünmeli, hangi sırayla hareket etmeli.",
@@ -92,7 +108,8 @@ Yanıt da segment formatında olmalı — tam anlatım + animasyon tanımıyla.
           "Adım 1 — tam olarak ne olur",
           "Adım 2 — tam olarak ne olur"
         ],
-        "highlight_moment": "Anlatımla senkronize edilecek kritik an. Öğrencinin baktığı yerde ne görünmeli, tam cümle ver."
+        "highlight_moment": "Anlatımla senkronize edilecek kritik an. Öğrencinin baktığı yerde ne görünmeli, tam cümle ver.",
+        "visual_end_state": "Bir sonraki teknik render bloğunun ilk karede yeniden kuracağı kesin sahne durumu"
       },
 
       "pause_for_student": false
@@ -118,6 +135,11 @@ Yanıt da segment formatında olmalı — tam anlatım + animasyon tanımıyla.
 ## KISITLAMALAR
 - Formülü asla birinci segmentte verme
 - Her segment tek bir fikri anlatır — iki farklı kavramı tek segmentte birleştirme
+- Segmentler bağımsız bölümler değil, tek kesintisiz videonun teknik render bloklarıdır
+- Yalnız ilk segment giriş yapar; sonraki segmentlerde selamlama, yeniden tanıtım, özet veya bölüm değişikliği anonsu yapılmaz
+- Son segment dışında kapanış yapılmaz ve ekran tamamen temizlenmez
+- Ardışık narration metinleri tek monolog gibi okunmalı; her visual_start_state önceki visual_end_state ile eşleşmelidir
+- Tüm segmentlerde aynı renk, font, nesne adı ve yerleşim sözleşmesi korunur
 - Narration 30 saniyeden kısa, 90 saniyeden uzun olmasın
 - JSON dışında hiçbir şey yazma — ne açıklama ne selamlama
 ```

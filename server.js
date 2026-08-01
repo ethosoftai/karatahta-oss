@@ -12,6 +12,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
+import {
+  buildSegmentGenerationContext,
+  normalizeLessonContinuity,
+  normalizeLessonSegmentContinuity
+} from './services/lessonContinuity.js';
 import { safeJsonParse } from './services/llmJson.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
 import {
@@ -1212,6 +1217,10 @@ async function createSpeechScript(segment) {
       'Formulleri konusma diline cevir.',
       'cue_plan animasyoncu icindir; speech_text icine karismasin.',
       'Konusma segmentin tek fikrine odaklansin.',
+      'Bu segment bagimsiz bir bolum degil, tek ve kesintisiz ders anlatiminin teknik parcasidir.',
+      'continuity.role continuation ise selamlama, yeniden giris, bolum basligi, onceki kismi ozetleme veya konu degisikligi anonsu yapma; continuity.previous_narration_tail cumlesindeki dusunceyi dogal olarak ilerlet.',
+      'continuity.role closing degilse sonuc/kapanis yapma; sonraki fikre dogal bir anlamsal kopru birak.',
+      'Segmentin konusu dersin ana konusundan kopmasin; benzetme ve ornek yalniz mevcut fikri ilerletsin.',
       `Bu dersin kisa, oynatilabilir bir parcasi; speech_text ${speechBudget.minSeconds}-${speechBudget.maxSeconds} saniye olsun ve ${speechBudget.targetSeconds} saniyeyi hedeflesin.`,
       'Eger segment ornek cozumu ise adimlari atlama; problemi kur, cozumu adim adim anlat, sonucu yorumla.',
       'Eger segment kavram anlatimi ise sezgi, somut benzetme ve net tanimi birlikte ver.'
@@ -1325,7 +1334,7 @@ async function synthesizeSpeech(text, segmentId) {
   return result;
 }
 
-async function createManimCode({ animation, durationSeconds, speech, segmentId }) {
+async function createManimCode({ animation, durationSeconds, speech, segmentId, continuityContext = null }) {
   logInfo(`${segmentId}: Manim kodu LLM ile uretiliyor`, { seconds: durationSeconds });
   const { coder } = await loadPrompts();
   const manimGuide = await loadManimGuide();
@@ -1333,7 +1342,8 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId }
     animation,
     duration_seconds: Number(durationSeconds || 45),
     speech: speech || null,
-    segment_id: sanitizeSegmentId(segmentId)
+    segment_id: sanitizeSegmentId(segmentId),
+    continuity: continuityContext
   };
 
   if (!input.animation) {
@@ -1346,7 +1356,7 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId }
     label: 'DeepSeek',
     model: codeModel,
     systemInstruction: buildManimSystemInstruction(coder, manimGuide),
-    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun bir bolumu. Basit bir giris animasyonu degil; segment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nPROGRESSIVE RENDER KURALLARI: Ilk self.play() 2-3 saniyeyi gecmesin. Sonraki gorsel akis anlamli 2-5 saniyelik self.play()/self.wait() bloklarindan olussun. Tek bir run_time=10/15 gibi dev animasyon kullanma. Ilk blokta binlerce obje, agir 3D veya gereksiz always_redraw kullanma; sonraki bloklarda gorsel zenginligi ve pedagojik kaliteyi koru. Kod satir satir calistirilmayacak; partial sinirlari yalnizca normal self.play()/self.wait() cagrilaridir.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
+    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun teknik render parcasidir; bagimsiz bir mini video veya yeni bolum degildir. continuity alanindaki onceki sahne durumunu ilk self.play() cagrisindan ONCE, animasyonsuz olarak yeniden kur. Boylece ilk kare onceki segmentin son karesiyle ayni kompozisyonu tasir. Segment basligi, giris karti, logo veya yeniden tanitim gosterme. Onceki nesneleri uygun Transform/ReplacementTransform ile gelistir; ekrani sifirlayip baska bir kompozisyona atlama. continuity.forbid_full_clear true ise tum nesneleri FadeOut ile temizleme ve siyah bos kareyle bitirme. Yalniz continuity.role closing ise dogal bir final kapanisi yapabilirsin. Tum segmentlerde continuity.visual_style renklerini, fontunu ve yerlesimini aynen koru.\n\nSegment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nPROGRESSIVE RENDER KURALLARI: Ilk self.play() 2-3 saniyeyi gecmesin. Sonraki gorsel akis anlamli 2-5 saniyelik self.play()/self.wait() bloklarindan olussun. Tek bir run_time=10/15 gibi dev animasyon kullanma. Ilk blokta binlerce obje, agir 3D veya gereksiz always_redraw kullanma; sonraki bloklarda gorsel zenginligi ve pedagojik kaliteyi koru. Kod satir satir calistirilmayacak; partial sinirlari yalnizca normal self.play()/self.wait() cagrilaridir.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
     temperature: 0.35,
     maxCompletionTokens: 6000,
     thinkingEnabled: deepseekPipelineThinkingEnabled
@@ -1730,7 +1740,7 @@ async function runFullVideoJob(job) {
     const videoPaths = new Array(job.total);
     const fullPlanReadyTask = (async () => {
       if (!job._fullPlanPromise) return job.plan;
-      const fullPlan = await job._fullPlanPromise;
+      const fullPlan = normalizeLessonContinuity(await job._fullPlanPromise);
       if (!fullPlan || !Array.isArray(fullPlan.segments) || !fullPlan.segments.length) {
         throw new Error('Streaming tam ders plani gecersiz.');
       }
@@ -1841,7 +1851,13 @@ async function runFullVideoJob(job) {
               duration_seconds: estimatedDuration,
               cue_plan: speech.cue_plan || []
             },
-            segmentId: segment.id
+            segmentId: segment.id,
+            continuityContext: buildSegmentGenerationContext({
+              plan: job.plan,
+              segment,
+              index,
+              total: job.total
+            })
           }));
           return queuedCode.then((value) => {
             if (index === 0) job.timings.firstCodeReadyAt ||= new Date().toISOString();
@@ -2364,6 +2380,14 @@ ZORUNLU:
 - Her narration yaklaşık ${narrationWordTarget} kelimeyi hedeflesin ve ${narrationWordMaximum} kelimeyi kesinlikle geçmesin; böylece ses, segment süresini aşmasın.
 - animation.description ve sequence alanlari uzun video sahnesini tasiyacak kadar ayrintili olsun.
 - Her segment tek ana fikre odaklansin ama o fikri yeterince anlatsin.
+- Segmentler bagimsiz mini dersler degil, TEK bir kesintisiz videonun teknik render bloklaridir. Tum narration metinleri arka arkaya okundugunda tek bir dogal monolog olustursun.
+- Yalniz s1 merak uyandiran bir acilis yapabilir. s2 ve sonrasinda selamlama, konuyu yeniden tanitma, onceki kismi ozetleme veya "simdi yeni bolume geciyoruz" deme. Onceki dusuncenin son cumlesini dogal bicimde ilerlet.
+- Son segment disindaki narration metinleri kapanis yapmasin; bir sonraki fikre acik ve dogal bir kopruyle bitsin. Yalniz son segment genel sonucu baglasin.
+- Konu kapsamini koru: ornek ve benzetmeler ana fikri ilerletsin; yeni ve ilgisiz bir konu acmasin.
+- Her segmentte continuity objesi zorunludur. Alanlari: role (opening|continuation|closing), narrative_bridge, visual_start_state, visual_end_state, transition ve visual_style.
+- s2 ve sonrasinin visual_start_state degeri onceki segmentin visual_end_state degeriyle ayni sahneyi, ayni nesne adlarini, renkleri ve konumlari tarif etsin.
+- Tum segmentlerde ayni visual_style kullan: BLACK arka plan, BLUE ana renk, TEAL ikincil renk, YELLOW vurgu, WHITE metin, Georgia font; baslik ustte, ana model merkezde, kisa bilgi altta.
+- Son segment disinda ekrani tamamen temizleme veya siyah bos kareyle bitirme. animation.visual_end_state alaninda sonraki sahneye kalacak nesneleri ve kesin konumlarini belirt.
 - JSON disinda hicbir sey yazma.`;
 
   return {
@@ -2394,7 +2418,7 @@ async function createTraditionalLessonPlan(body, userContext) {
     thinkingEnabled: deepseekPipelineThinkingEnabled
   });
 
-  const plan = parseLlmJson(responseText || '', 'Ders plani');
+  const plan = normalizeLessonContinuity(parseLlmJson(responseText || '', 'Ders plani'));
   logInfo('Plan uretimi tamamlandi', {
     topic: plan.topic || topic,
     segments: Array.isArray(plan.segments) ? plan.segments.length : 0
@@ -2468,10 +2492,10 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     ) {
       return segmentPublishPromises[index];
     }
-    const segment = {
+    const segment = normalizeLessonSegmentContinuity({
       ...candidate,
       id: candidate.id || `s${index + 1}`
-    };
+    }, index, streamedSegments[index - 1] || null, segmentCount);
     streamedSegments[index] = segment;
     segmentPublishPromises[index] = (async () => {
       await persist(`lesson/streaming-segment-${index + 1}`, () => (
@@ -2523,7 +2547,9 @@ segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazil
         }
       });
 
-      let plan = parseLlmJson(responseText || '', 'Streaming ders plani');
+      let plan = normalizeLessonContinuity(
+        parseLlmJson(responseText || '', 'Streaming ders plani')
+      );
       if (!plan.segments?.[0]) {
         throw new Error('Streaming ders planinda ilk segment bulunamadi.');
       }
@@ -2836,6 +2862,7 @@ async function queueTraditionalVideoJob({
     error.statusCode = 400;
     throw error;
   }
+  plan = normalizeLessonContinuity(plan);
   await requireOwnedLesson(lessonId, userContext);
 
   const expectedTotal = Math.max(
