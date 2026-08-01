@@ -1731,7 +1731,6 @@ async function renderManimVideo({
           });
         }
       });
-      partialCollector.start();
     }
 
     logInfo(`${safeSegmentId}: Manim render basladi`, { attempt: attempt + 1, className });
@@ -1744,7 +1743,12 @@ async function renderManimVideo({
     }
     manimArgs.push(filePath, className, '--media_dir', mediaDir);
     result = await runCommand('python', manimArgs, { timeoutMs: 180000 });
-    if (partialCollector) {
+    if (partialCollector && result.code === 0) {
+      // Manim and the normalizing ffmpeg process are intentionally not run at
+      // the same time. On constrained Railway instances their combined CPU and
+      // memory usage can terminate an otherwise valid render. Closed partials
+      // are normalized atomically immediately after Manim succeeds.
+      partialCollector.start();
       try {
         await partialCollector.finish();
       } catch (partialError) {
@@ -1755,6 +1759,8 @@ async function renderManimVideo({
           error: partialError.message
         });
       }
+    } else if (partialCollector) {
+      await partialCollector.abort();
     }
 
     if (result.code === 0) {
@@ -1763,7 +1769,11 @@ async function renderManimVideo({
     }
 
     const renderOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
-    logInfo(`${safeSegmentId}: Manim render hata verdi, duzeltme denenecek`, { attempt: attempt + 1 });
+    logInfo(`${safeSegmentId}: Manim render hata verdi, duzeltme denenecek`, {
+      attempt: attempt + 1,
+      code: result.code,
+      outputTail: renderOutput.slice(-3000)
+    });
     const publishedDuringAttempt = progressiveContext?.job?.progressive?.partials?.some((partial) => (
       partial.sequence >= progressiveStartSequence
       && partial.segmentIndex === progressiveContext.segmentIndex
