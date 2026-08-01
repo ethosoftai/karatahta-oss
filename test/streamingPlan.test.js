@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildIncrementalLessonRoute,
   buildEarlySpeechScript,
+  compactPreviousSegmentContext,
   extractArrayObjects,
   extractFirstArrayObject,
   isUsableLessonSegment,
@@ -75,4 +77,30 @@ test('ilk segment narration alanini ikinci LLM istegi olmadan speech scriptine c
   assert.equal(speech.estimated_seconds, 65);
   assert.equal(speech.cue_plan.length, 3);
   assert.deepEqual(speech.cue_plan.map((cue) => cue.at_percent), [17, 50, 83]);
+});
+
+test('LLM beklemeden sabit pedagojik segment rotasi kurar', () => {
+  assert.deepEqual(buildIncrementalLessonRoute(4), [
+    'opening_hook_and_intuition',
+    'concrete_intuition',
+    'worked_example_or_application',
+    'synthesis_and_understanding_check'
+  ]);
+  assert.deepEqual(buildIncrementalLessonRoute(1), ['complete_explanation']);
+});
+
+test('sonraki segment icin onceki anlatim ve gorsel bitis baglamini tasir', () => {
+  const context = compactPreviousSegmentContext([
+    {
+      id: 's1',
+      title: 'Sezgi',
+      learning_objective: 'Anlik hizi anlamak',
+      narration: 'Once ortalama hizi gorduk. Simdi araligi giderek kucultuyoruz.',
+      continuity: { visual_end_state: 'Grafikte iki nokta ve sekant cizgisi.' },
+      animation: { highlight_moment: 'Iki nokta birbirine yaklasir.' }
+    }
+  ]);
+  assert.equal(context[0].id, 's1');
+  assert.match(context[0].narration_tail, /araligi giderek/);
+  assert.match(context[0].visual_end_state, /sekant/);
 });

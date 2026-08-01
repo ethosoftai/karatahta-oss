@@ -118,3 +118,42 @@ export function buildEarlySpeechScript(segment) {
     cue_plan: cuePlan
   };
 }
+
+export function buildIncrementalLessonRoute(segmentCount) {
+  const count = Math.max(1, Math.round(Number(segmentCount || 1)));
+  if (count === 1) return ['complete_explanation'];
+  const middleRoles = [
+    'concrete_intuition',
+    'core_model_or_definition',
+    'method_or_causal_mechanism',
+    'worked_example_or_application',
+    'second_example_or_comparison',
+    'misconception_and_correction',
+    'guided_practice'
+  ];
+  return Array.from({ length: count }, (_, index) => {
+    if (index === 0) return 'opening_hook_and_intuition';
+    if (index === count - 1) return 'synthesis_and_understanding_check';
+    const roleIndex = Math.min(
+      middleRoles.length - 1,
+      Math.floor(((index - 1) / Math.max(1, count - 2)) * middleRoles.length)
+    );
+    return middleRoles[roleIndex];
+  });
+}
+
+export function compactPreviousSegmentContext(segments, limit = 2) {
+  return (Array.isArray(segments) ? segments : [])
+    .filter(Boolean)
+    .slice(-Math.max(1, Number(limit || 2)))
+    .map((segment) => ({
+      id: segment.id,
+      title: segment.title,
+      learning_objective: segment.learning_objective,
+      narration_tail: String(segment.narration || '').trim().slice(-320),
+      visual_end_state: segment.continuity?.visual_end_state
+        || segment.animation?.visual_end_state
+        || '',
+      animation_highlight: segment.animation?.highlight_moment || ''
+    }));
+}

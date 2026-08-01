@@ -83,8 +83,9 @@ import {
   optimizeManimForProgressiveRender
 } from './services/manimProgressiveCode.js';
 import {
+  buildIncrementalLessonRoute,
   buildEarlySpeechScript,
-  extractArrayObjects,
+  compactPreviousSegmentContext,
   isUsableLessonSegment
 } from './services/streamingPlan.js';
 
@@ -2460,14 +2461,106 @@ function createDeferredPromise() {
   return { promise, resolve, reject };
 }
 
+async function createIncrementalLessonSegment({
+  topic,
+  input,
+  index,
+  segmentCount,
+  route,
+  previousSegments,
+  durationBudget,
+  narrationWordTarget,
+  narrationWordMaximum
+}) {
+  const segmentId = `s${index + 1}`;
+  const role = index === 0 ? 'opening' : (index === segmentCount - 1 ? 'closing' : 'continuation');
+  const request = {
+    lesson_topic: topic,
+    student_level: input.student_level,
+    prior_knowledge: input.prior_knowledge,
+    target_video_minutes: input.target_video_minutes,
+    route: route.map((pedagogicalRole, routeIndex) => ({
+      segment_id: `s${routeIndex + 1}`,
+      pedagogical_role: pedagogicalRole
+    })),
+    current_segment: {
+      id: segmentId,
+      position: index + 1,
+      total: segmentCount,
+      pedagogical_role: route[index],
+      continuity_role: role,
+      duration_seconds: durationBudget.averageSeconds,
+      narration_target_words: narrationWordTarget,
+      narration_max_words: narrationWordMaximum
+    },
+    completed_segment_titles: previousSegments.map((segment) => segment.title).filter(Boolean),
+    previous_context: compactPreviousSegmentContext(previousSegments, 2)
+  };
+  const prompt = `Sen Kara Tahta'nin ardışık segment planlayicisisin. Yalniz current_segment icin tek bir segment objesi uret.
+
+Bu segment bagimsiz bir video degil, lesson_topic hakkindaki tek kesintisiz anlatimin teknik render blogudur. route dersin degismeyen pedagojik rotasidir; current_segment yalniz kendisine verilen rolu ilerletsin ve diger rollerin konusunu erken anlatmasin.
+
+ZORUNLU:
+- Sadece gecerli JSON dondur; root nesne doğrudan segment olsun.
+- id tam olarak ${segmentId} olsun.
+- narration dogal Turkce konuşma metni olsun, yaklaşık ${narrationWordTarget} kelimeyi hedeflesin ve ${narrationWordMaximum} kelimeyi gecmesin.
+- İlk segment merak uyandiran sezgisel bir acilis yapsin. Devam segmentleri selamlama, yeniden tanitim, ozet veya bolum anonsu yapmadan previous_context icindeki son dusunceyi ilerletsin.
+- Yalniz son segment kapanis yapsin. Digerleri bir sonraki role acik anlamsal kopruyle bitsin.
+- Onceki segmentlerde anlatilanlari tekrarlama ve lesson_topic disinda yeni konu acma.
+- continuity alanlari: role, narrative_bridge, visual_start_state, visual_end_state, transition, visual_style.
+- Devam segmentinde visual_start_state onceki visual_end_state ile ayni nesneleri, renkleri ve konumlari korusun.
+- visual_style her zaman BLACK arka plan, BLUE ana, TEAL ikincil, YELLOW vurgu, WHITE metin ve Georgia font kullansin.
+- animation alanlari: type, description, objects, sequence, highlight_moment, visual_end_state. Son segment disinda ekrani temizleme.
+- Matematikte uygun rolde adim adim cozumlu ornek; fende uygun rolde somut deney/uygulama kullan.
+
+Beklenen sekil:
+{"id":"${segmentId}","title":"...","duration_seconds":${durationBudget.averageSeconds},"learning_objective":"...","narration":"...","continuity":{"role":"${role}","narrative_bridge":"...","visual_start_state":"...","visual_end_state":"...","transition":"...","visual_style":{}},"animation":{"type":"...","description":"...","objects":[],"sequence":[],"highlight_moment":"...","visual_end_state":"..."},"pause_for_student":false}`;
+
+  const started = Date.now();
+  logInfo('Baglamli segment planlama basladi', {
+    segmentId,
+    index,
+    role: route[index],
+    previousCount: previousSegments.length
+  });
+  const responseText = await generateLlmText({
+    label: `DeepSeek segment plan ${segmentId}`,
+    model: planModel,
+    systemInstruction: prompt,
+    userText: JSON.stringify(request, null, 2),
+    json: true,
+    temperature: 0.55,
+    maxCompletionTokens: 3500,
+    thinkingEnabled: false
+  });
+  const parsed = parseLlmJson(responseText || '', `${segmentId}: baglamli plan`);
+  const candidate = parsed?.segment || parsed?.segments?.[0] || parsed;
+  const segment = { ...candidate, id: segmentId };
+  if (!isUsableLessonSegment(segment) || !String(segment.narration || '').trim()) {
+    throw new Error(`${segmentId}: baglamli planlayici kullanilabilir segment dondurmedi.`);
+  }
+  logInfo('Baglamli segment planlama tamamlandi', {
+    segmentId,
+    ms: Date.now() - started,
+    chars: responseText.length
+  });
+  return { segment, rawResponse: responseText };
+}
+
 async function startStreamingTraditionalLessonPlan(body, userContext) {
   const {
     topic,
     input,
     targetMinutes,
-    segmentCount,
-    fullLessonPlanner
+    segmentCount
   } = await buildTraditionalPlannerRequest(body);
+  const durationBudget = segmentDurationBudget(targetMinutes, segmentCount);
+  const narrationWordTarget = Math.max(20, Math.round(durationBudget.averageSeconds * 1.55));
+  const narrationWordMaximum = Math.max(
+    narrationWordTarget + 5,
+    Math.round(durationBudget.maxSeconds * 1.65)
+  );
+  const route = buildIncrementalLessonRoute(segmentCount);
   const lesson = await persist('lesson/streaming-plan-create', () => createLesson({
     userId: userContext.profileId,
     title: topic,
@@ -2518,49 +2611,35 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     return segmentPublishPromises[index];
   };
 
-  const streamingPlanner = `${fullLessonPlanner}
-
-## STREAMING JSON SIRASI
-Kullanici ilk segment tamamlanir tamamlanmaz uretime baslayacak.
-Bu nedenle root JSON nesnesinin ILK alani "segments" olmak zorunda.
-Yaniti tam olarak {"segments":[{s1...},{s2...},...], ...diger root alanlari...} sirasiyla yaz.
-Once s1 objesini eksiksiz kapat, sonra s2 ve diger segmentlere gec.
-Her segment objesini tamamlanır tamamlanmaz kapat; sonraki segmente ait alanları önceki objeye taşıma. Sistem kapanan her segmenti anında üretim kuyruğuna alacak.
-segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazilacak diye pedagojik kaliteyi veya gerekli alanlari azaltma.`;
-
   const fullPlanPromise = (async () => {
+    const rawResponses = [];
     try {
-      const { text: responseText, model: usedModel } = await generateDeepSeekTextStream({
-        label: 'DeepSeek streaming plan',
-        model: planModel,
-        systemInstruction: streamingPlanner,
-        userText: JSON.stringify(input, null, 2),
-        json: true,
-        temperature: 0.7,
-        timeoutMs: Math.min(120000, Math.max(30000, segmentCount * 3000)),
-        thinkingEnabled: deepseekPipelineThinkingEnabled,
-        onText: async ({ text }) => {
-          const extractedSegments = extractArrayObjects(text, 'segments');
-          for (let index = 0; index < extractedSegments.length; index += 1) {
-            await publishSegment(extractedSegments[index], index);
-          }
-        }
+      for (let index = 0; index < segmentCount; index += 1) {
+        const result = await createIncrementalLessonSegment({
+          topic,
+          input,
+          index,
+          segmentCount,
+          route,
+          previousSegments: streamedSegments.slice(0, index),
+          durationBudget,
+          narrationWordTarget,
+          narrationWordMaximum
+        });
+        rawResponses.push(result.rawResponse);
+        await publishSegment(result.segment, index);
+      }
+      const plan = normalizeLessonContinuity({
+        topic,
+        student_level: input.student_level,
+        estimated_duration_minutes: targetMinutes,
+        planning_mode: 'incremental_contextual',
+        route,
+        segments: streamedSegments.slice()
       });
-
-      let plan = normalizeLessonContinuity(
-        parseLlmJson(responseText || '', 'Streaming ders plani')
-      );
-      if (!plan.segments?.[0]) {
-        throw new Error('Streaming ders planinda ilk segment bulunamadi.');
+      if (lessonId) {
+        plan._lesson_id = lessonId;
       }
-      for (let index = 0; index < plan.segments.length; index += 1) {
-        await publishSegment(plan.segments[index], index);
-      }
-      plan = {
-        ...plan,
-        segments: plan.segments.map((segment, index) => streamedSegments[index] || segment)
-      };
-      if (lessonId) plan._lesson_id = lessonId;
 
       await persist('lesson/streaming-plan-complete', async () => {
         if (!lessonId) return null;
@@ -2568,15 +2647,10 @@ segments dizisi yine tam olarak ${segmentCount} segment icermeli; s1 erken yazil
         await savePlan({
           lessonId,
           provider: llmProvider,
-          model: usedModel,
-          prompt: streamingPlanner,
+          model: planModel,
+          prompt: 'incremental-contextual-segment-planner',
           plan,
-          rawResponse: responseText
-        });
-        await saveSegments({
-          lessonId,
-          segments: (plan.segments || []).slice(1),
-          startIndex: 1
+          rawResponse: JSON.stringify(rawResponses)
         });
         return lesson;
       });
