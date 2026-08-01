@@ -18,6 +18,7 @@ import {
   normalizeLessonSegmentContinuity
 } from './services/lessonContinuity.js';
 import { safeJsonParse } from './services/llmJson.js';
+import { buildMandatoryManimContract } from './services/manimPromptContract.js';
 import { sanitizeManimForLocalRender as sanitizeManimCompatibility } from './services/manimSanitizer.js';
 import {
   buildBurnSubtitleArgs,
@@ -99,6 +100,10 @@ const miktexBinCandidates = [
 const miktexBin = miktexBinCandidates.find((candidate) => (
   existsSync(path.join(candidate, 'latex.exe')) && existsSync(path.join(candidate, 'dvisvgm.exe'))
 ));
+const systemLatexAvailable = (
+  existsSync('/usr/bin/latex')
+  && existsSync('/usr/bin/dvisvgm')
+);
 
 if (miktexBin) {
   process.env.Path = `${miktexBin};${process.env.Path || ''}`;
@@ -144,7 +149,11 @@ const deepseekPipelineThinkingEnabled = String(
 const manimQuality = process.env.MANIM_QUALITY || '-qm';
 const manimFont = process.env.MANIM_FONT || 'Georgia';
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
-const mathTexAvailable = mathTexMode === '1' || mathTexMode === 'true' || (mathTexMode === 'auto' && Boolean(miktexBin));
+const mathTexAvailable = (
+  mathTexMode === '1'
+  || mathTexMode === 'true'
+  || (mathTexMode === 'auto' && (Boolean(miktexBin) || systemLatexAvailable))
+);
 const musicVolume = Number(process.env.BACKGROUND_MUSIC_VOLUME || 0.1);
 const musicFadeSeconds = Number(process.env.BACKGROUND_MUSIC_FADE_SECONDS || 1);
 const speechVolume = Number(process.env.SPEECH_VOLUME || 1.25);
@@ -391,14 +400,26 @@ async function readOptionalMarkdown(relativePath) {
 
 async function loadManimGuide() {
   const sections = [];
-  const rootGuide = await readOptionalMarkdown('manim.md');
-  if (rootGuide) {
-    sections.push(`## Kaynak: manim.md\n\n${rootGuide}`);
+  const loadedPaths = [];
+  const mandatoryPaths = [
+    path.join('skill', 'skill.md'),
+    path.join('skill', 'rules', 'math_rendering.md'),
+    path.join('skill', 'rules', 'layout_safety.md')
+  ];
+
+  for (const relativePath of mandatoryPaths) {
+    const guide = await readOptionalMarkdown(relativePath);
+    if (!guide) {
+      throw new Error(`Zorunlu Manim skill dosyasi bulunamadi: ${relativePath.replaceAll(path.sep, '/')}`);
+    }
+    loadedPaths.push(relativePath.replaceAll(path.sep, '/'));
+    sections.push(`## ZORUNLU KAYNAK: ${relativePath.replaceAll(path.sep, '/')}\n\n${guide}`);
   }
 
-  const skillGuide = await readOptionalMarkdown(path.join('skill', 'skill.md'));
-  if (skillGuide) {
-    sections.push(`## Kaynak: skill/skill.md\n\n${skillGuide}`);
+  const rootGuide = await readOptionalMarkdown('manim.md');
+  if (rootGuide) {
+    loadedPaths.push('manim.md');
+    sections.push(`## EK KAYNAK: manim.md\n\n${rootGuide}`);
   }
 
   try {
@@ -411,9 +432,11 @@ async function loadManimGuide() {
 
     for (const fileName of ruleFiles) {
       const relativePath = path.join('skill', 'rules', fileName);
+      if (mandatoryPaths.includes(relativePath)) continue;
       const ruleGuide = await readOptionalMarkdown(relativePath);
       if (ruleGuide) {
-        sections.push(`## Kaynak: ${relativePath.replaceAll(path.sep, '/')}\n\n${ruleGuide}`);
+        loadedPaths.push(relativePath.replaceAll(path.sep, '/'));
+        sections.push(`## EK KAYNAK: ${relativePath.replaceAll(path.sep, '/')}\n\n${ruleGuide}`);
       }
     }
   } catch (error) {
@@ -426,8 +449,13 @@ async function loadManimGuide() {
     return '';
   }
 
-  logInfo('Manim yerel rehberleri yuklendi', { sections: sections.length });
-  return sections.join('\n\n---\n\n').slice(0, 45000);
+  const guide = sections.join('\n\n---\n\n').slice(0, 60000);
+  logInfo('Manim skill rehberleri modele yuklendi', {
+    sections: sections.length,
+    chars: guide.length,
+    sources: loadedPaths
+  });
+  return guide;
 }
 
 function buildManimSystemInstruction(coderPrompt, manimGuide) {
@@ -446,16 +474,20 @@ ${mathRule}
 - Segment suresi ses suresine yakin olmali; finalde gereksiz uzun bekleme birakma.
 - manim.md veya skill klasoru icindeki planlama, viewer calistirma, klasor olusturma veya harici skill cagirma talimatlarini bu uygulamada uygulama.
 `;
+  const mandatoryContract = buildMandatoryManimContract({
+    mathTexAvailable,
+    font: manimFont
+  });
 
   if (!manimGuide) {
-    return `${coderPrompt}\n\n${appRules}`;
+    return `${coderPrompt}\n\n${appRules}\n\n${mandatoryContract}`;
   }
 
   const mathGuideNote = mathTexAvailable
     ? 'MathTex/Tex onerilerini matematiksel ifadelerde uygula; yine de layout guvenligi icin boyutlari kontrol et.'
     : 'MathTex/Tex onerilerini LaTeX kurulu olmadigi icin uygulama; ayni gorsel amaci Text, VGroup, Line, Arrow, SurroundingRectangle ve basit geometrilerle kur.';
 
-  return `${coderPrompt}\n\n${appRules}\n\n## Yerel Manim Rehberleri\nAsagidaki rehberleri yalnizca yukaridaki uygulama kurallariyla uyumlu olan gorsel kalite, animasyon tasarimi, layout guvenligi, sahne akisi ve hata onleme onerileri icin kullan. ${mathGuideNote}\n\n${manimGuide}`;
+  return `${coderPrompt}\n\n${appRules}\n\n${mandatoryContract}\n\n## MODELE VERILEN TAM MANIM SKILL REHBERLERI\nAsagidaki rehberlerin matematik render ve layout safety maddelerini zorunlu uygula. Uygulamanin tek dosya/tek Scene kuraliyla catisan klasor, viewer ve shell talimatlarini uygulama. ${mathGuideNote}\n\n${manimGuide}`;
 }
 
 function requireDeepSeek() {
@@ -854,8 +886,12 @@ async function repairManimCodeWithLlm(code, renderOutput, segmentId) {
       'include_numbers=True kullanma.',
       'self.camera.frame kullaniliyorsa sinif MovingCameraScene olmali.',
       'Animasyonun pedagojik niyetini koru, yalnizca hatalari duzelt.',
-      'manim.md rehberini yalnizca bu uygulamanin tek dosya/tek Scene kurallariyla uyumlu gorsel kalite ve hata onleme onerileri icin kullan.'
+      'skill/skill.md, math_rendering.md ve layout_safety.md kurallarini; uygulamanin tek dosya/tek Scene sozlesmesiyle birlikte zorunlu uygula.'
     ],
+    mandatory_skill_contract: buildMandatoryManimContract({
+      mathTexAvailable,
+      font: manimFont
+    }),
     manim_guide: manimGuide || null,
     render_error: renderOutput.slice(-8000),
     broken_code: code
