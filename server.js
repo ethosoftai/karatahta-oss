@@ -74,6 +74,10 @@ import {
   speechDurationBudget
 } from './services/segmentPipeline.js';
 import {
+  buildProgressiveRecoveryScene,
+  optimizeManimForProgressiveRender
+} from './services/manimProgressiveCode.js';
+import {
   buildEarlySpeechScript,
   extractArrayObjects,
   isUsableLessonSegment
@@ -1362,6 +1366,9 @@ async function renderManimVideo({
 }) {
   logInfo(`${segmentId}: Manim render hazirlaniyor`, { quality: manimQuality });
   let currentCode = sanitizeManimForLocalRender(stripCodeFence(String(code || '')));
+  if (progressiveContext?.job?.progressive?.enabled) {
+    currentCode = optimizeManimForProgressiveRender(currentCode);
+  }
   if (!currentCode) {
     const error = new Error('Calistirilacak Manim kodu bos.');
     error.statusCode = 400;
@@ -1387,13 +1394,15 @@ async function renderManimVideo({
 
     let partialCollector = null;
     if (
-      attempt === 0
-      && progressiveContext?.job?.progressive?.enabled
+      progressiveContext?.job?.progressive?.enabled
+      && progressiveContext.job.progressive.status !== 'failed'
       && audioRelativePath
     ) {
       const progressiveDir = path.join(workDir, 'progressive');
       const audioPath = resolveRenderRelative(audioRelativePath);
-      let localAudioCursor = 0;
+      let localAudioCursor = (progressiveContext.job.progressive.partials || [])
+        .filter((partial) => partial.segmentIndex === progressiveContext.segmentIndex)
+        .reduce((sum, partial) => sum + Number(partial.durationSeconds || 0), 0);
       await fs.mkdir(progressiveDir, { recursive: true });
       partialCollector = new ManimPartialCollector({
         mediaDir,
@@ -1495,6 +1504,36 @@ async function renderManimVideo({
     logInfo(`${safeSegmentId}: Manim render hata verdi, duzeltme denenecek`, { attempt: attempt + 1 });
     if (attempt >= 2) {
       break;
+    }
+
+    if (
+      attempt === 0
+      && progressiveContext?.job?.progressive?.enabled
+      && audioRelativePath
+    ) {
+      const publishedSeconds = (progressiveContext.job.progressive.partials || [])
+        .filter((partial) => partial.segmentIndex === progressiveContext.segmentIndex)
+        .reduce((sum, partial) => sum + Number(partial.durationSeconds || 0), 0);
+      const audioDurationSeconds = await getMediaDurationSeconds(
+        resolveRenderRelative(audioRelativePath)
+      ).catch(() => publishedSeconds + 6);
+      const remainingSeconds = Math.max(2, audioDurationSeconds - publishedSeconds);
+      currentCode = buildProgressiveRecoveryScene({
+        segmentId: safeSegmentId,
+        speechText,
+        durationSeconds: remainingSeconds,
+        font: manimFont
+      });
+      progressiveContext.job.progressive.status = progressiveContext.job.progressive.playbackReadyAt
+        ? 'ready'
+        : 'buffering';
+      progressiveContext.job.progressive.error = null;
+      repairLogs.push(`Manim render attempt ${attempt + 1} failed. Progressive recovery scene started.`);
+      logInfo(`${safeSegmentId}: progressive kurtarma sahnesi baslatildi`, {
+        publishedSeconds: Number(publishedSeconds).toFixed(1),
+        remainingSeconds: Number(remainingSeconds).toFixed(1)
+      });
+      continue;
     }
 
     if (progressiveContext?.job?.progressive?.readyCount) {
