@@ -46,9 +46,11 @@ test('Manim uretimine onceki sahnenin bitis durumunu aktarir', () => {
     plan,
     segment: plan.segments[1],
     index: 1,
-    total: 2
+    total: 2,
+    previousManimCode: 'class Seg_s1(Scene):\n    pass'
   });
   assert.equal(context.lesson_topic, 'Kuvvet');
   assert.equal(context.previous_segment.visual_end_state, 'Kutu sagda.');
   assert.equal(context.current_segment.continuity.forbid_intro_reset, true);
+  assert.match(context.previous_manim_code, /Seg_s1/);
 });

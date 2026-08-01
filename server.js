@@ -1372,7 +1372,10 @@ async function synthesizeSpeech(text, segmentId) {
 }
 
 async function createManimCode({ animation, durationSeconds, speech, segmentId, continuityContext = null }) {
-  logInfo(`${segmentId}: Manim kodu LLM ile uretiliyor`, { seconds: durationSeconds });
+  logInfo(`${segmentId}: Manim kodu LLM ile uretiliyor`, {
+    seconds: durationSeconds,
+    previousCodeChars: String(continuityContext?.previous_manim_code || '').length
+  });
   const { coder } = await loadPrompts();
   const manimGuide = await loadManimGuide();
   const input = {
@@ -1393,7 +1396,7 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId, 
     label: 'DeepSeek',
     model: codeModel,
     systemInstruction: buildManimSystemInstruction(coder, manimGuide),
-    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun teknik render parcasidir; bagimsiz bir mini video veya yeni bolum degildir. continuity alanindaki onceki sahne durumunu ilk self.play() cagrisindan ONCE, animasyonsuz olarak yeniden kur. Boylece ilk kare onceki segmentin son karesiyle ayni kompozisyonu tasir. Segment basligi, giris karti, logo veya yeniden tanitim gosterme. Onceki nesneleri uygun Transform/ReplacementTransform ile gelistir; ekrani sifirlayip baska bir kompozisyona atlama. continuity.forbid_full_clear true ise tum nesneleri FadeOut ile temizleme ve siyah bos kareyle bitirme. Yalniz continuity.role closing ise dogal bir final kapanisi yapabilirsin. Tum segmentlerde continuity.visual_style renklerini, fontunu ve yerlesimini aynen koru.\n\nSegment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nPROGRESSIVE RENDER KURALLARI: Ilk self.play() 2-3 saniyeyi gecmesin. Sonraki gorsel akis anlamli 2-5 saniyelik self.play()/self.wait() bloklarindan olussun. Tek bir run_time=10/15 gibi dev animasyon kullanma. Ilk blokta binlerce obje, agir 3D veya gereksiz always_redraw kullanma; sonraki bloklarda gorsel zenginligi ve pedagojik kaliteyi koru. Kod satir satir calistirilmayacak; partial sinirlari yalnizca normal self.play()/self.wait() cagrilaridir.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
+    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun teknik render parcasidir; bagimsiz bir mini video veya yeni bolum degildir. continuity alanindaki onceki sahne durumunu ilk self.play() cagrisindan ONCE, animasyonsuz olarak yeniden kur. Boylece ilk kare onceki segmentin son karesiyle ayni kompozisyonu tasir. Segment basligi, giris karti, logo veya yeniden tanitim gosterme. Onceki nesneleri uygun Transform/ReplacementTransform ile gelistir; ekrani sifirlayip baska bir kompozisyona atlama. continuity.forbid_full_clear true ise tum nesneleri FadeOut ile temizleme ve siyah bos kareyle bitirme. Yalniz continuity.role closing ise dogal bir final kapanisi yapabilirsin. Tum segmentlerde continuity.visual_style renklerini, fontunu ve yerlesimini aynen koru.\n\ncontinuity.previous_manim_code bos degilse bu kod onceki segmentin GERCEK Manim kaynak kodudur. Onun son gorunen sahnesindeki mobject constructorlarini, degisken adlarini, renkleri, scale degerlerini ve koordinatlari incele. Yeni construct basinda bu son durumu ayni kodla yeniden kur ve self.add(...) ile animasyonsuz yerlestir. Ilk self.play, bu tasinan nesneleri yeni fikre Transform/ReplacementTransform ile donustursun. Onceki animasyonlari tekrar oynatma, yeni bir baslik karti olusturma ve farkli koordinatlarla benzerini tahmin etme.\n\nSegment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nPROGRESSIVE RENDER KURALLARI: Ilk self.play() 2-3 saniyeyi gecmesin. Sonraki gorsel akis anlamli 2-5 saniyelik self.play()/self.wait() bloklarindan olussun. Tek bir run_time=10/15 gibi dev animasyon kullanma. Ilk blokta binlerce obje, agir 3D veya gereksiz always_redraw kullanma; sonraki bloklarda gorsel zenginligi ve pedagojik kaliteyi koru. Kod satir satir calistirilmayacak; partial sinirlari yalnizca normal self.play()/self.wait() cagrilaridir.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
     temperature: 0.35,
     maxCompletionTokens: 6000,
     thinkingEnabled: deepseekPipelineThinkingEnabled
@@ -1831,6 +1834,8 @@ async function runFullVideoJob(job) {
       }
       return segment;
     };
+    const codeDeferreds = Array.from({ length: job.total }, () => createDeferredPromise());
+    codeDeferreds.forEach((deferred) => void deferred.promise.catch(() => {}));
     const prepareSegment = (segment, index) => (async () => {
       const segmentState = job.segments[index];
       const dbSegment = await persist(`${segment.id}/segment lookup`, () => getSegment({
@@ -1880,26 +1885,35 @@ async function runFullVideoJob(job) {
             return value;
           });
         const codePromise = (async () => {
-          const queuedCode = limitCode(() => createManimCode({
-            animation: segment.animation,
-            durationSeconds: estimatedDuration,
-            speech: {
-              speech_text: speech.speech_text,
-              duration_seconds: estimatedDuration,
-              cue_plan: speech.cue_plan || []
-            },
-            segmentId: segment.id,
-            continuityContext: buildSegmentGenerationContext({
-              plan: job.plan,
-              segment,
-              index,
-              total: job.total
-            })
-          }));
-          return queuedCode.then((value) => {
+          try {
+            const previousManimCode = index > 0
+              ? await codeDeferreds[index - 1].promise
+              : '';
+            const queuedCode = limitCode(() => createManimCode({
+              animation: segment.animation,
+              durationSeconds: estimatedDuration,
+              speech: {
+                speech_text: speech.speech_text,
+                duration_seconds: estimatedDuration,
+                cue_plan: speech.cue_plan || []
+              },
+              segmentId: segment.id,
+              continuityContext: buildSegmentGenerationContext({
+                plan: job.plan,
+                segment,
+                index,
+                total: job.total,
+                previousManimCode
+              })
+            }));
+            const value = await queuedCode;
+            codeDeferreds[index].resolve(value);
             if (index === 0) job.timings.firstCodeReadyAt ||= new Date().toISOString();
             return value;
-          });
+          } catch (error) {
+            codeDeferreds[index].reject(error);
+            throw error;
+          }
         })();
         if (index === 0) {
           logInfo(`Job ${job.id}: ilk segment TTS ve Manim kodu kuyruğa girdi`);
@@ -1954,6 +1968,7 @@ async function runFullVideoJob(job) {
         }
         return { ok: true, segment, dbSegment, speech, manimCode, code, tts, uploadedAudio };
       } catch (error) {
+        codeDeferreds[index].reject(error);
         logInfo(`${segment.id}: segment hazirlanamadi`, { error: error.message });
         segmentState.status = 'failed';
         segmentState.error = error.message || 'Segment hazirlanamadi.';

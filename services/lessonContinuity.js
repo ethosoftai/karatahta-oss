@@ -72,7 +72,13 @@ export function normalizeLessonContinuity(plan) {
   return { ...plan, segments };
 }
 
-export function buildSegmentGenerationContext({ plan, segment, index, total }) {
+export function buildSegmentGenerationContext({
+  plan,
+  segment,
+  index,
+  total,
+  previousManimCode = ''
+}) {
   const previous = index > 0 ? plan?.segments?.[index - 1] : null;
   return {
     lesson_topic: clean(plan?.topic),
@@ -85,8 +91,11 @@ export function buildSegmentGenerationContext({ plan, segment, index, total }) {
           learning_objective: previous.learning_objective,
           narration_tail: narrationTail(previous.narration),
           visual_end_state: previous.continuity?.visual_end_state || ''
-        }
+      }
       : null,
+    previous_manim_code: index > 0
+      ? String(previousManimCode || '').slice(-24000)
+      : '',
     current_segment: {
       id: segment?.id,
       title: segment?.title,
