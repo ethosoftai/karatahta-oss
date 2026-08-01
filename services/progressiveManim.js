@@ -161,17 +161,24 @@ export class ManimPartialCollector {
   constructor({
     mediaDir,
     validate,
+    measureDuration,
+    batchTargetSeconds = 0,
     normalize,
     onPartial,
     pollIntervalMs = 150
   }) {
     this.mediaDir = mediaDir;
     this.validate = validate;
+    this.measureDuration = measureDuration;
+    this.batchTargetSeconds = Math.max(0, Number(batchTargetSeconds || 0));
     this.normalize = normalize;
     this.onPartial = onPartial;
     this.pollIntervalMs = pollIntervalMs;
     this.seen = new Set();
     this.queuedCount = 0;
+    this.emittedCount = 0;
+    this.pendingBatch = [];
+    this.pendingBatchDuration = 0;
     this.running = false;
     this.processing = Promise.resolve();
     this.timer = null;
@@ -193,15 +200,32 @@ export class ManimPartialCollector {
     for (const file of files) {
       if (this.seen.has(file.path)) continue;
       this.seen.add(file.path);
-      const sequence = this.queuedCount++;
+      this.queuedCount += 1;
       this.processing = this.processing.then(async () => {
         await waitForClosedMp4(file.path, { validate: this.validate });
-        const partial = await this.normalize(file.path, sequence);
+        if (this.batchTargetSeconds > 0 && this.measureDuration) {
+          const durationSeconds = Number(await this.measureDuration(file.path));
+          this.pendingBatch.push(file.path);
+          this.pendingBatchDuration += Number.isFinite(durationSeconds) ? durationSeconds : 0;
+          if (this.pendingBatchDuration >= this.batchTargetSeconds) {
+            await this.flushPendingBatch();
+          }
+          return;
+        }
+        const partial = await this.normalize(file.path, this.emittedCount++);
         await this.onPartial(partial);
       }).catch((error) => {
         this.error = error;
       });
     }
+  }
+
+  async flushPendingBatch() {
+    if (!this.pendingBatch.length) return;
+    const paths = this.pendingBatch.splice(0);
+    this.pendingBatchDuration = 0;
+    const partial = await this.normalize(paths, this.emittedCount++);
+    await this.onPartial(partial);
   }
 
   async finish() {
@@ -211,6 +235,13 @@ export class ManimPartialCollector {
     this.timer = null;
     this.running = false;
     await this.processing;
+    if (!this.error) {
+      try {
+        await this.flushPendingBatch();
+      } catch (error) {
+        this.error = error;
+      }
+    }
     if (this.error) throw this.error;
   }
 

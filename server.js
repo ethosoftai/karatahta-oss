@@ -190,6 +190,7 @@ const streamingPlanFirstSegmentEnabled = String(
 ).toLowerCase() === 'true';
 const progressiveManimEnabled = String(process.env.PROGRESSIVE_MANIM_PARTIALS || 'false').toLowerCase() === 'true';
 const progressiveBufferSeconds = Math.max(2, Number(process.env.PROGRESSIVE_BUFFER_SECONDS || 18));
+const progressiveChunkSeconds = Math.max(3, Number(process.env.PROGRESSIVE_CHUNK_SECONDS || 6));
 const progressiveArtifactTtlMs = Math.max(
   10 * 60 * 1000,
   Number(process.env.PROGRESSIVE_ARTIFACT_TTL_MS || 30 * 60 * 1000)
@@ -1415,9 +1416,33 @@ async function renderManimVideo({
             && Math.abs(probe.fps - 30) < 0.1
           );
         },
-        normalize: async (partialPath, segmentSequence) => {
-          const probe = await probeVideo(partialPath);
+        measureDuration: async (partialPath) => (await probeVideo(partialPath)).durationSeconds,
+        batchTargetSeconds: progressiveChunkSeconds,
+        normalize: async (partialPaths, segmentSequence) => {
           const sequence = progressiveContext.job.progressive.partials.length;
+          const sourcePaths = Array.isArray(partialPaths) ? partialPaths : [partialPaths];
+          let partialPath = sourcePaths[0];
+          if (sourcePaths.length > 1) {
+            const listPath = path.join(progressiveDir, `source-batch-${String(sequence).padStart(5, '0')}.txt`);
+            const groupedPath = path.join(progressiveDir, `source-batch-${String(sequence).padStart(5, '0')}.mp4`);
+            const listContent = sourcePaths
+              .map((sourcePath) => `file '${sourcePath.replaceAll("'", "'\\''")}'`)
+              .join('\n');
+            await fs.writeFile(listPath, listContent, 'utf8');
+            const concatResult = await runCommand(
+              'ffmpeg',
+              buildConcatArgs({ listPath, outputPath: groupedPath }),
+              { timeoutMs: 60000 }
+            );
+            if (concatResult.code !== 0) {
+              const error = new Error('Manim mikro parcalari kesintisiz blokta birlestirilemedi.');
+              error.stdout = concatResult.stdout;
+              error.stderr = concatResult.stderr;
+              throw error;
+            }
+            partialPath = groupedPath;
+          }
+          const probe = await probeVideo(partialPath);
           const outputPath = path.join(progressiveDir, `partial-${String(sequence).padStart(5, '0')}.mp4`);
           await normalizeProgressivePartial({
             sourcePath: partialPath,
@@ -2092,6 +2117,7 @@ app.get('/api/config', async (_req, res, next) => {
       streamingPlanFirstSegmentEnabled,
       progressiveManimEnabled,
       progressiveBufferSeconds,
+      progressiveChunkSeconds,
       progressiveVideo: {
         width: 1280,
         height: 720,

@@ -7,6 +7,7 @@ import {
   appendPartialMetadata,
   createJobEventChannel,
   createProgressiveState,
+  ManimPartialCollector,
   waitForClosedMp4
 } from '../services/progressiveManim.js';
 
@@ -75,3 +76,36 @@ test('yarim veya ffprobe tarafindan reddedilen MP4 yayinlanmaz', async () => {
   await fs.rm(tempDir, { recursive: true, force: true });
 });
 
+test('mikro Manim parcalari hedef sureli yayin bloklarinda gruplanir', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kara-partial-batch-'));
+  const partialDir = path.join(tempDir, 'videos', 'partial_movie_files', 'Scene');
+  await fs.mkdir(partialDir, { recursive: true });
+  const durations = new Map([
+    ['a.mp4', 3],
+    ['b.mp4', 3.2],
+    ['c.mp4', 1.5]
+  ]);
+  for (const name of durations.keys()) {
+    await fs.writeFile(path.join(partialDir, name), name);
+  }
+  const published = [];
+  const collector = new ManimPartialCollector({
+    mediaDir: tempDir,
+    validate: async () => true,
+    measureDuration: async (filePath) => durations.get(path.basename(filePath)),
+    batchTargetSeconds: 6,
+    normalize: async (filePaths, sequence) => ({
+      sequence,
+      files: filePaths.map((filePath) => path.basename(filePath))
+    }),
+    onPartial: async (partial) => published.push(partial),
+    pollIntervalMs: 10
+  });
+  collector.start();
+  await collector.finish();
+  assert.deepEqual(published, [
+    { sequence: 0, files: ['a.mp4', 'b.mp4'] },
+    { sequence: 1, files: ['c.mp4'] }
+  ]);
+  await fs.rm(tempDir, { recursive: true, force: true });
+});
