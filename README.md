@@ -395,6 +395,15 @@ Local veya production smoke test:
 curl https://api.example.com/api/config
 ```
 
+Birkac ders uretiminden sonra tekrarlayan Manim hatalarini taramak icin
+(yeni bir sanitizer/prompt kurali eklemeye deger mi diye) loglarda
+`MANIM_HATA` ile grep'le -- her render hatasinda tek satirlik, boyali Rich
+traceback'siz bir ozet basar (`ExceptionType: mesaj (Seg_sX.py:satir)`):
+
+```bash
+railway logs --lines 500 | grep MANIM_HATA
+```
+
 CORS preflight:
 
 ```bash

@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { extractFrameAtTime } from './services/frameExtractor.js';
+import { extractManimErrorSummary } from './services/manimErrorSummary.js';
 import { createDriveFolder, refreshGoogleAccessToken, uploadFileToDrive } from './services/googleDrive.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
 import { buildKaraLiveSystemInstruction, createKaraLiveSession, DEFAULT_KARA_LIVE_MODEL } from './services/karaLiveSession.js';
@@ -2066,6 +2067,13 @@ async function renderManimVideo({
     }
 
     const renderOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
+    const errorSummary = extractManimErrorSummary(renderOutput);
+    // Single-line, greppable summary for scanning many generations' worth of
+    // logs for a recurring pattern (MANIM_HATA prefix makes it easy to grep).
+    // The detailed outputTail below stays for one-off deep-dive debugging.
+    logInfo(`MANIM_HATA ${safeSegmentId}: ${errorSummary?.oneLine || 'ozetlenemeyen hata'}`, {
+      attempt: attempt + 1
+    });
     logInfo(`${safeSegmentId}: Manim render hata verdi, duzeltme denenecek`, {
       attempt: attempt + 1,
       code: result.code,

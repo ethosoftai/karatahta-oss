@@ -23,8 +23,8 @@ test('segment duration follows requested total lesson length', () => {
 test('speech duration stays close to its segment budget', () => {
   assert.deepEqual(speechDurationBudget(30), {
     targetSeconds: 30,
-    minSeconds: 26,
-    maxSeconds: 35
+    minSeconds: 24,
+    maxSeconds: 36
   });
 });
 

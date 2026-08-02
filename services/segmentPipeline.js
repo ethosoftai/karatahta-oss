@@ -14,8 +14,12 @@ export function segmentDurationBudget(targetMinutes, segmentCount) {
 
 export function speechDurationBudget(segmentDurationSeconds) {
   const targetSeconds = Math.max(12, Math.round(positiveNumber(segmentDurationSeconds, 30)));
-  const minSeconds = Math.max(10, Math.round(targetSeconds * 0.85));
-  const maxSeconds = Math.max(minSeconds + 2, Math.round(targetSeconds * 1.15));
+  // +-20% (was +-15%): the tighter window was triggering a full narration
+  // rewrite (an extra DeepSeek round trip, ~3-5s) on most segments for only
+  // a marginal pacing improvement. Widening trades a little audio/video
+  // sync precision for fewer retries.
+  const minSeconds = Math.max(10, Math.round(targetSeconds * 0.8));
+  const maxSeconds = Math.max(minSeconds + 2, Math.round(targetSeconds * 1.2));
   return { targetSeconds, minSeconds, maxSeconds };
 }
 
