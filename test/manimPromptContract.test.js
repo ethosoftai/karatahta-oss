@@ -13,6 +13,7 @@ test('LaTeX ortaminda MathTex ve layout skill kurallarini zorunlu tutar', () => 
   assert.match(contract, /en fazla 42 karakter ve 6 kelime/);
   assert.match(contract, /include_numbers=False/);
   assert.match(contract, /kullanilan her degisken ve helper daha once tanimli/);
+  assert.match(contract, /FadeOut\/self\.remove\(\)/);
 });
 
 test('LaTeX kapaliysa calisabilir geometrik fallback ister', () => {

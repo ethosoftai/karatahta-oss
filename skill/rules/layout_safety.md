@@ -206,6 +206,43 @@ class SafeZoomScene(MovingCameraScene):
 
 ---
 
+## Isi Biten Mobject'i Ekranda Bırakma
+
+Bir mobject görevini tamamladıktan sonra sahnede kalırsa, sonraki adımda eklenen
+yeni ve ilgisiz içerikle **çakışır** — bu, aynı anda iki büyük mobject'in
+üst üste binmesinden farklı bir hata: burada sorun *zamanlama*, konumlandırma
+değil. `forbid_full_clear` aktifken bile bunun anlamı sahneyi asla temizleme
+değildir; yalnızca continuity anchor'ını (bir sonraki segmentin devam edeceği
+görsel durumu) tam ekran `clear()` ile silme demektir. İşi biten tekil
+mobject'leri `FadeOut` veya `self.remove()` ile kaldırmak serbesttir ve
+zorunludur.
+
+```python
+# ✗ YANLIŞ — adim1 hâlâ ekrandayken adim2 ekleniyor, ikisi çakışıyor
+self.play(Write(adim1))
+self.wait(1)
+self.play(Write(adim2))   # adim1 kaldırılmadı, ikisi üst üste biner
+
+# ✓ DOĞRU — işi biten mobject kaldırılır, sonra yenisi eklenir
+self.play(Write(adim1))
+self.wait(1)
+self.play(FadeOut(adim1))
+self.play(Write(adim2))
+
+# ✓ DOĞRU — devam eden continuity anchor'ı koru, yalnız yardımcı mobject'i temizle
+self.play(Write(explanation_label))
+self.wait(1)
+self.play(FadeOut(explanation_label))   # anchor_graph ekranda kalmaya devam eder
+self.play(Create(next_step_arrow))
+```
+
+**Kural:** Bir mobject bir daha referans alınmayacaksa veya sahnenin geri
+kalanında görsel olarak anlamsızsa, tanıtıldığı adımdan hemen sonra
+`FadeOut`/`self.remove()` ile kaldır. Yalnızca `continuity.visual_start_state`
+içindeki anchor mobject sahnenin sonuna kadar ekranda kalabilir.
+
+---
+
 ## Sık Yapılan Hatalar ve Düzeltmeleri
 
 | Hata | Sebep | Düzeltme |
@@ -216,6 +253,7 @@ class SafeZoomScene(MovingCameraScene):
 | Adım adım formüller ekranın altına iniyor | Önceden yükseklik hesaplanmıyor | Tüm grubu oluştur, sığıp sığmadığını kontrol et, sonra animasyonu başlat |
 | `to_corner()` sonrası üst üste | Köşedeki mobject yeni eklenenle çakışıyor | Köşedeki mobject'i `FadeOut` yap veya konumları manuel kontrol et |
 | Yazı çok büyük | `Text(font_size=72)` varsayılan | Başlık için max 48, gövde için max 34 kullan |
+| Eski adım yeni adımla çakışıyor | İşi biten mobject `FadeOut`/`remove()` ile kaldırılmadan yenisi eklendi | Her mobject'i görevi bitince kaldır; yalnızca continuity anchor'ı sahnede tut |
 
 ---
 

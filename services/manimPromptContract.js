@@ -19,5 +19,6 @@ Asagida tam metni verilen skill/skill.md, math_rendering.md ve layout_safety.md 
 12. Axes ve NumberLine icin include_numbers=False kullan; gerekiyorsa az sayida etiketi MathTex ile elle ekle. DecimalNumber tabanli otomatik etiketleme kullanma.
 13. Scene icinde self.camera.frame kullanma; kamera frame animasyonu gerekiyorsa sinifi MovingCameraScene yap. expo_out yerine rate_functions.ease_out_expo kullan.
 14. Ciktidan once isimleri zihinsel olarak kontrol et: kullanilan her degisken ve helper daha once tanimli, her Transform hedefi bir Mobject, her indeks mevcut ve kodda tek Scene sinifi var.
+15. Isi biten her mobject, yeni ve iliskisiz icerik eklenmeden once FadeOut/self.remove() ile ekrandan kaldirilir; hicbir mobject amacindan sonra sahnede gereksiz yere kalip sonraki adimla cakismaz. Bu, forbid_full_clear ile celismez: tek tek kaldirma serbesttir, yalniz continuity.visual_start_state'i tasiyan ana anchor tam ekran clear ile silinmez.
 Bu maddelerden biri saglanmiyorsa kodu cikti vermeden once duzelt.`;
 }
