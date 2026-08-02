@@ -64,6 +64,9 @@ ZORUNLU CEVAP KURALLARI:
 - Gereksiz uzun cevap verme; ogrencinin takildigi yeri ac.
 - Onceki konusmalar varsa baglami koru, ama eski cevabi aynen tekrar etme.
 - Baglam yeterli degilse bunu nazikce soyle ve yine de eldeki bilgiyle yardim et.
+- Guncel, degisebilir veya dis dunyaya ait bilgi gerekiyorsa web_search aracini kullan; kaynaklara dayanmadan guncel bilgi uydurma.
+- Ogrenci bir kavrami cizmeni, gorsellestirmeni, sekil/diyagram/formul sahnesiyle gostermeni isterse generate_manim aracini kullan.
+- generate_manim sonucunu almadan gorselin olustugunu iddia etme. Sonuc geldikten sonra uretilen gorselde ne oldugunu ve ana fikri nasil anlattigini acikla.
 
 Ders basligi: ${lessonTitle || 'Bilinmiyor'}
 Timestamp: ${timestampLabel} (${Number(timestampSeconds || 0).toFixed(1)} saniye)

@@ -12,6 +12,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
+import { assertSafeKaraManimCode } from './services/karaManimSafety.js';
+import { runKaraTools } from './services/karaTools.js';
+import { searchWeb } from './services/webSearch.js';
 import {
   buildKaraPrompt,
   generateKaraVisionAnswerWithFallback,
@@ -790,7 +793,9 @@ async function answerKaraQuestion({
   timestampLabel = '0:00',
   lessonTitle = '',
   lessonPlan = null,
-  chatHistory = []
+  chatHistory = [],
+  userId = null,
+  lessonId = null
 }) {
   const normalizedFrame = normalizeKaraFrame(frame);
   const safeHistory = compactChatHistory(chatHistory);
@@ -815,11 +820,54 @@ async function answerKaraQuestion({
 
   const started = Date.now();
   if (karaVisionEnabled) {
+    const prompt = buildKaraPrompt({ ...promptContext, frameAvailable: true });
+    try {
+      const toolResult = await runKaraTools({
+        apiKey: geminiApiKey,
+        models: karaVisionModels,
+        prompt,
+        frame: normalizedFrame,
+        timeoutMs: karaVisionTimeoutMs,
+        executeWebSearch: (query) => searchWeb(query),
+        executeGenerateManim: (toolArgs) => executeKaraGenerateManim({
+          toolArgs,
+          userId,
+          lessonId,
+          question,
+          lessonTitle
+        })
+      });
+      logInfo('Kara tool yaniti geldi', {
+        ms: Date.now() - started,
+        provider: 'gemini',
+        model: toolResult.model,
+        attemptedModels: toolResult.attemptedModels,
+        toolsUsed: toolResult.toolsUsed,
+        artifacts: toolResult.artifacts.length,
+        sources: toolResult.sources.length
+      });
+      return {
+        answer: toolResult.answer,
+        provider: 'gemini',
+        model: toolResult.model,
+        visionUsed: true,
+        visionAttempts: toolResult.attemptedModels.length,
+        toolsUsed: toolResult.toolsUsed,
+        artifacts: toolResult.artifacts,
+        sources: toolResult.sources
+      };
+    } catch (error) {
+      logInfo('Kara tool modelleri basarisiz; standart vision fallback basliyor', {
+        models: karaVisionModels,
+        attemptedModels: error.karaToolAttempts || [],
+        error: error.message
+      });
+    }
     try {
       const visionResult = await generateKaraVisionAnswerWithFallback({
         apiKey: geminiApiKey,
         models: karaVisionModels,
-        prompt: buildKaraPrompt({ ...promptContext, frameAvailable: true }),
+        prompt,
         frame: normalizedFrame,
         timeoutMs: karaVisionTimeoutMs
       });
@@ -837,7 +885,10 @@ async function answerKaraQuestion({
         provider: 'gemini',
         model: visionResult.model,
         visionUsed: true,
-        visionAttempts: visionResult.attemptedModels.length
+        visionAttempts: visionResult.attemptedModels.length,
+        toolsUsed: [],
+        artifacts: [],
+        sources: []
       };
     } catch (error) {
       logInfo('Kara gorsel modeli basarisiz; metin baglamina geciliyor', {
@@ -862,7 +913,15 @@ async function answerKaraQuestion({
     chars: answer.length
   });
 
-  return { answer, provider: llmProvider, model: planModel, visionUsed: false };
+  return {
+    answer,
+    provider: llmProvider,
+    model: planModel,
+    visionUsed: false,
+    toolsUsed: [],
+    artifacts: [],
+    sources: []
+  };
 }
 
 function toPlainTextFromTex(value) {
@@ -1618,6 +1677,140 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId, 
   getSceneClassName(code);
   logInfo(`${segmentId}: Manim kodu hazir`, { chars: code.length });
   return code;
+}
+
+async function createKaraManimStillCode({ toolArgs, question, lessonTitle }) {
+  const manimGuide = await loadManimGuide();
+  const prompt = {
+    task: 'Kara egitim asistani icin tek karelik, 16:9 Manim ogretim gorseli olustur.',
+    lesson_title: String(lessonTitle || '').slice(0, 240),
+    student_question: String(question || '').slice(0, 1200),
+    requested_visual: {
+      title: String(toolArgs?.title || '').slice(0, 160),
+      visual_description: String(toolArgs?.visual_description || '').slice(0, 2400),
+      teaching_point: String(toolArgs?.teaching_point || '').slice(0, 800)
+    },
+    hard_rules: [
+      'Sadece calisabilir Python kodu dondur; markdown veya aciklama yazma.',
+      'Kod from manim import * ile baslasin ve tek Scene sinifi icersin.',
+      'Bu bir video degil, son karesi PNG olarak alinacak tek bir ogretim gorselidir.',
+      'Tum nesneleri construct icinde olustur ve self.add ile sahneye ekle.',
+      'self.play, self.wait, updater, always_redraw, ValueTracker ve kamera hareketi kullanma.',
+      'Uzun paragraf kullanma; kisa etiket, denklem, ok, sekil, grafik ve renk kodlamasi kullan.',
+      'Tum gorsel 16:9 guvenli alanda kalsin; tasma ve ust uste binme olmasin.',
+      'Dosya, ag, shell, ortam degiskeni veya sistem erisimi kullanma.',
+      'manim disinda import kullanma.'
+    ],
+    mandatory_skill_contract: buildMandatoryManimContract({
+      mathTexAvailable,
+      font: manimFont
+    })
+  };
+  const responseText = await generateLlmText({
+    label: 'DeepSeek Kara generate_manim kodu',
+    model: codeModel,
+    systemInstruction: buildManimSystemInstruction('', manimGuide),
+    userText: JSON.stringify(prompt, null, 2),
+    temperature: 0.2,
+    maxCompletionTokens: 5000,
+    thinkingEnabled: false
+  });
+  const code = sanitizeManimForLocalRender(stripCodeFence(responseText || ''));
+  assertSafeKaraManimCode(code, { validateScene: getSceneClassName });
+  return code;
+}
+
+async function renderKaraManimStill({ code, renderKey }) {
+  let currentCode = assertSafeKaraManimCode(sanitizeManimForLocalRender(code), {
+    validateScene: getSceneClassName
+  });
+  const safeKey = sanitizeSegmentId(renderKey || 'kara_tool');
+  const renderId = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeKey}`;
+  const workDir = path.join(rendersDir, renderId);
+  const mediaDir = path.join(workDir, 'media');
+  await fs.mkdir(workDir, { recursive: true });
+
+  let result;
+  let className;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    className = getSceneClassName(currentCode);
+    const filePath = path.join(workDir, `${className}.py`);
+    await fs.writeFile(filePath, currentCode, 'utf8');
+    result = await runCommand('python', [
+      '-m', 'manim', manimQuality, '-s', '--format', 'png',
+      filePath, className, '--media_dir', mediaDir
+    ], { timeoutMs: 120000 });
+    if (result.code === 0) break;
+    if (attempt === 1) break;
+    const renderOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
+    currentCode = await repairManimCodeWithLlm(currentCode, renderOutput, safeKey);
+    assertSafeKaraManimCode(currentCode, { validateScene: getSceneClassName });
+    await fs.rm(mediaDir, { recursive: true, force: true });
+    await fs.mkdir(mediaDir, { recursive: true });
+  }
+
+  if (result?.code !== 0) {
+    const error = new Error('Kara generate_manim gorseli render edilemedi.');
+    error.statusCode = 500;
+    error.stderr = result?.stderr;
+    throw error;
+  }
+  const images = await findNewestFileByExtension(mediaDir, '.png');
+  if (!images.length) {
+    throw new Error('Manim render tamamlandi ancak PNG bulunamadi.');
+  }
+  const fullPath = images[0].fullPath;
+  return {
+    fullPath,
+    relativePath: path.relative(rendersDir, fullPath).replaceAll(path.sep, '/'),
+    code: currentCode
+  };
+}
+
+async function executeKaraGenerateManim({ toolArgs, userId, lessonId, question, lessonTitle }) {
+  if (!lessonId) {
+    const error = new Error('generate_manim icin ders kaydi gerekli.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const renderKey = `kara_${randomUUID().slice(0, 8)}`;
+  const code = await createKaraManimStillCode({ toolArgs, question, lessonTitle });
+  const rendered = await renderKaraManimStill({ code, renderKey });
+  const storagePath = storagePathFor({
+    userId,
+    lessonId,
+    kind: 'kara-manim',
+    fileName: `${renderKey}.png`
+  });
+  const uploaded = await uploadLocalFile({
+    bucket: 'attachments',
+    localPath: rendered.fullPath,
+    storagePath,
+    contentType: 'image/png'
+  });
+  const access = await createStorageSignedUrl({
+    bucket: 'attachments',
+    storagePath: uploaded.storagePath,
+    expiresInSeconds: signedVideoUrlTtlSeconds
+  });
+  await saveAttachment({
+    userId,
+    lessonId,
+    type: 'kara_manim_image',
+    mimeType: 'image/png',
+    storagePath: uploaded.storagePath,
+    metadata: {
+      title: String(toolArgs?.title || '').slice(0, 160) || null,
+      teaching_point: String(toolArgs?.teaching_point || '').slice(0, 800),
+      manim_code: rendered.code
+    }
+  });
+  return {
+    mimeType: 'image/png',
+    data: (await fs.readFile(rendered.fullPath)).toString('base64'),
+    url: access.signedUrl,
+    title: String(toolArgs?.title || '').slice(0, 160) || 'Kara Manim görseli'
+  };
 }
 
 async function renderManimVideo({
@@ -2493,14 +2686,14 @@ async function runFullVideoJob(job) {
   }
 }
 
-async function findNewestMp4(dir) {
+async function findNewestFileByExtension(dir, extension) {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   const files = await Promise.all(entries.map(async (entry) => {
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      return findNewestMp4(fullPath);
+      return findNewestFileByExtension(fullPath, extension);
     }
-    if (!entry.isFile() || !entry.name.endsWith('.mp4')) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith(String(extension).toLowerCase())) {
       return [];
     }
     const stat = await fs.stat(fullPath);
@@ -2510,6 +2703,10 @@ async function findNewestMp4(dir) {
   return files
     .flat()
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+async function findNewestMp4(dir) {
+  return findNewestFileByExtension(dir, '.mp4');
 }
 
 app.get('/api/config', async (_req, res, next) => {
@@ -2525,6 +2722,7 @@ app.get('/api/config', async (_req, res, next) => {
       supportsVision: karaVisionEnabled,
       karaVisionModel: karaVisionEnabled ? karaVisionModels[0] : null,
       karaVisionModels: karaVisionEnabled ? karaVisionModels : [],
+      karaTools: karaVisionEnabled ? ['web_search', 'generate_manim'] : [],
       hasTtsCredentials: ttsProvider === 'edge'
         ? true
         : Boolean(ttsClient),
@@ -3210,7 +3408,9 @@ app.post('/api/ask-kara', async (req, res, next) => {
       timestampLabel: req.body.timestamp_label,
       lessonTitle: req.body.lesson_title,
       lessonPlan: req.body.lesson_plan,
-      chatHistory: req.body.chat_history
+      chatHistory: req.body.chat_history,
+      userId: userContext.profileId,
+      lessonId
     });
     const chatPromise = persist('kara-chat/get-or-create', () => (
       lessonId ? getOrCreateChat({ userId: userContext.profileId, lessonId }) : null
@@ -3281,7 +3481,10 @@ app.post('/api/ask-kara', async (req, res, next) => {
                 context: {
                   lesson_id: lessonId,
                   history_count: Array.isArray(req.body.chat_history) ? req.body.chat_history.length : 0,
-                  vision_used: Boolean(result.visionUsed)
+                  vision_used: Boolean(result.visionUsed),
+                  tools_used: result.toolsUsed || [],
+                  artifact_count: Array.isArray(result.artifacts) ? result.artifacts.length : 0,
+                  source_count: Array.isArray(result.sources) ? result.sources.length : 0
                 }
               })
             : null

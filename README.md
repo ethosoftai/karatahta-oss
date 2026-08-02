@@ -218,6 +218,12 @@ Ana video üretim modeli metin tabanlıdır; soru fotoğrafı çözümü için s
 tanımlıysa sorunun sorulduğu gerçek video karesini Gemini'ye timestamp, ders
 planı ve sohbet geçmişiyle birlikte gönderir. Görsel servis kullanılamazsa Kara
 DeepSeek metin bağlamına düşer ve API yanıtında `visionUsed: false` döner.
+Gemini 3 modellerinde Kara iki araç kullanabilir: güncel ve doğrulanabilir bilgi
+için backend'in kendi çok sağlayıcılı `web_search` katmanı, öğrencinin istediği kavramı tek karelik Manim görseline
+dönüştürmek için `generate_manim`. Manim çıktısı güvenli Python kontrolünden
+geçer, attachments deposuna yüklenir ve Kara cevabında `artifacts` alanıyla
+birlikte döner. Web kaynakları `sources`, kullanılan araçlar `toolsUsed` alanında
+yer alır.
 
 ### TTS, Manim ve pipeline
 
