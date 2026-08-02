@@ -249,17 +249,31 @@ export async function saveOAuthRefreshToken({ userId, provider, refreshToken, sc
   if (error) throw error;
 }
 
-export async function getOAuthRefreshToken({ userId, provider }) {
+export async function getOAuthConnection({ userId, provider }) {
   if (!userId || !provider) return null;
   const client = requireSupabase();
   const { data, error } = await client
     .from('oauth_connections')
-    .select('refresh_token')
+    .select('refresh_token, drive_folder_id')
     .eq('user_id', userId)
     .eq('provider', provider)
     .maybeSingle();
   if (error) throw error;
-  return data?.refresh_token || null;
+  if (!data) return null;
+  return { refreshToken: data.refresh_token, driveFolderId: data.drive_folder_id || null };
+}
+
+export async function saveOAuthDriveFolderId({ userId, provider, driveFolderId }) {
+  if (!userId || !provider || !driveFolderId) {
+    throw new Error('userId, provider ve driveFolderId gerekli.');
+  }
+  const client = requireSupabase();
+  const { error } = await client
+    .from('oauth_connections')
+    .update({ drive_folder_id: driveFolderId, updated_at: new Date().toISOString() })
+    .eq('user_id', userId)
+    .eq('provider', provider);
+  if (error) throw error;
 }
 
 export async function refreshAuthSession(refreshToken) {

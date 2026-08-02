@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildMultipartUploadBody,
+  createDriveFolder,
   refreshGoogleAccessToken,
   uploadFileToDrive
 } from '../services/googleDrive.js';
@@ -85,5 +86,47 @@ test('uploadFileToDrive bos dosyada istek atmadan hata verir', async () => {
   await assert.rejects(
     () => uploadFileToDrive({ accessToken: 'at', fileBuffer: Buffer.alloc(0), fileName: 'x.mp4' }),
     /bos olamaz/
+  );
+});
+
+test('uploadFileToDrive parentFolderId verildiginde metadata parents alanina ekler', async () => {
+  let capturedBody;
+  const fetchImpl = async (_url, options) => {
+    capturedBody = options.body.toString('utf8');
+    return { ok: true, status: 200, json: async () => ({ id: 'file-1', webViewLink: null }) };
+  };
+  await uploadFileToDrive({
+    accessToken: 'at-1',
+    fileBuffer: Buffer.from('bytes'),
+    fileName: 'ders.mp4',
+    parentFolderId: 'folder-1',
+    fetchImpl
+  });
+  assert.match(capturedBody, /"name":"ders\.mp4","parents":\["folder-1"\]/);
+});
+
+test('createDriveFolder basarili yanitta klasor id dondurur', async () => {
+  const fetchImpl = async (url, options) => {
+    assert.match(url, /\/drive\/v3\/files\?fields=id$/);
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body, { name: 'Kara Tahta Dersleri', mimeType: 'application/vnd.google-apps.folder' });
+    return { ok: true, status: 200, json: async () => ({ id: 'folder-1' }) };
+  };
+  const folderId = await createDriveFolder({ accessToken: 'at-1', folderName: 'Kara Tahta Dersleri', fetchImpl });
+  assert.equal(folderId, 'folder-1');
+});
+
+test('createDriveFolder basarisiz yanitta hata firlatir', async () => {
+  const fetchImpl = async () => ({
+    ok: false,
+    status: 401,
+    json: async () => ({ error: { message: 'Invalid Credentials' } })
+  });
+  await assert.rejects(
+    () => createDriveFolder({ accessToken: 'bad', folderName: 'X', fetchImpl }),
+    (error) => {
+      assert.equal(error.statusCode, 401);
+      return true;
+    }
   );
 });

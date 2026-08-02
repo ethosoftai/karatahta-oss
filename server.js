@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { extractFrameAtTime } from './services/frameExtractor.js';
-import { refreshGoogleAccessToken, uploadFileToDrive } from './services/googleDrive.js';
+import { createDriveFolder, refreshGoogleAccessToken, uploadFileToDrive } from './services/googleDrive.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
 import { buildKaraLiveSystemInstruction, createKaraLiveSession, DEFAULT_KARA_LIVE_MODEL } from './services/karaLiveSession.js';
 import { assertSafeKaraManimCode } from './services/karaManimSafety.js';
@@ -48,7 +48,8 @@ import {
 import {
   appendGenerationEvent,
   createOAuthSignInUrl,
-  getOAuthRefreshToken,
+  getOAuthConnection,
+  saveOAuthDriveFolderId,
   saveOAuthRefreshToken,
   createGenerationJob,
   createLesson,
@@ -150,6 +151,7 @@ const googleOAuthEnabled = String(process.env.GOOGLE_OAUTH_ENABLED || 'false').t
 const googleOAuthClientId = String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
 const googleOAuthClientSecret = String(process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
 const googleDriveScope = 'https://www.googleapis.com/auth/drive.file';
+const googleDriveFolderName = 'Kara Tahta Dersleri';
 const googleDriveEnabled = Boolean(googleOAuthEnabled && googleOAuthClientId && googleOAuthClientSecret);
 const signedVideoUrlTtlSeconds = process.env.SUPABASE_SIGNED_URL_TTL_SECONDS || 3600;
 const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
@@ -2922,8 +2924,8 @@ app.post('/api/lessons/:id/save-to-drive', async (req, res, next) => {
     if (!googleDriveEnabled) {
       return res.status(503).json({ error: 'Google Drive baglantisi henuz etkin degil.' });
     }
-    const refreshToken = await getOAuthRefreshToken({ userId: userContext.profileId, provider: 'google_drive' });
-    if (!refreshToken) {
+    const connection = await getOAuthConnection({ userId: userContext.profileId, provider: 'google_drive' });
+    if (!connection?.refreshToken) {
       return res.status(409).json({ error: 'Google Drive baglantisi kurulmamis.', code: 'drive_not_connected' });
     }
 
@@ -2940,15 +2942,23 @@ app.post('/api/lessons/:id/save-to-drive', async (req, res, next) => {
     const { accessToken } = await refreshGoogleAccessToken({
       clientId: googleOAuthClientId,
       clientSecret: googleOAuthClientSecret,
-      refreshToken
+      refreshToken: connection.refreshToken
     });
+
+    let folderId = connection.driveFolderId;
+    if (!folderId) {
+      folderId = await createDriveFolder({ accessToken, folderName: googleDriveFolderName });
+      await saveOAuthDriveFolderId({ userId: userContext.profileId, provider: 'google_drive', driveFolderId: folderId });
+    }
+
     const fileBuffer = await readVideoBytes(videoSource);
     const fileName = `${(result.lesson?.title || result.lesson?.topic || 'Kara Tahta Dersi').slice(0, 120)}.mp4`;
     const upload = await uploadFileToDrive({
       accessToken,
       fileBuffer,
       fileName,
-      mimeType: 'video/mp4'
+      mimeType: 'video/mp4',
+      parentFolderId: folderId
     });
 
     res.json({ ok: true, fileId: upload.fileId, webViewLink: upload.webViewLink });

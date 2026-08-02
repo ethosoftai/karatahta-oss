@@ -297,6 +297,7 @@ Yeni Supabase projesinde SQL Editor'da sırayla:
 3. `migrations/003_security_and_storage.sql`
 4. `migrations/004_lesson_detail_indexes.sql`
 5. `migrations/005_oauth_connections.sql`
+6. `migrations/006_oauth_drive_folder.sql`
 
 çalıştırılmalıdır. Alternatif: `SUPABASE_DB_URL` tanımlayıp
 `npm run supabase:schema`.

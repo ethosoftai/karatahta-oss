@@ -1,5 +1,7 @@
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_DRIVE_UPLOAD_URL = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink';
+const GOOGLE_DRIVE_FILES_URL = 'https://www.googleapis.com/drive/v3/files';
+const DRIVE_FOLDER_MIME_TYPE = 'application/vnd.google-apps.folder';
 
 export async function refreshGoogleAccessToken({
   clientId,
@@ -37,6 +39,30 @@ export async function refreshGoogleAccessToken({
   };
 }
 
+export async function createDriveFolder({ accessToken, folderName, fetchImpl = fetch }) {
+  if (!accessToken) throw new Error('Google Drive erisim tokeni gerekli.');
+  const response = await fetchImpl(`${GOOGLE_DRIVE_FILES_URL}?fields=id`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({ name: folderName, mimeType: DRIVE_FOLDER_MIME_TYPE })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(
+      `Google Drive klasoru olusturulamadi (${response.status}): ${payload?.error?.message || response.statusText}`
+    );
+    error.statusCode = response.status === 401 ? 401 : 502;
+    throw error;
+  }
+  if (!payload.id) {
+    throw new Error('Google Drive klasor yaniti id icermiyor.');
+  }
+  return payload.id;
+}
+
 export function buildMultipartUploadBody({ metadata, fileBuffer, mimeType, boundary }) {
   const metadataPart = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n`;
   const filePartHeader = `--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`;
@@ -54,6 +80,7 @@ export async function uploadFileToDrive({
   fileBuffer,
   fileName,
   mimeType = 'video/mp4',
+  parentFolderId = null,
   fetchImpl = fetch
 }) {
   if (!accessToken) throw new Error('Google Drive erisim tokeni gerekli.');
@@ -61,7 +88,7 @@ export async function uploadFileToDrive({
 
   const boundary = `karatahta-drive-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const body = buildMultipartUploadBody({
-    metadata: { name: fileName },
+    metadata: { name: fileName, ...(parentFolderId ? { parents: [parentFolderId] } : {}) },
     fileBuffer,
     mimeType,
     boundary
