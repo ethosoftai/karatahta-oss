@@ -206,7 +206,8 @@ const karaVisionTimeoutMs = Math.max(
 );
 const karaVisionEnabled = Boolean(geminiApiKey && karaVisionModels.length);
 const karaLiveModel = String(process.env.KARA_LIVE_MODEL || DEFAULT_KARA_LIVE_MODEL).trim();
-const karaLiveEnabled = Boolean(geminiApiKey);
+const karaLiveFeatureFlag = String(process.env.KARA_LIVE_ENABLED || 'false').toLowerCase() === 'true';
+const karaLiveEnabled = Boolean(geminiApiKey) && karaLiveFeatureFlag;
 const apiKey = deepseekApiKey;
 const deepseek = deepseekApiKey
   ? new OpenAI({
@@ -4131,7 +4132,7 @@ const karaLiveWss = new WebSocketServer({ server: httpServer, path: '/api/kara-l
 
 karaLiveWss.on('connection', (ws) => {
   if (!karaLiveEnabled) {
-    ws.send(JSON.stringify({ type: 'error', message: 'Kara live devre disi: GEMINI_API_KEY tanimli degil.' }));
+    ws.send(JSON.stringify({ type: 'error', message: 'Kara live su anda devre disi.' }));
     ws.close();
     return;
   }
