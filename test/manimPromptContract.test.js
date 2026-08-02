@@ -14,6 +14,8 @@ test('LaTeX ortaminda MathTex ve layout skill kurallarini zorunlu tutar', () => 
   assert.match(contract, /include_numbers=False/);
   assert.match(contract, /kullanilan her degisken ve helper daha once tanimli/);
   assert.match(contract, /FadeOut\/self\.remove\(\)/);
+  assert.match(contract, /Angle\(line1, line2, radius=\.\.\.\)/);
+  assert.match(contract, /RightAngle\(line1, line2, length=\.\.\.\)/);
 });
 
 test('LaTeX kapaliysa calisabilir geometrik fallback ister', () => {
