@@ -208,6 +208,15 @@ CORS_ORIGIN=https://karatahta.ethosoft.org,http://localhost:3001,http://127.0.0.
 | `GEMINI_API_KEY` | Kara'nın o anki video karesini incelemesi için Gemini API anahtarı |
 | `KARA_VISION_MODELS` | Virgülle sıralı Kara görsel fallback havuzu; varsayılan `gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash-lite` (`KARA_VISION_MODEL` geriye uyumlu) |
 | `GEMINI_REQUEST_TIMEOUT_MS` | Kara görsel istek timeout'u; varsayılan `45000` |
+| `KARA_LIVE_MODEL` | Kara canlı sesli sohbet modeli; varsayılan `gemini-live-2.5-flash-preview-native-audio-09-2025` (`GEMINI_API_KEY` gerekir) |
+
+`GEMINI_API_KEY` tanımlıysa `/api/kara-live` WebSocket endpoint'i açılır: tarayıcı
+mikrofon sesini canlı olarak Gemini Live API'ye aktarır, model sesli yanıt üretir.
+Bu oturumda model `get_frame` (verilen saniyedeki gerçek video karesini ffmpeg ile
+çıkarır), `web_search` ve `generate_manim` araçlarını çağırabilir. Video henüz
+üretilmemişse `get_frame` "video hazır değil" yanıtı döner. Bağlantı, ilk mesaj
+olarak `{"type":"auth","token":"...","lessonId":"..."}` gönderilmesini bekler;
+ardından `{"type":"audio","data":"<base64 pcm16 16kHz>"}` ile ses akışı yapılır.
 
 Kara soru-cevap gibi genel DeepSeek çağrıları thinking modu açık ve `high`
 reasoning effort ile çalışır. Video üretim pipeline'ı düşük ilk-kare
@@ -339,6 +348,7 @@ node scripts/migrate_supabase_media_to_railway.js --delete-source --delete-bucke
 | `GET /api/jobs/:id/stream-manifest` | Sıralı progressive partial metadata |
 | `GET /api/jobs/:id/partials/:sequence` | Authenticated fMP4 partial |
 | `POST /api/ask-kara` | Timestamp, ders planı ve chat bağlamıyla soru-cevap |
+| `WS /api/kara-live` | Gemini Live API ile canlı sesli sohbet; get_frame/web_search/generate_manim araçları |
 
 Auth açıkken kullanıcıya ait endpointler Bearer token ister. Job ve lesson
 sahiplik kontrollerini kaldırmayın.

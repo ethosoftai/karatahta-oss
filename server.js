@@ -4,6 +4,7 @@ import textToSpeech from '@google-cloud/text-to-speech';
 import express from 'express';
 import OpenAI from 'openai';
 import { Agent, setGlobalDispatcher } from 'undici';
+import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -11,7 +12,9 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
+import { extractFrameAtTime } from './services/frameExtractor.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
+import { buildKaraLiveSystemInstruction, createKaraLiveSession, DEFAULT_KARA_LIVE_MODEL } from './services/karaLiveSession.js';
 import { assertSafeKaraManimCode } from './services/karaManimSafety.js';
 import { runKaraTools } from './services/karaTools.js';
 import { searchWeb } from './services/webSearch.js';
@@ -193,6 +196,8 @@ const karaVisionTimeoutMs = Math.max(
   Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 45000)
 );
 const karaVisionEnabled = Boolean(geminiApiKey && karaVisionModels.length);
+const karaLiveModel = String(process.env.KARA_LIVE_MODEL || DEFAULT_KARA_LIVE_MODEL).trim();
+const karaLiveEnabled = Boolean(geminiApiKey);
 const apiKey = deepseekApiKey;
 const deepseek = deepseekApiKey
   ? new OpenAI({
@@ -433,6 +438,21 @@ async function createVideoAccessPayload(video) {
     videoUrlExpiresInSeconds: signed.expiresInSeconds,
     videoUrlExpiresAt: signed.expiresAt
   };
+}
+
+async function resolveFrameVideoSource(video) {
+  if (video?.video_storage_path) {
+    const signed = await createStorageSignedUrl({
+      bucket: 'videos',
+      storagePath: video.video_storage_path,
+      expiresInSeconds: 900
+    });
+    return signed.signedUrl;
+  }
+  if (video?.local_video_path) {
+    return resolveRenderRelative(video.local_video_path);
+  }
+  return null;
 }
 
 app.use((req, res, next) => {
@@ -2746,6 +2766,9 @@ app.get('/api/config', async (_req, res, next) => {
       karaVisionModel: karaVisionEnabled ? karaVisionModels[0] : null,
       karaVisionModels: karaVisionEnabled ? karaVisionModels : [],
       karaTools: karaVisionEnabled ? ['web_search', 'generate_manim'] : [],
+      karaLiveEnabled,
+      karaLiveModel: karaLiveEnabled ? karaLiveModel : null,
+      karaLiveTools: karaLiveEnabled ? ['get_frame', 'web_search', 'generate_manim'] : [],
       hasTtsCredentials: ttsProvider === 'edge'
         ? true
         : Boolean(ttsClient),
@@ -3949,7 +3972,37 @@ app.use((error, _req, res, _next) => {
   });
 });
 
-app.listen(port, () => {
+async function authenticateKaraLiveSocket(authMessage) {
+  const token = String(authMessage?.token || '').trim();
+  const lessonId = String(authMessage?.lessonId || authMessage?.lesson_id || '').trim();
+  if (!lessonId) {
+    const error = new Error('lessonId gerekli.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  let userId;
+  if (token) {
+    const profile = await getProfileForAccessToken(token);
+    userId = profile.id;
+  } else if (!authRequired) {
+    userId = process.env.DEV_USER_ID;
+  } else {
+    const error = new Error('Giris yapman gerekiyor.');
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const detail = await getLessonDetailForUser({ lessonId, userId });
+  if (!detail) {
+    const error = new Error('Ders bulunamadi veya bu kullaniciya ait degil.');
+    error.statusCode = 403;
+    throw error;
+  }
+  return { userId, lessonId, detail };
+}
+
+const httpServer = app.listen(port, () => {
   logInfo(`Kara Tahta calisiyor: http://localhost:${port}`, {
     provider: llmProvider,
     planModel,
@@ -3957,4 +4010,128 @@ app.listen(port, () => {
     reasoningEffort: deepseekReasoningEffort,
     quality: manimQuality
   });
+});
+
+const karaLiveWss = new WebSocketServer({ server: httpServer, path: '/api/kara-live' });
+
+karaLiveWss.on('connection', (ws) => {
+  if (!karaLiveEnabled) {
+    ws.send(JSON.stringify({ type: 'error', message: 'Kara live devre disi: GEMINI_API_KEY tanimli degil.' }));
+    ws.close();
+    return;
+  }
+
+  let session = null;
+  const authTimeout = setTimeout(() => {
+    ws.send(JSON.stringify({ type: 'error', message: 'Kimlik dogrulama zaman asimina ugradi.' }));
+    ws.close();
+  }, 10000);
+
+  ws.once('message', async (raw) => {
+    clearTimeout(authTimeout);
+    let userId;
+    let lessonId;
+    let detail;
+    try {
+      const authMessage = JSON.parse(raw.toString());
+      if (authMessage?.type !== 'auth') {
+        throw Object.assign(new Error('Ilk mesaj auth olmali.'), { statusCode: 400 });
+      }
+      ({ userId, lessonId, detail } = await authenticateKaraLiveSocket(authMessage));
+    } catch (error) {
+      ws.send(JSON.stringify({ type: 'error', message: error.message || 'Kimlik dogrulama basarisiz.' }));
+      ws.close();
+      return;
+    }
+
+    const lessonTitle = detail.lesson?.title || detail.lesson?.topic || '';
+    const videoSourcePromise = resolveFrameVideoSource(detail.video);
+
+    try {
+      session = await createKaraLiveSession({
+        apiKey: geminiApiKey,
+        model: karaLiveModel,
+        systemInstruction: buildKaraLiveSystemInstruction({ lessonTitle, lessonPlan: detail.plan }),
+        executors: {
+          get_frame: async (args) => {
+            const videoUrl = await videoSourcePromise;
+            if (!videoUrl) {
+              return { response: { ok: false, error: 'Bu ders icin video henuz hazir degil.' } };
+            }
+            const frame = await extractFrameAtTime({ videoUrl, timestampSeconds: args.time });
+            return {
+              response: { ok: true, timestampSeconds: Number(args.time) || 0 },
+              parts: [{ inlineData: { mimeType: frame.mimeType, data: frame.data } }]
+            };
+          },
+          web_search: async (args) => {
+            const query = String(args?.query || '').trim().slice(0, 500);
+            const result = await searchWeb(query);
+            return { response: { ok: true, provider: result.provider, results: result.results } };
+          },
+          generate_manim: async (args) => {
+            const artifact = await executeKaraGenerateManim({
+              toolArgs: args,
+              userId,
+              lessonId,
+              question: 'Canli sesli sohbet sirasinda istenen gorsel',
+              lessonTitle
+            });
+            return {
+              response: { ok: true, title: artifact.title || null },
+              parts: [{ inlineData: { mimeType: artifact.mimeType, data: artifact.data } }]
+            };
+          }
+        },
+        onServerMessage: (event) => {
+          if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(event));
+        },
+        onError: (error) => {
+          logInfo('Kara live oturum hatasi', { error: error.message, lessonId });
+          if (ws.readyState === ws.OPEN) {
+            ws.send(JSON.stringify({ type: 'error', message: error.message }));
+          }
+        }
+      });
+    } catch (error) {
+      logInfo('Kara live oturumu baslatilamadi', { error: error.message, lessonId });
+      ws.send(JSON.stringify({ type: 'error', message: error.message || 'Kara live baslatilamadi.' }));
+      ws.close();
+      return;
+    }
+
+    ws.on('message', (relayRaw) => {
+      let message;
+      try {
+        message = JSON.parse(relayRaw.toString());
+      } catch {
+        return;
+      }
+      if (!session) return;
+      switch (message?.type) {
+        case 'audio':
+          session.sendAudioChunk(message.data);
+          break;
+        case 'audio_end':
+          session.sendAudioStreamEnd();
+          break;
+        case 'text':
+          session.sendText(message.text);
+          break;
+        case 'close':
+          session.close();
+          ws.close();
+          break;
+        default:
+          break;
+      }
+    });
+  });
+
+  const closeSession = () => {
+    session?.close();
+    session = null;
+  };
+  ws.on('close', closeSession);
+  ws.on('error', closeSession);
 });
