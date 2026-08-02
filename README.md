@@ -205,14 +205,19 @@ CORS_ORIGIN=https://karatahta.ethosoft.org,http://localhost:3001,http://127.0.0.
 | `DEEPSEEK_REASONING_EFFORT` | `high` veya `max` |
 | `DEEPSEEK_PIPELINE_THINKING` | Plan/speech/Manim kodu için thinking modu; düşük gecikme için `false` |
 | `DEEPSEEK_REQUEST_TIMEOUT_MS` | İstek timeout'u; varsayılan `120000` |
+| `GEMINI_API_KEY` | Kara'nın o anki video karesini incelemesi için Gemini API anahtarı |
+| `KARA_VISION_MODELS` | Virgülle sıralı Kara görsel fallback havuzu; varsayılan `gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash-lite` (`KARA_VISION_MODEL` geriye uyumlu) |
+| `GEMINI_REQUEST_TIMEOUT_MS` | Kara görsel istek timeout'u; varsayılan `45000` |
 
 Kara soru-cevap gibi genel DeepSeek çağrıları thinking modu açık ve `high`
 reasoning effort ile çalışır. Video üretim pipeline'ı düşük ilk-kare
 gecikmesi için varsayılan olarak non-thinking modunda çalışır;
 `DEEPSEEK_PIPELINE_THINKING=true` eski davranışı geri getirir.
-Model metin tabanlıdır; soru fotoğrafı çözümü için soru metni `Ek not` alanında
-verilmelidir. Video içi Kara soruları timestamp ve ders planı bağlamını kullanır,
-ancak video karesini görmez.
+Ana video üretim modeli metin tabanlıdır; soru fotoğrafı çözümü için soru metni
+`Ek not` alanında verilmelidir. Video içi Kara soruları ise `GEMINI_API_KEY`
+tanımlıysa sorunun sorulduğu gerçek video karesini Gemini'ye timestamp, ders
+planı ve sohbet geçmişiyle birlikte gönderir. Görsel servis kullanılamazsa Kara
+DeepSeek metin bağlamına düşer ve API yanıtında `visionUsed: false` döner.
 
 ### TTS, Manim ve pipeline
 

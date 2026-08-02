@@ -13,6 +13,12 @@ import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
 import {
+  buildKaraPrompt,
+  generateKaraVisionAnswerWithFallback,
+  normalizeKaraFrame,
+  parseKaraVisionModels
+} from './services/karaVision.js';
+import {
   buildSegmentGenerationContext,
   normalizeLessonContinuity,
   normalizeLessonSegmentContinuity
@@ -171,6 +177,17 @@ const deepseekRequestTimeoutMs = Math.max(
   5000,
   Number(process.env.DEEPSEEK_REQUEST_TIMEOUT_MS || 120000)
 );
+const geminiApiKey = String(process.env.GEMINI_API_KEY || '').trim();
+const karaVisionModels = parseKaraVisionModels(
+  process.env.KARA_VISION_MODELS
+  || process.env.KARA_VISION_MODEL
+  || 'gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash-lite'
+);
+const karaVisionTimeoutMs = Math.max(
+  5000,
+  Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 45000)
+);
+const karaVisionEnabled = Boolean(geminiApiKey && karaVisionModels.length);
 const apiKey = deepseekApiKey;
 const deepseek = deepseekApiKey
   ? new OpenAI({
@@ -775,54 +792,77 @@ async function answerKaraQuestion({
   lessonPlan = null,
   chatHistory = []
 }) {
-  normalizeImagePayload(frame);
+  const normalizedFrame = normalizeKaraFrame(frame);
   const safeHistory = compactChatHistory(chatHistory);
   const compactLessonPlan = compactLessonPlanContext(lessonPlan);
 
-  const prompt = `Sen Kara Tahta icindeki "Kara" adli egitim asistanisin.
+  const promptContext = {
+    question,
+    timestampSeconds,
+    timestampLabel,
+    lessonTitle,
+    lessonPlan: compactLessonPlan,
+    chatHistory: safeHistory
+  };
 
-Ogrenci video izlerken bir soru sordu. DeepSeek gorsel girdiyi desteklemedigi icin video karesi modele aktarilmiyor; timestamp, ders plani ve onceki soru-cevap gecmisi veriliyor.
-
-ZORUNLU CEVAP KURALLARI:
-- Turkce cevap ver.
-- Timestamp ve ders plani baglamini dikkate al; karede gormedigin bir ayrintiyi gordugunu iddia etme.
-- Ilk once soruyu kisa cevapla, sonra gerekiyorsa adim adim acikla.
-- Matematiksel ifadeleri LaTeX ile yaz: satir ici icin \\(...\\), ayri denklem icin \\[...\\].
-- Gereksiz uzun cevap verme; ogrencinin takildigi yeri ac.
-- Onceki konusmalar varsa baglami koru, ama eski cevabi aynen tekrar etme.
-- Baglam yeterli degilse bunu nazikce soyle ve yine de eldeki bilgiyle yardim et.
-
-Ders basligi: ${lessonTitle || 'Bilinmiyor'}
-Timestamp: ${timestampLabel} (${Number(timestampSeconds || 0).toFixed(1)} saniye)
-
-Cikarilan ders plani:
-${compactLessonPlan ? JSON.stringify(compactLessonPlan, null, 2) : 'Yok'}
-
-Onceki konusmalar:
-${safeHistory.length ? JSON.stringify(safeHistory, null, 2) : 'Yok'}
-
-Ogrencinin yeni sorusu:
-${String(question || '').trim()}`;
-
-  logInfo('Kara soru-cevap DeepSeek istegi basladi', {
-    model: planModel,
+  logInfo('Kara soru-cevap istegi basladi', {
+    provider: karaVisionEnabled ? 'gemini' : llmProvider,
+    model: karaVisionEnabled ? karaVisionModels[0] : planModel,
     timestamp: timestampLabel,
-    history: safeHistory.length
+    history: safeHistory.length,
+    frameBytes: normalizedFrame.byteLength
   });
 
   const started = Date.now();
+  if (karaVisionEnabled) {
+    try {
+      const visionResult = await generateKaraVisionAnswerWithFallback({
+        apiKey: geminiApiKey,
+        models: karaVisionModels,
+        prompt: buildKaraPrompt({ ...promptContext, frameAvailable: true }),
+        frame: normalizedFrame,
+        timeoutMs: karaVisionTimeoutMs
+      });
+      const answer = String(visionResult.answer).trim();
+      logInfo('Kara gorselli yaniti geldi', {
+        ms: Date.now() - started,
+        provider: 'gemini',
+        model: visionResult.model,
+        attemptedModels: visionResult.attemptedModels,
+        skippedModels: visionResult.skippedModels,
+        chars: answer.length
+      });
+      return {
+        answer,
+        provider: 'gemini',
+        model: visionResult.model,
+        visionUsed: true,
+        visionAttempts: visionResult.attemptedModels.length
+      };
+    } catch (error) {
+      logInfo('Kara gorsel modeli basarisiz; metin baglamina geciliyor', {
+        provider: 'gemini',
+        models: karaVisionModels,
+        attemptedModels: error.karaVisionAttempts || [],
+        skippedModels: error.karaVisionSkipped || [],
+        reason: error.karaVisionReason || 'unknown',
+        error: error.message
+      });
+    }
+  }
+
   const answer = String(await generateLlmText({
-    label: 'DeepSeek Kara soru-cevap',
+    label: 'DeepSeek Kara metin fallback',
     model: planModel,
-    userText: prompt
+    userText: buildKaraPrompt({ ...promptContext, frameAvailable: false })
   })).trim();
-  logInfo('Kara soru-cevap DeepSeek yaniti geldi', {
+  logInfo('Kara metin fallback yaniti geldi', {
     ms: Date.now() - started,
     model: planModel,
     chars: answer.length
   });
 
-  return { answer, model: planModel };
+  return { answer, provider: llmProvider, model: planModel, visionUsed: false };
 }
 
 function toPlainTextFromTex(value) {
@@ -2482,7 +2522,9 @@ app.get('/api/config', async (_req, res, next) => {
       hasDeepSeekApiKey: Boolean(deepseekApiKey),
       deepseekReasoningEffort,
       deepseekPipelineThinkingEnabled,
-      supportsVision: false,
+      supportsVision: karaVisionEnabled,
+      karaVisionModel: karaVisionEnabled ? karaVisionModels[0] : null,
+      karaVisionModels: karaVisionEnabled ? karaVisionModels : [],
       hasTtsCredentials: ttsProvider === 'edge'
         ? true
         : Boolean(ttsClient),
@@ -3234,11 +3276,12 @@ app.post('/api/ask-kara', async (req, res, next) => {
                 timestampSeconds: req.body.timestamp_seconds,
                 timestampLabel: req.body.timestamp_label,
                 frameAttachmentId: frameAttachment?.id || null,
-                provider: llmProvider,
+                provider: result.provider || llmProvider,
                 model: result.model || planModel,
                 context: {
                   lesson_id: lessonId,
-                  history_count: Array.isArray(req.body.chat_history) ? req.body.chat_history.length : 0
+                  history_count: Array.isArray(req.body.chat_history) ? req.body.chat_history.length : 0,
+                  vision_used: Boolean(result.visionUsed)
                 }
               })
             : null
