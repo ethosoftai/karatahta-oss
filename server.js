@@ -4062,8 +4062,14 @@ app.get('/api/jobs/:id/partials/:sequence', async (req, res, next) => {
   }
 });
 
-app.use((error, _req, res, _next) => {
+app.use((error, req, res, _next) => {
   const statusCode = error.statusCode || 500;
+  if (statusCode >= 500) {
+    logInfo(`Beklenmeyen hata: ${req.method} ${req.originalUrl}`, {
+      message: error.message,
+      stack: error.stack?.split('\n').slice(0, 5).join(' | ')
+    });
+  }
   res.status(statusCode).json({
     error: error.message || 'Beklenmeyen hata olustu.',
     stdout: error.stdout,
