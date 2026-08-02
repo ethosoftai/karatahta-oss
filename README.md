@@ -438,6 +438,34 @@ railway logs --lines 100
 CLI deploy yalnız yedek yöntemdir. Önce aynı kodu GitHub `railway` branch'ine
 commit/push edin; aksi halde production ile repo source of truth ayrışır.
 
+## VPS deployment (hibrit backend)
+
+Hibrit backend altyapısının VPS tarafı `scripts/deploy_vps.sh` ile deploy
+edilir (kod testleri, Docker build, smoke test, üretime geçiş, rollback
+imajı):
+
+```bash
+bash scripts/deploy_vps.sh
+```
+
+VPS ve Railway aynı kod tabanini calistirir ama `/etc/karatahta-backend.env`
+ayri bir dosyadir ve otomatik senkronize olmaz. Railway'e yeni bir feature
+flag, timeout veya Google/Media credential eklendiginde VPS'in de ayni
+degerleri almasi icin:
+
+```bash
+npm run vps:sync-env
+```
+
+Bu script `railway variables --json` ile Railway'in guncel degerlerini okur,
+yalnizca iki backend arasinda ayni olmasi gereken ayarlari (feature flag'ler,
+paylasilan timeout'lar, Railway Bucket okuma bilgileri, Google OAuth/Drive/
+Live) VPS `.env` dosyasina uygular, VPS'e ozgu ayarlari (MEDIA_STORAGE_PROVIDER=local,
+CORS_ORIGIN, kendi DEEPSEEK_API_KEY'i, concurrency degerleri) degistirmeden
+birakir ve container'i yeniden olusturur. Idempotent'tir, guvenle tekrar
+calistirilabilir. `railway` CLI'nin login/link olmasi ve VPS SSH erisiminin
+(`VPS_SSH_KEY`, varsayilan yol) hazir olmasi gerekir.
+
 ## Frontend/cPanel birlikte deployment
 
 Backend deploy edilince hosting frontend otomatik olarak yeniden build

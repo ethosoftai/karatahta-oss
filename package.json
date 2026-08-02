@@ -10,7 +10,8 @@
     "supabase:schema": "node scripts/apply_supabase_schema.js",
     "storage:cors:railway": "node scripts/configure_railway_bucket_cors.js",
     "storage:migrate:railway": "node scripts/migrate_supabase_media_to_railway.js",
-    "kara-live:test": "node scripts/test_kara_live.js"
+    "kara-live:test": "node scripts/test_kara_live.js",
+    "vps:sync-env": "bash scripts/sync_vps_env.sh"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1097.0",
