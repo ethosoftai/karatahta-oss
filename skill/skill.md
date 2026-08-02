@@ -68,6 +68,19 @@ big   = MathTex(r"\sqrt{x}", font_size=72)
 small = MathTex(r"\sqrt{x}").scale(0.6)
 ```
 
+### `GrowArrow` Kullanma (KRİTİK — v0.20.1'de kırık)
+
+```python
+# ✗ YANLIŞ — GrowArrow, kurulu manim==0.20.1 surumunde
+# VMobject.scale() icin scale_tips kwarg hatasi verip render'i kilitler
+self.play(GrowArrow(arrow))
+
+# ✓ DOĞRU — ayni gorsel etkiyi verir, kirilmaz
+self.play(Create(arrow))
+```
+
+**Kural:** Ok (Arrow/Vector) buyume animasyonu icin `GrowArrow` yerine daima `Create` veya `GrowFromPoint(arrow, arrow.get_start())` kullan.
+
 ---
 
 ## Project Structure
