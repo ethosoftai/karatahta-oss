@@ -34,6 +34,6 @@ COPY . ./
 
 RUN mkdir -p renders downloads
 
-EXPOSE 3000
+EXPOSE 8080
 
 CMD ["node", "server.js"]

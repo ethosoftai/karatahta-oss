@@ -77,8 +77,10 @@ import {
 } from './services/supabaseStore.js';
 import {
   createStorageSignedUrl,
+  localMediaConfigured,
   mediaStorageProvider,
   railwayMediaConfigured,
+  resolveSignedLocalMediaRequest,
   storagePathFor,
   uploadDataUrl,
   uploadLocalFile
@@ -266,6 +268,27 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static(publicDir));
+app.get('/media/*mediaPath', async (req, res, next) => {
+  try {
+    const objectKey = Array.isArray(req.params.mediaPath)
+      ? req.params.mediaPath.join('/')
+      : String(req.params.mediaPath || '');
+    const media = resolveSignedLocalMediaRequest({
+      objectKey,
+      expiresAtUnix: req.query.expires,
+      signature: req.query.signature
+    });
+    await fs.access(media.fullPath);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.sendFile(media.fullPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      error.statusCode = 404;
+      error.message = 'Medya dosyasi bulunamadi.';
+    }
+    next(error);
+  }
+});
 
 function createLimiter(maxConcurrent) {
   let active = 0;
@@ -2750,6 +2773,7 @@ app.get('/api/config', async (_req, res, next) => {
       hasSupabase: supabaseConfigured,
       mediaStorageProvider,
       hasRailwayBucket: railwayMediaConfigured,
+      hasLocalMedia: localMediaConfigured,
       authRequired,
       authRedirectConfigured: Boolean(authRedirectUrl),
       googleOAuthEnabled

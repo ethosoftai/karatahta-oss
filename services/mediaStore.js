@@ -7,8 +7,10 @@ import {
   S3Client
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import {
   createStorageSignedUrl as createSupabaseStorageSignedUrl,
   storagePathFor,
@@ -25,6 +27,9 @@ const railwayRegion = process.env.MEDIA_S3_REGION || 'auto';
 const railwayAccessKeyId = process.env.MEDIA_S3_ACCESS_KEY_ID;
 const railwaySecretAccessKey = process.env.MEDIA_S3_SECRET_ACCESS_KEY;
 const railwayUrlStyle = String(process.env.MEDIA_S3_URL_STYLE || 'virtual-host').toLowerCase();
+const localMediaRoot = path.resolve(process.env.MEDIA_LOCAL_DIR || path.resolve(process.cwd(), 'media'));
+const localPublicBaseUrl = String(process.env.MEDIA_PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
+const localSigningSecret = String(process.env.MEDIA_SIGNING_SECRET || '').trim();
 
 export const railwayMediaConfigured = Boolean(
   railwayEndpoint
@@ -32,7 +37,14 @@ export const railwayMediaConfigured = Boolean(
   && railwayAccessKeyId
   && railwaySecretAccessKey
 );
-export const mediaStorageProvider = configuredProvider === 'railway' ? 'railway' : 'supabase';
+export const mediaStorageProvider = ['local', 'railway'].includes(configuredProvider)
+  ? configuredProvider
+  : 'supabase';
+export const localMediaConfigured = Boolean(
+  localMediaRoot
+  && localPublicBaseUrl
+  && localSigningSecret
+);
 
 let s3Client;
 
@@ -67,13 +79,23 @@ function cleanObjectPath(value) {
     .filter((part) => part && part !== '.' && part !== '..')
     .join('/');
   if (!clean) {
-    throw new Error('Railway Bucket icin gecerli bir nesne yolu gerekli.');
+    throw new Error('Gecerli bir medya nesne yolu gerekli.');
   }
   return clean;
 }
 
+function requireLocalMedia() {
+  if (!localMediaConfigured) {
+    throw new Error('Yerel medya depolama ayarlari eksik.');
+  }
+}
+
 export function isRailwayStoragePath(storagePath) {
   return String(storagePath || '').startsWith('railway://');
+}
+
+export function isLocalStoragePath(storagePath) {
+  return String(storagePath || '').startsWith('local://');
 }
 
 export function railwayObjectKeyFor(bucket, storagePath) {
@@ -85,6 +107,76 @@ export function railwayObjectKeyFor(bucket, storagePath) {
 
 export function railwayStoragePathFor(objectKey) {
   return `railway://${cleanObjectPath(objectKey)}`;
+}
+
+export function localObjectKeyFor(bucket, storagePath) {
+  if (isLocalStoragePath(storagePath)) {
+    return cleanObjectPath(String(storagePath).slice('local://'.length));
+  }
+  return `${cleanObjectPath(bucket)}/${cleanObjectPath(storagePath)}`;
+}
+
+export function localStoragePathFor(objectKey) {
+  return `local://${cleanObjectPath(objectKey)}`;
+}
+
+function localFilePathForObjectKey(objectKey) {
+  const cleanKey = cleanObjectPath(objectKey);
+  const fullPath = path.resolve(localMediaRoot, cleanKey);
+  if (fullPath !== localMediaRoot && !fullPath.startsWith(`${localMediaRoot}${path.sep}`)) {
+    throw new Error('Gecersiz yerel medya dosya yolu.');
+  }
+  return fullPath;
+}
+
+export function createLocalMediaSignature(objectKey, expiresAtUnix, secret = localSigningSecret) {
+  if (!secret) {
+    throw new Error('MEDIA_SIGNING_SECRET gerekli.');
+  }
+  const cleanKey = cleanObjectPath(objectKey);
+  return createHmac('sha256', secret)
+    .update(`${cleanKey}\n${Number(expiresAtUnix)}`)
+    .digest('hex');
+}
+
+export function verifyLocalMediaSignature({
+  objectKey,
+  expiresAtUnix,
+  signature,
+  secret = localSigningSecret,
+  nowUnix = Math.floor(Date.now() / 1000)
+}) {
+  const expires = Number(expiresAtUnix);
+  if (!Number.isInteger(expires) || expires < nowUnix || !/^[a-f0-9]{64}$/i.test(String(signature || ''))) {
+    return false;
+  }
+  const expected = Buffer.from(createLocalMediaSignature(objectKey, expires, secret), 'hex');
+  const received = Buffer.from(String(signature), 'hex');
+  return expected.length === received.length && timingSafeEqual(expected, received);
+}
+
+export function resolveSignedLocalMediaRequest({
+  objectKey,
+  expiresAtUnix,
+  signature,
+  nowUnix
+}) {
+  requireLocalMedia();
+  const cleanKey = cleanObjectPath(objectKey);
+  if (!verifyLocalMediaSignature({
+    objectKey: cleanKey,
+    expiresAtUnix,
+    signature,
+    nowUnix
+  })) {
+    throw Object.assign(new Error('Gecersiz veya suresi dolmus medya baglantisi.'), {
+      statusCode: 403
+    });
+  }
+  return {
+    objectKey: cleanKey,
+    fullPath: localFilePathForObjectKey(cleanKey)
+  };
 }
 
 export function normalizeSignedUrlTtlSeconds(value, fallback = 3600) {
@@ -148,7 +240,38 @@ async function uploadLocalFileToRailway({ bucket, localPath, storagePath, conten
   };
 }
 
+async function writeBufferToLocal({ bucket, storagePath, buffer }) {
+  requireLocalMedia();
+  const objectKey = localObjectKeyFor(bucket, storagePath);
+  const fullPath = localFilePathForObjectKey(objectKey);
+  const body = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  await fs.mkdir(path.dirname(fullPath), { recursive: true });
+  const temporaryPath = `${fullPath}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(temporaryPath, body, { mode: 0o640 });
+  await fs.rename(temporaryPath, fullPath);
+  const stat = await fs.stat(fullPath);
+  if (stat.size !== body.length) {
+    throw new Error(`Yerel medya yazma dogrulamasi basarisiz: ${objectKey}`);
+  }
+  return {
+    bucket,
+    storagePath: localStoragePathFor(objectKey),
+    publicUrl: null
+  };
+}
+
+async function uploadLocalFileToLocal({ bucket, localPath, storagePath }) {
+  return writeBufferToLocal({
+    bucket,
+    storagePath,
+    buffer: await fs.readFile(localPath)
+  });
+}
+
 export async function uploadLocalFile(options) {
+  if (mediaStorageProvider === 'local') {
+    return uploadLocalFileToLocal(options);
+  }
   if (mediaStorageProvider === 'railway') {
     return uploadLocalFileToRailway(options);
   }
@@ -156,6 +279,13 @@ export async function uploadLocalFile(options) {
 }
 
 export async function uploadDataUrl(options) {
+  if (mediaStorageProvider === 'local') {
+    return writeBufferToLocal({
+      bucket: options.bucket,
+      storagePath: options.storagePath,
+      buffer: dataUrlToBuffer(options.dataUrl)
+    });
+  }
   if (mediaStorageProvider === 'railway') {
     return uploadBufferToRailway({
       bucket: options.bucket,
@@ -172,6 +302,22 @@ export async function createStorageSignedUrl({
   storagePath,
   expiresInSeconds = 3600
 }) {
+  if (isLocalStoragePath(storagePath)) {
+    requireLocalMedia();
+    const ttlSeconds = normalizeSignedUrlTtlSeconds(expiresInSeconds);
+    const objectKey = localObjectKeyFor(bucket, storagePath);
+    const expiresAtUnix = Math.floor(Date.now() / 1000) + ttlSeconds;
+    const signature = createLocalMediaSignature(objectKey, expiresAtUnix);
+    const encodedPath = objectKey
+      .split('/')
+      .map((part) => encodeURIComponent(part))
+      .join('/');
+    return {
+      signedUrl: `${localPublicBaseUrl}/media/${encodedPath}?expires=${expiresAtUnix}&signature=${signature}`,
+      expiresInSeconds: ttlSeconds,
+      expiresAt: new Date(expiresAtUnix * 1000).toISOString()
+    };
+  }
   if (!isRailwayStoragePath(storagePath)) {
     return createSupabaseStorageSignedUrl({ bucket, storagePath, expiresInSeconds });
   }
