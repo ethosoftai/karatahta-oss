@@ -223,6 +223,7 @@ CORS_ORIGIN=https://karatahta.ethosoft.org,http://localhost:3001,http://127.0.0.
 | `GEMINI_REQUEST_TIMEOUT_MS` | Kara görsel istek timeout'u; varsayılan `45000` |
 | `KARA_LIVE_MODEL` | Kara canlı sesli sohbet modeli; varsayılan `gemini-live-2.5-flash-preview-native-audio-09-2025` (`GEMINI_API_KEY` gerekir) |
 | `KARA_LIVE_ENABLED` | `/api/kara-live`'ı acar; varsayilan `false` (maliyet nedeniyle kapali, `GEMINI_API_KEY` diger Kara ozelliklerinde kullanilmaya devam eder) |
+| `LESSON_PREPROCESSOR_TIMEOUT_MS` | Ders on-isleme (soru foto transkripti + baslik/sure/temiz-prompt analizi, "json-deepseek") icin sert zaman siniri; varsayilan `5000`. Asilirsa yerel ozete (fallback) dusulur |
 
 `GEMINI_API_KEY` tanımlıysa `/api/kara-live` WebSocket endpoint'i açılır: tarayıcı
 mikrofon sesini canlı olarak Gemini Live API'ye aktarır, model sesli yanıt üretir.

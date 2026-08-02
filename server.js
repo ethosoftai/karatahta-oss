@@ -14,6 +14,12 @@ import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { extractFrameAtTime } from './services/frameExtractor.js';
 import { extractManimErrorSummary } from './services/manimErrorSummary.js';
+import {
+  buildLessonAnalysisPrompt,
+  buildQuestionImageTranscriptionPrompt,
+  fallbackLessonAnalysis,
+  parseLessonAnalysis
+} from './services/lessonPreprocessor.js';
 import { createDriveFolder, refreshGoogleAccessToken, uploadFileToDrive } from './services/googleDrive.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
 import { buildKaraLiveSystemInstruction, createKaraLiveSession, DEFAULT_KARA_LIVE_MODEL } from './services/karaLiveSession.js';
@@ -206,6 +212,7 @@ const karaVisionTimeoutMs = Math.max(
   Number(process.env.GEMINI_REQUEST_TIMEOUT_MS || 45000)
 );
 const karaVisionEnabled = Boolean(geminiApiKey && karaVisionModels.length);
+const lessonPreprocessorTimeoutMs = Math.max(1000, Number(process.env.LESSON_PREPROCESSOR_TIMEOUT_MS || 5000));
 const karaLiveModel = String(process.env.KARA_LIVE_MODEL || DEFAULT_KARA_LIVE_MODEL).trim();
 const karaLiveFeatureFlag = String(process.env.KARA_LIVE_ENABLED || 'false').toLowerCase() === 'true';
 const karaLiveEnabled = Boolean(geminiApiKey) && karaLiveFeatureFlag;
@@ -780,33 +787,136 @@ function normalizeImagePayload(image) {
   return { mimeType, data };
 }
 
-async function createQuestionSolutionPlan({ image, studentLevel = 'beginner', note = '' }) {
-  normalizeImagePayload(image);
-  const questionText = String(note || '').trim();
-  if (!questionText) {
-    const error = new Error('deepseek-v4-flash gorsel girdiyi desteklemiyor. Soruyu Ek not alanina metin olarak yazin.');
+async function transcribeQuestionImage(image) {
+  if (!karaVisionEnabled) {
+    const error = new Error('Soru fotografi okumak icin GEMINI_API_KEY tanimli degil. Soruyu metin olarak yazin.');
     error.statusCode = 422;
     throw error;
   }
+  const frame = normalizeImagePayload(image);
+  const result = await generateKaraVisionAnswerWithFallback({
+    apiKey: geminiApiKey,
+    models: karaVisionModels,
+    prompt: buildQuestionImageTranscriptionPrompt(),
+    frame,
+    timeoutMs: lessonPreprocessorTimeoutMs
+  });
+  return String(result.answer || '').trim();
+}
+
+async function analyzeLessonRequestWithDeepSeek({ rawText, mode, studentLevel, imageTranscript }) {
+  const { systemInstruction, userText } = buildLessonAnalysisPrompt({
+    rawText,
+    mode,
+    studentLevel,
+    imageTranscript
+  });
+  const responseText = await generateLlmText({
+    label: 'DeepSeek on-isleme',
+    model: planModel,
+    systemInstruction,
+    userText,
+    json: true,
+    temperature: 0.3,
+    thinkingEnabled: false
+  });
+  return parseLessonAnalysis(responseText, { mode, rawText, imageTranscript });
+}
+
+// The "json-deepseek" preprocessing step: decides a title, a cleaned-up
+// version of the request, and (mode-dependent) a target length, in a
+// single bounded window. Never lets a slow/failed Gemini or DeepSeek call
+// block lesson generation -- past lessonPreprocessorTimeoutMs (default
+// 5s) it falls back to a locally-derived result instead of waiting.
+async function preprocessLessonRequest({ image = null, rawText = '', mode = 'topic', studentLevel = 'beginner' }) {
+  const trimmedRawText = String(rawText || '').trim();
+  if (!trimmedRawText && !image) {
+    const error = new Error('Soru veya konu metni bos olamaz.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const work = (async () => {
+    let imageTranscript = '';
+    if (image) {
+      try {
+        imageTranscript = await transcribeQuestionImage(image);
+      } catch (error) {
+        logInfo('Soru fotografi okunamadi, mevcut metinle devam ediliyor', { error: error.message });
+      }
+    }
+    if (!trimmedRawText && !imageTranscript) {
+      const error = new Error('Soru fotografi okunamadi ve metin de verilmedi. Soruyu metin olarak da yazin.');
+      error.statusCode = 422;
+      throw error;
+    }
+    const analysis = await analyzeLessonRequestWithDeepSeek({
+      rawText: trimmedRawText,
+      mode,
+      studentLevel,
+      imageTranscript
+    });
+    return { ...analysis, imageTranscript };
+  })();
+
+  let timeoutHandle;
+  const timeout = new Promise((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      logInfo('Ders on-isleme zaman asimina ugradi, yerel ozete dusuluyor', { mode, timeoutMs: lessonPreprocessorTimeoutMs });
+      resolve({ ...fallbackLessonAnalysis({ rawText: trimmedRawText, mode }), imageTranscript: '' });
+    }, lessonPreprocessorTimeoutMs);
+  });
+
+  try {
+    return await Promise.race([work, timeout]);
+  } catch (error) {
+    // A 4xx here means the request itself was unusable (no text, image
+    // unreadable) -- surface it instead of masking it with a fallback that
+    // would just fail confusingly further down the pipeline.
+    if (error.statusCode && error.statusCode < 500) {
+      throw error;
+    }
+    logInfo('Ders on-isleme basarisiz oldu, yerel ozete dusuluyor', { mode, error: error.message });
+    return { ...fallbackLessonAnalysis({ rawText: trimmedRawText, mode }), imageTranscript: '' };
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+async function createQuestionSolutionPlan({
+  studentLevel = 'beginner',
+  questionText,
+  targetMinutes = 1,
+  segmentCount = 1
+}) {
+  const cleanQuestionText = String(questionText || '').trim();
+  if (!cleanQuestionText) {
+    const error = new Error('Soru metni bos olamaz.');
+    error.statusCode = 422;
+    throw error;
+  }
+  const durationBudget = segmentDurationBudget(targetMinutes, segmentCount);
+  const segmentIds = Array.from({ length: segmentCount }, (_, index) => `s${index + 1}`);
   const prompt = `Bir ogrencinin cozemedigi soru asagida metin olarak veriliyor.
 
-Gorev: Soru metnini cozumle ve mevcut Manim video pipeline'ina uygun 1 dakikalik Turkce cozum videosu plani uret.
+Gorev: Soru metnini cozumle ve mevcut Manim video pipeline'ina uygun, yaklasik ${targetMinutes} dakikalik Turkce cozum videosu plani uret.
 
 ZORUNLU KURALLAR:
 - Sadece gecerli JSON dondur. Markdown yazma.
-- Video yaklasik 1 dakika olsun.
-- segments dizisi tam olarak 1 segment icersin.
-- Segment id degeri "s1" olsun.
+- Video yaklasik ${targetMinutes} dakika olsun.
+- segments dizisi tam olarak ${segmentCount} segment icersin (id degerleri sirasiyla ${segmentIds.join(', ')}).
+- Her segment ${durationBudget.minSeconds}-${durationBudget.maxSeconds} saniye araliginda olsun, ortalama ${durationBudget.averageSeconds} saniyeyi hedeflesin.
 - Anlatim ogrenciye dogrudan yardim eden, adim adim cozum diliyle olsun.
 - Soru metni eksikse bunu belirtip verilen kisimdan makul cozum stratejisi anlat.
 - Cevabi sadece soyleme; hangi ipucunun neden kullanildigini acikla.
 - Manim icin animation.description ve sequence alanlari ayrintili olsun.
 - Ekranda soru metninin tamamini basma; gerekli verilenleri, islem adimlarini ve sonucu goster.
+- Birden fazla segment varsa, sonraki segment onceki adimin dogal devami olsun; tekrar selamlama veya konuyu yeniden tanitma yapma.
 
 JSON sekli:
 {
   "topic": "Sorunun kisa adi",
-  "estimated_duration_minutes": 1,
+  "estimated_duration_minutes": ${targetMinutes},
   "core_insight": "cozumun ana fikri",
   "hook": { "question": "Bu soruda ne isteniyor?" },
   "analogy": { "everyday_scenario": "kisa sezgisel benzetme" },
@@ -817,9 +927,9 @@ JSON sekli:
     {
       "id": "s1",
       "title": "Adim adim cozum",
-      "duration_seconds": 60,
+      "duration_seconds": ${durationBudget.averageSeconds},
       "learning_objective": "Bu soruyu cozerken kullanilacak ana fikir",
-      "narration": "60 saniyelik dogal Turkce cozum anlatimi",
+      "narration": "${durationBudget.averageSeconds} saniyelik dogal Turkce cozum anlatimi",
       "animation": {
         "type": "worked_example",
         "description": "Tahtada gosterilecek cozum akisi",
@@ -830,9 +940,9 @@ JSON sekli:
 }
 
 Ogrenci seviyesi: ${studentLevel}
-Soru metni: ${questionText}`;
+Soru metni: ${cleanQuestionText}`;
 
-  logInfo('Soru metni icin DeepSeek cozum plani basladi', { model: planModel });
+  logInfo('Soru metni icin DeepSeek cozum plani basladi', { model: planModel, targetMinutes, segmentCount });
   const started = Date.now();
   const responseText = await generateLlmText({
     label: 'DeepSeek soru cozumu',
@@ -3101,12 +3211,23 @@ async function buildTraditionalPlannerRequest(body) {
     error.statusCode = 400;
     throw error;
   }
+  const studentLevel = body.student_level || 'beginner';
+  const preprocessed = await preprocessLessonRequest({
+    rawText: topic,
+    mode: 'topic',
+    studentLevel
+  });
+  const durationTouched = Boolean(body.duration_touched);
 
   const input = {
-    topic,
-    student_level: body.student_level || 'beginner',
-    target_video_minutes: Number(body.target_video_minutes || targetVideoMinutes),
-    target_segment_count: Number(body.target_segment_count || targetSegmentCount),
+    topic: preprocessed.clean_prompt || topic,
+    student_level: studentLevel,
+    target_video_minutes: durationTouched
+      ? Number(body.target_video_minutes || targetVideoMinutes)
+      : preprocessed.target_duration_minutes,
+    target_segment_count: durationTouched
+      ? Number(body.target_segment_count || targetSegmentCount)
+      : preprocessed.target_segment_count,
     lesson_style: 'full_explainer_with_examples',
     prior_knowledge: Array.isArray(body.prior_knowledge)
       ? body.prior_knowledge
@@ -3158,6 +3279,7 @@ ZORUNLU:
 
   return {
     topic,
+    title: preprocessed.title,
     input,
     targetMinutes,
     segmentCount,
@@ -3168,6 +3290,7 @@ ZORUNLU:
 async function createTraditionalLessonPlan(body, userContext) {
   const {
     topic,
+    title,
     input,
     targetMinutes,
     segmentCount,
@@ -3192,7 +3315,7 @@ async function createTraditionalLessonPlan(body, userContext) {
   const lesson = await persistRequired('lesson/plan', async () => {
     const createdLesson = await createLesson({
       userId: userContext.profileId,
-      title: plan.topic || topic,
+      title: title || plan.topic || topic,
       topic,
       studentLevel: input.student_level,
       targetMinutes,
@@ -3338,6 +3461,7 @@ Beklenen sekil:
 async function startStreamingTraditionalLessonPlan(body, userContext) {
   const {
     topic,
+    title,
     input,
     targetMinutes,
     segmentCount
@@ -3351,7 +3475,7 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
   const route = buildIncrementalLessonRoute(segmentCount);
   const lesson = await persistRequired('lesson/streaming-plan-create', () => createLesson({
     userId: userContext.profileId,
-    title: topic,
+    title: title || topic,
     topic,
     studentLevel: input.student_level,
     targetMinutes,
@@ -3408,7 +3532,7 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
           throw new Error('Video isi sonlandigi icin plan uretimi iptal edildi.');
         }
         const result = await createIncrementalLessonSegment({
-          topic,
+          topic: input.topic,
           input,
           index,
           segmentCount,
@@ -3498,19 +3622,27 @@ app.post('/api/plan', async (req, res, next) => {
 app.post('/api/question-plan', async (req, res, next) => {
   try {
     const userContext = await resolveRequestUser(req);
+    const studentLevel = req.body.student_level || 'beginner';
+    const preprocessed = await preprocessLessonRequest({
+      image: req.body.image || null,
+      rawText: req.body.note || '',
+      mode: 'question',
+      studentLevel
+    });
     const plan = await createQuestionSolutionPlan({
-      image: req.body.image,
-      studentLevel: req.body.student_level || 'beginner',
-      note: req.body.note || ''
+      studentLevel,
+      questionText: preprocessed.clean_prompt,
+      targetMinutes: preprocessed.target_duration_minutes,
+      segmentCount: preprocessed.target_segment_count
     });
     const lesson = await persistRequired('lesson/question-plan', async () => {
       const createdLesson = await createLesson({
         userId: userContext.profileId,
-        title: plan.topic || 'Soru cozum videosu',
-        topic: req.body.note || plan.topic || 'Soru cozum videosu',
-        studentLevel: req.body.student_level || 'beginner',
-        targetMinutes: 1,
-        targetSegmentCount: 1,
+        title: preprocessed.title || plan.topic || 'Soru cozum videosu',
+        topic: preprocessed.clean_prompt || req.body.note || plan.topic || 'Soru cozum videosu',
+        studentLevel,
+        targetMinutes: preprocessed.target_duration_minutes,
+        targetSegmentCount: preprocessed.target_segment_count,
         sourceType: 'question_image'
       });
       await savePlan({
@@ -3542,7 +3674,7 @@ app.post('/api/question-plan', async (req, res, next) => {
           type: 'question_image',
           mimeType,
           storagePath: upload.storagePath,
-          metadata: { note: req.body.note || null }
+          metadata: { note: req.body.note || null, image_transcript: preprocessed.imageTranscript || null }
         });
       }
       return createdLesson;
@@ -3550,7 +3682,7 @@ app.post('/api/question-plan', async (req, res, next) => {
     if (lesson?.id) {
       plan._lesson_id = lesson.id;
     }
-    res.json({ plan, lessonId: lesson?.id || null });
+    res.json({ plan, lessonId: lesson?.id || null, title: preprocessed.title });
   } catch (error) {
     next(error);
   }
