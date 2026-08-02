@@ -282,6 +282,7 @@ Yeni Supabase projesinde SQL Editor'da sırayla:
 1. `migrations/001_kara_memory.sql`
 2. `migrations/002_auth_profiles.sql`
 3. `migrations/003_security_and_storage.sql`
+4. `migrations/004_lesson_detail_indexes.sql`
 
 çalıştırılmalıdır. Alternatif: `SUPABASE_DB_URL` tanımlayıp
 `npm run supabase:schema`.
