@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { extractFrameAtTime } from './services/frameExtractor.js';
 import { extractManimErrorSummary } from './services/manimErrorSummary.js';
+import { EDGE_TTS_VOICE_OPTIONS, parseTtsOptions } from './services/ttsOptions.js';
 import {
   buildLessonAnalysisPrompt,
   buildQuestionImageTranscriptionPrompt,
@@ -60,6 +61,7 @@ import {
   saveOAuthRefreshToken,
   createGenerationJob,
   createLesson,
+  deleteLesson,
   extensionFromContentType,
   fileNameFromLocalPath,
   getProfileForAccessToken,
@@ -91,6 +93,7 @@ import {
 } from './services/supabaseStore.js';
 import {
   createStorageSignedUrl,
+  deleteLessonStorage,
   localMediaConfigured,
   mediaStorageProvider,
   railwayMediaConfigured,
@@ -1409,13 +1412,13 @@ async function normalizeProgressivePartial({
   return probeVideo(outputPath);
 }
 
-async function prepareProgressiveAudio({ inputPath, outputPath }) {
+async function prepareProgressiveAudio({ inputPath, outputPath, speechVolumeOverride }) {
   if (existsSync(outputPath)) return;
   const inputDuration = await getMediaDurationSeconds(inputPath);
   const args = buildProgressiveAudioArgs({
     inputPath,
     outputPath,
-    volume: speechVolume,
+    volume: Number.isFinite(speechVolumeOverride) ? speechVolumeOverride : speechVolume,
     durationSeconds: inputDuration + 30
   });
   const result = await runCommand('ffmpeg', args, { timeoutMs: 60000 });
@@ -1463,7 +1466,9 @@ function ffmpegSeconds(value) {
   return Math.max(0, Number(value) || 0).toFixed(3);
 }
 
-async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
+async function muxAudio(videoPath, audioPath, outputPath, speechText = '', ttsOptions = null) {
+  const effectiveSpeechVolume = Number.isFinite(ttsOptions?.speechVolume) ? ttsOptions.speechVolume : speechVolume;
+  const effectiveMusicVolume = Number.isFinite(ttsOptions?.musicVolume) ? ttsOptions.musicVolume : musicVolume;
   const videoDuration = await getMediaDurationSeconds(videoPath);
   const speechDuration = audioPath ? await getMediaDurationSeconds(audioPath) : null;
   const targetDuration = speechDuration || videoDuration;
@@ -1484,7 +1489,7 @@ async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
         outputPath: speechMuxPath,
         videoDuration,
         audioDuration: speechDuration,
-        volume: speechVolume
+        volume: effectiveSpeechVolume
       }),
       { timeoutMs: 180000 }
     );
@@ -1504,7 +1509,7 @@ async function muxAudio(videoPath, audioPath, outputPath, speechText = '') {
     const fadeOutStart = Math.max(0, targetDuration - fadeDuration);
     const mixedPath = speechText ? `${outputPath}.mixed.mp4` : outputPath;
     const filters = [
-      `[1:a]volume=${musicVolume},atrim=0:${ffmpegSeconds(targetDuration)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${ffmpegSeconds(fadeDuration)},afade=t=out:st=${ffmpegSeconds(fadeOutStart)}:d=${ffmpegSeconds(fadeDuration)}[bg]`
+      `[1:a]volume=${effectiveMusicVolume},atrim=0:${ffmpegSeconds(targetDuration)},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=${ffmpegSeconds(fadeDuration)},afade=t=out:st=${ffmpegSeconds(fadeOutStart)}:d=${ffmpegSeconds(fadeDuration)}[bg]`
     ];
 
     if (audioPath) {
@@ -1743,7 +1748,7 @@ async function resizeSpeechScript({ segment, speech, actualDurationSeconds, dura
   return resized;
 }
 
-async function synthesizeSpeech(text, segmentId) {
+async function synthesizeSpeech(text, segmentId, ttsOptions = null) {
   const cleanText = String(text || '').trim();
   if (!cleanText) {
     const error = new Error('TTS metni bos olamaz.');
@@ -1757,11 +1762,12 @@ async function synthesizeSpeech(text, segmentId) {
   await fs.mkdir(audioDir, { recursive: true });
 
   if (ttsProvider === 'edge') {
-    logInfo(`${segmentId}: Edge TTS basladi`, { voice: edgeTtsVoice });
+    const effectiveVoice = ttsOptions?.voice || edgeTtsVoice;
+    logInfo(`${segmentId}: Edge TTS basladi`, { voice: effectiveVoice });
     await withRetry('Edge TTS', () => synthesizeWithEdgeTts({
       text: cleanText,
       outputPath: filePath,
-      voice: edgeTtsVoice,
+      voice: effectiveVoice,
       rate: edgeTtsRate
     }));
     const durationSeconds = await getMediaDurationSeconds(filePath);
@@ -1771,7 +1777,7 @@ async function synthesizeSpeech(text, segmentId) {
       audioUrl: createLocalMediaUrl(relativeAudio),
       audioRelativePath: relativeAudio,
       durationSeconds,
-      voiceName: edgeTtsVoice,
+      voiceName: effectiveVoice,
       voiceId: null,
       usedFallback: false
     };
@@ -2013,7 +2019,8 @@ async function renderManimVideo({
   segmentId,
   audioRelativePath,
   speechText = '',
-  progressiveContext = null
+  progressiveContext = null,
+  ttsOptions = null
 }) {
   logInfo(`${segmentId}: Manim render hazirlaniyor`, { quality: manimQuality });
   let currentCode = sanitizeManimForLocalRender(stripCodeFence(String(code || '')));
@@ -2069,7 +2076,8 @@ async function renderManimVideo({
       await fs.mkdir(progressiveDir, { recursive: true });
       await prepareProgressiveAudio({
         inputPath: audioPath,
-        outputPath: progressiveAudioPath
+        outputPath: progressiveAudioPath,
+        speechVolumeOverride: ttsOptions?.speechVolume
       });
       partialCollector = new ManimPartialCollector({
         mediaDir,
@@ -2327,7 +2335,7 @@ async function renderManimVideo({
   }
   if (!muxResult) {
     logInfo(`${safeSegmentId}: ses ve muzik birlestiriliyor`);
-    muxResult = await muxAudio(finalVideoPath, audioPath, withAudioPath, speechText);
+    muxResult = await muxAudio(finalVideoPath, audioPath, withAudioPath, speechText, ttsOptions);
     if (muxResult) {
       finalVideoPath = withAudioPath;
     }
@@ -2527,7 +2535,7 @@ async function runFullVideoJob(job) {
         });
         let tts = await limitTts(() => {
           ensureJobActive();
-          return synthesizeSpeech(speech.speech_text, segment.id);
+          return synthesizeSpeech(speech.speech_text, segment.id, job.ttsOptions);
         });
         job._artifactPaths.add(resolveRenderRelative(tts.audioRelativePath));
         const durationBudget = speechDurationBudget(segment.duration_seconds);
@@ -2564,7 +2572,7 @@ async function runFullVideoJob(job) {
           }
           tts = await limitTts(() => {
             ensureJobActive();
-            return synthesizeSpeech(speech.speech_text, segment.id);
+            return synthesizeSpeech(speech.speech_text, segment.id, job.ttsOptions);
           });
           job._artifactPaths.add(resolveRenderRelative(tts.audioRelativePath));
         }
@@ -2747,7 +2755,8 @@ async function runFullVideoJob(job) {
         speechText: prepared.speech.speech_text,
         progressiveContext: job.progressive.enabled && job.progressive.status !== 'failed'
           ? { job, segmentIndex: index }
-          : null
+          : null,
+        ttsOptions: job.ttsOptions
       }));
       if (index === 0) {
         job.timings.firstSegmentCompletedAt ||= new Date().toISOString();
@@ -2936,6 +2945,7 @@ app.get('/api/config', async (_req, res, next) => {
       ttsProvider: ttsProvider === 'edge' ? 'Edge TTS' : 'Google Cloud',
       ttsVoice: ttsProvider === 'edge' ? edgeTtsVoice : googleTtsVoice,
       ttsVoiceId: null,
+      ttsVoiceOptions: ttsProvider === 'edge' ? EDGE_TTS_VOICE_OPTIONS : [],
       manimFont,
       manimQuality,
       streamingPlanFirstSegmentEnabled,
@@ -3219,6 +3229,25 @@ app.get('/api/lessons/:id/video-url', async (req, res, next) => {
       expiresInSeconds: videoAccess.videoUrlExpiresInSeconds,
       expiresAt: videoAccess.videoUrlExpiresAt
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/lessons/:id', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const lessonId = req.params.id;
+    await requireOwnedLesson(lessonId, userContext);
+    const storageResult = await deleteLessonStorage({ userId: userContext.profileId, lessonId });
+    if (storageResult.errors.length) {
+      logInfo('Ders medyasi kismen silinemedi, kayit yine de siliniyor', {
+        lessonId,
+        errors: storageResult.errors
+      });
+    }
+    await persistRequired('lesson/delete', () => deleteLesson({ lessonId, userId: userContext.profileId }));
+    res.json({ ok: true, lessonId });
   } catch (error) {
     next(error);
   }
@@ -3830,7 +3859,7 @@ app.post('/api/speech-script', async (req, res, next) => {
 app.post('/api/tts', async (req, res, next) => {
   try {
     await resolveRequestUser(req);
-    const tts = await synthesizeSpeech(req.body.text, req.body.segment_id);
+    const tts = await synthesizeSpeech(req.body.text, req.body.segment_id, parseTtsOptions(req.body));
     res.json(tts);
   } catch (error) {
     next(error);
@@ -3881,6 +3910,7 @@ async function queueTraditionalVideoJob({
   plan,
   lessonId,
   userContext,
+  ttsOptions = null,
   requestTimings = {},
   fullPlanPromise = null,
   segmentPromises = null,
@@ -3919,6 +3949,7 @@ async function queueTraditionalVideoJob({
     })),
     result: null,
     error: null,
+    ttsOptions,
     startedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     completedAt: null,
@@ -3977,6 +4008,7 @@ app.post('/api/generate-lesson', async (req, res, next) => {
         plan: streamingPlan.initialPlan,
         lessonId: streamingPlan.lessonId,
         userContext,
+        ttsOptions: parseTtsOptions(req.body),
         fullPlanPromise: streamingPlan.fullPlanPromise,
         segmentPromises: streamingPlan.segmentPromises,
         planControl: streamingPlan.planControl,
@@ -3998,6 +4030,7 @@ app.post('/api/generate-lesson', async (req, res, next) => {
       plan,
       lessonId,
       userContext,
+      ttsOptions: parseTtsOptions(req.body),
       requestTimings: { promptReceivedAt, planReadyAt }
     });
     res.status(202).json({
@@ -4018,7 +4051,8 @@ app.post('/api/full-video', async (req, res, next) => {
     const job = await queueTraditionalVideoJob({
       plan,
       lessonId,
-      userContext
+      userContext,
+      ttsOptions: parseTtsOptions(req.body)
     });
     res.status(202).json(publicJob(job));
   } catch (error) {

@@ -1,7 +1,9 @@
 import {
+  DeleteObjectsCommand,
   GetObjectCommand,
   GetBucketCorsCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutBucketCorsCommand,
   PutObjectCommand,
   S3Client
@@ -13,10 +15,16 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   createStorageSignedUrl as createSupabaseStorageSignedUrl,
+  deleteStorageByPrefix as deleteSupabaseStorageByPrefix,
   storagePathFor,
   uploadDataUrl as uploadSupabaseDataUrl,
   uploadLocalFile as uploadSupabaseLocalFile
 } from './supabaseStore.js';
+
+// Every lesson's media lives under this relative path within each of these
+// buckets (see storagePathFor) -- deleting a lesson removes everything
+// under the prefix in whichever backend is actually configured.
+const LESSON_MEDIA_BUCKETS = ['videos', 'audio', 'attachments'];
 
 const configuredProvider = String(process.env.MEDIA_STORAGE_PROVIDER || 'supabase')
   .trim()
@@ -295,6 +303,61 @@ export async function uploadDataUrl(options) {
     });
   }
   return uploadSupabaseDataUrl(options);
+}
+
+async function deleteLocalPrefix(bucket, prefix) {
+  requireLocalMedia();
+  const objectKey = localObjectKeyFor(bucket, prefix);
+  const fullPath = localFilePathForObjectKey(objectKey);
+  await fs.rm(fullPath, { recursive: true, force: true });
+}
+
+async function deleteRailwayPrefix(bucket, prefix) {
+  const client = requireRailwayMedia();
+  const objectPrefix = railwayObjectKeyFor(bucket, prefix);
+  let continuationToken;
+  do {
+    const listResult = await client.send(new ListObjectsV2Command({
+      Bucket: railwayBucket,
+      Prefix: objectPrefix,
+      ContinuationToken: continuationToken
+    }));
+    const objects = (listResult.Contents || [])
+      .map((item) => ({ Key: item.Key }))
+      .filter((item) => item.Key);
+    if (objects.length) {
+      await client.send(new DeleteObjectsCommand({
+        Bucket: railwayBucket,
+        Delete: { Objects: objects }
+      }));
+    }
+    continuationToken = listResult.IsTruncated ? listResult.NextContinuationToken : undefined;
+  } while (continuationToken);
+}
+
+// Best-effort: removes a lesson's rendered videos/audio/attachments from
+// whichever media backend is configured. Failures here are per-bucket and
+// collected rather than thrown, so a partial storage cleanup never blocks
+// deleting the lesson's database row (the row is the source of truth for
+// what the user sees; leftover orphan files are a disk-usage concern, not
+// a correctness one).
+export async function deleteLessonStorage({ userId, lessonId }) {
+  const prefix = `${cleanObjectPath(`users/${userId}`)}/lessons/${cleanObjectPath(lessonId)}`;
+  const errors = [];
+  for (const bucket of LESSON_MEDIA_BUCKETS) {
+    try {
+      if (mediaStorageProvider === 'local') {
+        await deleteLocalPrefix(bucket, prefix);
+      } else if (mediaStorageProvider === 'railway') {
+        await deleteRailwayPrefix(bucket, prefix);
+      } else {
+        await deleteSupabaseStorageByPrefix(bucket, prefix);
+      }
+    } catch (error) {
+      errors.push(`${bucket}: ${error.message}`);
+    }
+  }
+  return { errors };
 }
 
 export async function createStorageSignedUrl({

@@ -413,6 +413,18 @@ export async function getLessonForUser({ lessonId, userId }) {
   return data;
 }
 
+export async function deleteLesson({ lessonId, userId }) {
+  if (!lessonId || !userId) return false;
+  const client = requireSupabase();
+  const { error, count } = await client
+    .from('lessons')
+    .delete({ count: 'exact' })
+    .eq('id', lessonId)
+    .eq('user_id', userId);
+  if (error) throw error;
+  return Boolean(count);
+}
+
 export async function listLessonsForUser({ userId, limit = 30 }) {
   if (!userId) return [];
   const client = requireSupabase();
@@ -660,6 +672,31 @@ export async function createStorageSignedUrl({
     expiresInSeconds: ttlSeconds,
     expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString()
   };
+}
+
+async function listSupabaseStorageFilesRecursive(bucket, prefix) {
+  const client = requireSupabase();
+  const { data, error } = await client.storage.from(bucket).list(prefix, { limit: 1000 });
+  if (error) throw error;
+  const files = [];
+  for (const entry of data || []) {
+    const entryPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.id === null) {
+      files.push(...await listSupabaseStorageFilesRecursive(bucket, entryPath));
+    } else {
+      files.push(entryPath);
+    }
+  }
+  return files;
+}
+
+export async function deleteStorageByPrefix(bucket, prefix) {
+  const client = requireSupabase();
+  const files = await listSupabaseStorageFilesRecursive(bucket, prefix);
+  if (!files.length) return 0;
+  const { error } = await client.storage.from(bucket).remove(files);
+  if (error) throw error;
+  return files.length;
 }
 
 export function storagePathFor({ userId = devUserId, lessonId, segmentKey, kind, fileName }) {
