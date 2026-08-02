@@ -202,6 +202,8 @@ export async function signInWithPassword({ email, password }) {
 export async function createOAuthSignInUrl({
   provider = 'google',
   redirectTo,
+  scopes,
+  queryParams,
   authClient = supabaseAuth
 }) {
   if (!authClient) {
@@ -216,7 +218,9 @@ export async function createOAuthSignInUrl({
     provider,
     options: {
       skipBrowserRedirect: true,
-      ...(redirectTo ? { redirectTo } : {})
+      ...(redirectTo ? { redirectTo } : {}),
+      ...(scopes ? { scopes } : {}),
+      ...(queryParams ? { queryParams } : {})
     }
   });
   if (error) throw error;
@@ -226,6 +230,36 @@ export async function createOAuthSignInUrl({
     throw oauthError;
   }
   return data.url;
+}
+
+export async function saveOAuthRefreshToken({ userId, provider, refreshToken, scope = null }) {
+  if (!userId || !provider || !refreshToken) {
+    throw new Error('userId, provider ve refreshToken gerekli.');
+  }
+  const client = requireSupabase();
+  const { error } = await client
+    .from('oauth_connections')
+    .upsert({
+      user_id: userId,
+      provider,
+      refresh_token: refreshToken,
+      scope,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'user_id,provider' });
+  if (error) throw error;
+}
+
+export async function getOAuthRefreshToken({ userId, provider }) {
+  if (!userId || !provider) return null;
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('oauth_connections')
+    .select('refresh_token')
+    .eq('user_id', userId)
+    .eq('provider', provider)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.refresh_token || null;
 }
 
 export async function refreshAuthSession(refreshToken) {

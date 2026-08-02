@@ -184,8 +184,21 @@ GitHub'a zorla eklenmemelidir.
 | `AUTH_REQUIRED=true` | Production kullanıcı doğrulaması |
 | `AUTH_REDIRECT_URL` | Supabase confirmation/OAuth/recovery dönüş URL'si |
 | `GOOGLE_OAUTH_ENABLED` | Supabase Google provider hazırsa `true` |
+| `GOOGLE_OAUTH_CLIENT_ID` | Google Drive'a kaydet için Google Cloud OAuth client ID (Supabase'deki ile aynı) |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Aynı OAuth client'ın secret'ı; backend bunu yalnız refresh token'ı Google ile değiştirmek için kullanır |
 | `AUTH_PROFILE_CACHE_TTL_MS` | Auth profil cache süresi |
 | `DEV_USER_ID` | Yalnız `AUTH_REQUIRED=false` local/demo modu |
+
+`GOOGLE_OAUTH_CLIENT_ID` ve `GOOGLE_OAUTH_CLIENT_SECRET` ikisi de tanımlıysa
+(ve `GOOGLE_OAUTH_ENABLED=true` ise) "Drive'a kaydet" özelliği açılır.
+Kullanıcı `GET /api/auth/oauth/google-drive` ile ek `drive.file` scope'u ve
+offline access isteyen ayrı bir Google OAuth turu başlatır; dönen
+`provider_refresh_token` `POST /api/auth/google-drive-token` ile
+`oauth_connections` tablosuna kaydedilir (bu tablo `profiles`'tan ayrı tutulur,
+`GET /api/auth/me` gibi profil dönen endpoint'ler asla refresh token
+içermez). `POST /api/lessons/:id/save-to-drive` bu refresh token'ı Google'ın
+token endpoint'iyle değiştirip dersin final videosunu kullanıcının Drive'ına
+yükler.
 
 Önerilen CORS:
 
@@ -283,6 +296,7 @@ Yeni Supabase projesinde SQL Editor'da sırayla:
 2. `migrations/002_auth_profiles.sql`
 3. `migrations/003_security_and_storage.sql`
 4. `migrations/004_lesson_detail_indexes.sql`
+5. `migrations/005_oauth_connections.sql`
 
 çalıştırılmalıdır. Alternatif: `SUPABASE_DB_URL` tanımlayıp
 `npm run supabase:schema`.
@@ -350,6 +364,9 @@ node scripts/migrate_supabase_media_to_railway.js --delete-source --delete-bucke
 | `GET /api/jobs/:id/partials/:sequence` | Authenticated fMP4 partial |
 | `POST /api/ask-kara` | Timestamp, ders planı ve chat bağlamıyla soru-cevap |
 | `WS /api/kara-live` | Gemini Live API ile canlı sesli sohbet; get_frame/web_search/generate_manim araçları |
+| `GET /api/auth/oauth/google-drive` | drive.file scope + offline access isteyen ek Google OAuth turu başlatır |
+| `POST /api/auth/google-drive-token` | Dönen provider refresh token'ı kaydeder |
+| `POST /api/lessons/:id/save-to-drive` | Ders videosunu kullanıcının Google Drive'ına yükler |
 
 Auth açıkken kullanıcıya ait endpointler Bearer token ister. Job ve lesson
 sahiplik kontrollerini kaldırmayın.

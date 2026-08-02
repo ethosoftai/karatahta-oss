@@ -34,7 +34,8 @@ async function main() {
     '001_kara_memory.sql',
     '002_auth_profiles.sql',
     '003_security_and_storage.sql',
-    '004_lesson_detail_indexes.sql'
+    '004_lesson_detail_indexes.sql',
+    '005_oauth_connections.sql'
   ];
   const client = new Client({
     connectionString: getConnectionString(),

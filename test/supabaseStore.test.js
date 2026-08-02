@@ -55,6 +55,31 @@ test('Google OAuth için sabit sağlayıcı ve güvenli dönüş adresi kullanı
   });
 });
 
+test('Drive baglantisi icin scope ve offline access parametrelerini iletir', async () => {
+  let request;
+  await createOAuthSignInUrl({
+    provider: 'google',
+    redirectTo: 'https://karatahta.ethosoft.org/?auth=drive',
+    scopes: 'https://www.googleapis.com/auth/drive.file',
+    queryParams: { access_type: 'offline', prompt: 'consent' },
+    authClient: {
+      auth: {
+        signInWithOAuth: async (options) => {
+          request = options;
+          return { data: { url: 'https://project.supabase.co/auth/v1/authorize?provider=google' }, error: null };
+        }
+      }
+    }
+  });
+
+  assert.deepEqual(request.options, {
+    skipBrowserRedirect: true,
+    redirectTo: 'https://karatahta.ethosoft.org/?auth=drive',
+    scopes: 'https://www.googleapis.com/auth/drive.file',
+    queryParams: { access_type: 'offline', prompt: 'consent' }
+  });
+});
+
 test('desteklenmeyen OAuth sağlayıcısını reddeder', async () => {
   await assert.rejects(
     createOAuthSignInUrl({

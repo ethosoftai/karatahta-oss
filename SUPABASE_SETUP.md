@@ -31,6 +31,7 @@ Supabase Dashboard içindeki SQL Editor'da aşağıdaki dosyaları sırasıyla
 2. `migrations/002_auth_profiles.sql`
 3. `migrations/003_security_and_storage.sql`
 4. `migrations/004_lesson_detail_indexes.sql`
+5. `migrations/005_oauth_connections.sql`
 
 Üçüncü migration:
 

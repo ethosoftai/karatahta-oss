@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { extractFrameAtTime } from './services/frameExtractor.js';
+import { refreshGoogleAccessToken, uploadFileToDrive } from './services/googleDrive.js';
 import { compactChatHistory, compactLessonPlanContext } from './services/karaContext.js';
 import { buildKaraLiveSystemInstruction, createKaraLiveSession, DEFAULT_KARA_LIVE_MODEL } from './services/karaLiveSession.js';
 import { assertSafeKaraManimCode } from './services/karaManimSafety.js';
@@ -47,6 +48,8 @@ import {
 import {
   appendGenerationEvent,
   createOAuthSignInUrl,
+  getOAuthRefreshToken,
+  saveOAuthRefreshToken,
   createGenerationJob,
   createLesson,
   extensionFromContentType,
@@ -144,6 +147,10 @@ const port = Number(process.env.PORT || 3000);
 const authRequired = String(process.env.AUTH_REQUIRED || 'true').toLowerCase() !== 'false';
 const authRedirectUrl = String(process.env.AUTH_REDIRECT_URL || '').trim();
 const googleOAuthEnabled = String(process.env.GOOGLE_OAUTH_ENABLED || 'false').toLowerCase() === 'true';
+const googleOAuthClientId = String(process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
+const googleOAuthClientSecret = String(process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+const googleDriveScope = 'https://www.googleapis.com/auth/drive.file';
+const googleDriveEnabled = Boolean(googleOAuthEnabled && googleOAuthClientId && googleOAuthClientSecret);
 const signedVideoUrlTtlSeconds = process.env.SUPABASE_SIGNED_URL_TTL_SECONDS || 3600;
 const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
@@ -453,6 +460,17 @@ async function resolveFrameVideoSource(video) {
     return resolveRenderRelative(video.local_video_path);
   }
   return null;
+}
+
+async function readVideoBytes(source) {
+  if (/^https?:\/\//i.test(source)) {
+    const response = await fetch(source);
+    if (!response.ok) {
+      throw new Error(`Ders videosu indirilemedi (${response.status}).`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  }
+  return fs.readFile(source);
 }
 
 app.use((req, res, next) => {
@@ -2769,6 +2787,7 @@ app.get('/api/config', async (_req, res, next) => {
       karaLiveEnabled,
       karaLiveModel: karaLiveEnabled ? karaLiveModel : null,
       karaLiveTools: karaLiveEnabled ? ['get_frame', 'web_search', 'generate_manim'] : [],
+      googleDriveEnabled,
       hasTtsCredentials: ttsProvider === 'edge'
         ? true
         : Boolean(ttsClient),
@@ -2853,6 +2872,86 @@ app.get('/api/auth/oauth/google', async (_req, res, next) => {
       redirectTo: authCallbackUrl('oauth')
     });
     res.json({ url });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/auth/oauth/google-drive', async (_req, res, next) => {
+  try {
+    if (!googleDriveEnabled) {
+      return res.status(503).json({ error: 'Google Drive baglantisi henuz etkin degil.' });
+    }
+    const url = await createOAuthSignInUrl({
+      provider: 'google',
+      redirectTo: authCallbackUrl('drive'),
+      scopes: googleDriveScope,
+      queryParams: { access_type: 'offline', prompt: 'consent' }
+    });
+    res.json({ url });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/google-drive-token', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const refreshToken = String(req.body.refresh_token || '').trim();
+    if (!refreshToken) {
+      return res.status(400).json({ error: 'refresh_token gerekli.' });
+    }
+    await saveOAuthRefreshToken({
+      userId: userContext.profileId,
+      provider: 'google_drive',
+      refreshToken,
+      scope: googleDriveScope
+    });
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/lessons/:id/save-to-drive', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const lessonId = req.params.id;
+    await requireOwnedLesson(lessonId, userContext);
+
+    if (!googleDriveEnabled) {
+      return res.status(503).json({ error: 'Google Drive baglantisi henuz etkin degil.' });
+    }
+    const refreshToken = await getOAuthRefreshToken({ userId: userContext.profileId, provider: 'google_drive' });
+    if (!refreshToken) {
+      return res.status(409).json({ error: 'Google Drive baglantisi kurulmamis.', code: 'drive_not_connected' });
+    }
+
+    const result = await getLessonVideoForUser({ lessonId, userId: userContext.profileId });
+    if (!result?.video?.video_storage_path && !result?.video?.local_video_path) {
+      return res.status(404).json({ error: 'Bu ders icin video kaydi bulunamadi.' });
+    }
+
+    const videoSource = await resolveFrameVideoSource(result.video);
+    if (!videoSource) {
+      return res.status(404).json({ error: 'Bu ders icin video kaydi bulunamadi.' });
+    }
+
+    const { accessToken } = await refreshGoogleAccessToken({
+      clientId: googleOAuthClientId,
+      clientSecret: googleOAuthClientSecret,
+      refreshToken
+    });
+    const fileBuffer = await readVideoBytes(videoSource);
+    const fileName = `${(result.lesson?.title || result.lesson?.topic || 'Kara Tahta Dersi').slice(0, 120)}.mp4`;
+    const upload = await uploadFileToDrive({
+      accessToken,
+      fileBuffer,
+      fileName,
+      mimeType: 'video/mp4'
+    });
+
+    res.json({ ok: true, fileId: upload.fileId, webViewLink: upload.webViewLink });
   } catch (error) {
     next(error);
   }
