@@ -5,6 +5,8 @@ node_modules/
 .venv/
 renders/
 downloads/
+tex-cache/
+manim-tex-cache.cfg
 tmp/
 media/
 __pycache__/

@@ -246,6 +246,8 @@ const ttsClient = googleCredentialsPath
 const publicDir = path.resolve(__dirname, '../frontend/public');
 const rendersDir = path.join(__dirname, 'renders');
 const downloadsDir = path.join(__dirname, 'downloads');
+const manimTexCacheDir = path.join(__dirname, 'tex-cache');
+const manimTexCacheConfigPath = path.join(__dirname, 'manim-tex-cache.cfg');
 const musicExtensions = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac', '.mp4']);
 const fullVideoJobs = new Map();
 const positiveConcurrency = (value, fallback) => {
@@ -1895,6 +1897,23 @@ async function createKaraManimStillCode({ toolArgs, question, lessonTitle }) {
   return code;
 }
 
+// Manim's LaTeX cache (tex_dir) defaults to a subfolder of --media_dir, which
+// we set to a fresh, throwaway directory per render -- so every MathTex/Tex
+// object was being recompiled via latex+dvisvgm from scratch every single
+// time, even though lessons reuse the same handful of symbols constantly.
+// Pointing tex_dir at this persistent, shared directory (independent of the
+// per-render media_dir) lets repeated LaTeX strings hit the cache instead.
+let manimTexCacheReadyPromise = null;
+async function ensureManimTexCacheConfig() {
+  if (!manimTexCacheReadyPromise) {
+    manimTexCacheReadyPromise = (async () => {
+      await fs.mkdir(manimTexCacheDir, { recursive: true });
+      await fs.writeFile(manimTexCacheConfigPath, `[CLI]\ntex_dir = ${manimTexCacheDir}\n`, 'utf8');
+    })();
+  }
+  return manimTexCacheReadyPromise;
+}
+
 async function renderKaraManimStill({ code, renderKey }) {
   let currentCode = assertSafeKaraManimCode(sanitizeManimForLocalRender(code), {
     validateScene: getSceneClassName
@@ -1905,6 +1924,7 @@ async function renderKaraManimStill({ code, renderKey }) {
   const mediaDir = path.join(workDir, 'media');
   await fs.mkdir(workDir, { recursive: true });
 
+  await ensureManimTexCacheConfig();
   let result;
   let className;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1912,7 +1932,7 @@ async function renderKaraManimStill({ code, renderKey }) {
     const filePath = path.join(workDir, `${className}.py`);
     await fs.writeFile(filePath, currentCode, 'utf8');
     result = await runCommand('python', [
-      '-m', 'manim', manimQuality, '-s', '--format', 'png',
+      '-m', 'manim', manimQuality, '-c', manimTexCacheConfigPath, '-s', '--format', 'png',
       filePath, className, '--media_dir', mediaDir
     ], { timeoutMs: 120000 });
     if (result.code === 0) break;
@@ -2027,6 +2047,7 @@ async function renderManimVideo({
   const progressiveStartSequence = progressiveContext?.job?.progressive?.partials?.length || 0;
 
   await fs.mkdir(workDir, { recursive: true });
+  await ensureManimTexCacheConfig();
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     className = getSceneClassName(currentCode);
@@ -2145,7 +2166,7 @@ async function renderManimVideo({
     if (progressiveContext?.job && attempt === 0) {
       progressiveContext.job.timings.manimStartedAt ||= new Date().toISOString();
     }
-    const manimArgs = ['-m', 'manim', manimQuality];
+    const manimArgs = ['-m', 'manim', manimQuality, '-c', manimTexCacheConfigPath];
     if (progressiveContext?.job?.progressive?.enabled) {
       manimArgs.push('--resolution', '1280,720', '--fps', '30');
     }
