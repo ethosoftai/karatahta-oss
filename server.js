@@ -181,6 +181,8 @@ const llmProvider = 'deepseek';
 const defaultDeepSeekModel = 'deepseek-v4-flash';
 const planModel = String(process.env.DEEPSEEK_PLAN_MODEL || process.env.DEEPSEEK_MODEL || defaultDeepSeekModel).trim();
 const codeModel = String(process.env.DEEPSEEK_CODE_MODEL || process.env.DEEPSEEK_MODEL || defaultDeepSeekModel).trim();
+const geminiOpenAiBaseUrl = process.env.GEMINI_OPENAI_BASE_URL
+  || 'https://generativelanguage.googleapis.com/v1beta/openai/';
 const deepseekBaseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
 const deepseekReasoningEffort = process.env.DEEPSEEK_REASONING_EFFORT === 'max' ? 'max' : 'high';
 const deepseekPipelineThinkingEnabled = String(
@@ -224,6 +226,18 @@ const deepseek = deepseekApiKey
   ? new OpenAI({
       apiKey: deepseekApiKey,
       baseURL: deepseekBaseUrl,
+      timeout: deepseekRequestTimeoutMs,
+      maxRetries: 2
+    })
+  : null;
+// Gemini exposes an OpenAI-compatible chat.completions endpoint, so the same
+// OpenAI SDK/call shape used for DeepSeek works here too -- this lets us route
+// just the code model (Manim generation) to Gemini while keeping DeepSeek for
+// lesson planning, based on which provider a given model name belongs to.
+const gemini = geminiApiKey
+  ? new OpenAI({
+      apiKey: geminiApiKey,
+      baseURL: geminiOpenAiBaseUrl,
       timeout: deepseekRequestTimeoutMs,
       maxRetries: 2
     })
@@ -640,6 +654,23 @@ function requireDeepSeek() {
   return deepseek;
 }
 
+// A model name decides which provider handles a request: "gemini-*" models
+// route to Gemini's OpenAI-compatible endpoint, everything else stays on
+// DeepSeek. This lets DEEPSEEK_CODE_MODEL be pointed at a Gemini model (e.g.
+// "gemini-2.5-pro") without touching the planning path or the call sites.
+function resolveLlmClient(model) {
+  const isGemini = /^gemini/i.test(String(model || ''));
+  if (isGemini) {
+    if (!gemini) {
+      const error = new Error('.env icindeki GEMINI_API_KEY bos. Gemini model kullanmak icin once API anahtarini girin.');
+      error.statusCode = 400;
+      throw error;
+    }
+    return { client: gemini, provider: 'gemini' };
+  }
+  return { client: requireDeepSeek(), provider: 'deepseek' };
+}
+
 async function generateLlmText({
   label,
   model,
@@ -651,22 +682,26 @@ async function generateLlmText({
   thinkingEnabled = true
 }) {
   const started = Date.now();
-  logInfo(`${label || llmProvider}: istek basladi`, { provider: llmProvider, model });
-  const client = requireDeepSeek();
+  const { client, provider } = resolveLlmClient(model);
+  logInfo(`${label || provider}: istek basladi`, { provider, model });
   const body = {
     model,
     messages: [
       ...(systemInstruction ? [{ role: 'system', content: systemInstruction }] : []),
       { role: 'user', content: userText }
     ],
-    ...(thinkingEnabled ? { reasoning_effort: deepseekReasoningEffort } : {}),
-    thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
+    ...(provider === 'deepseek'
+      ? {
+          ...(thinkingEnabled ? { reasoning_effort: deepseekReasoningEffort } : {}),
+          thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' }
+        }
+      : {}),
     temperature: Number(temperature),
     stream: false,
     ...(json ? { response_format: { type: 'json_object' } } : {}),
     ...(maxCompletionTokens ? { max_tokens: maxCompletionTokens } : {})
   };
-  const response = await withRetry(label || 'DeepSeek', () => client.chat.completions.create(body));
+  const response = await withRetry(label || provider, () => client.chat.completions.create(body));
   const text = String(response.choices?.[0]?.message?.content || '');
   logInfo(`${label || 'DeepSeek'}: yanit geldi`, { model, ms: Date.now() - started, chars: text.length });
   return text;
@@ -683,17 +718,21 @@ async function generateDeepSeekTextStream({
   onText,
   thinkingEnabled = true
 }) {
-  const client = requireDeepSeek();
+  const { client, provider } = resolveLlmClient(model);
   const started = Date.now();
-  logInfo(`${label}: istek basladi`, { provider: llmProvider, model, streaming: true });
+  logInfo(`${label}: istek basladi`, { provider, model, streaming: true });
   const stream = await withRetry(label, () => client.chat.completions.create({
     model,
     messages: [
       ...(systemInstruction ? [{ role: 'system', content: systemInstruction }] : []),
       { role: 'user', content: userText }
     ],
-    ...(thinkingEnabled ? { reasoning_effort: deepseekReasoningEffort } : {}),
-    thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' },
+    ...(provider === 'deepseek'
+      ? {
+          ...(thinkingEnabled ? { reasoning_effort: deepseekReasoningEffort } : {}),
+          thinking: { type: thinkingEnabled ? 'enabled' : 'disabled' }
+        }
+      : {}),
     temperature: Number(temperature),
     stream: true,
     ...(json ? { response_format: { type: 'json_object' } } : {})
