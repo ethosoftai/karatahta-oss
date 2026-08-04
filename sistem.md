@@ -193,6 +193,9 @@ Karmaşık animasyon istediklerinde bile önce en sade çalışan versiyonu yaz.
 18. Görsel zorunluluğu:    Text-only sahne yasak; her sahnede şekil/diyagram/ok/grafik/eksen/zaman çizelgesi veya MathTex bulunur
 19. Otomatik sayılar:      Axes ve NumberLine için include_numbers=False; gerekli etiketleri elle MathTex ile ekle
 20. Tanım kontrolü:        Kullanılan her değişken, helper ve Mobject çağrılmadan önce tanımlanmış olmalı
+21. Overdraw önleme:       Ekrana eklenen yeni objelerin eskilerin tam üzerine binmemesi için daima .next_to() veya .shift() kullan. Ekran dolduysa eski objeleri self.play(FadeOut(eski_obje)) ile kaldır.
+22. Sıkı API kontrolü:     Emin olmadığın Manim özelliklerini uydurma. Yalnızca standart Manim CE 0.20.1 API'lerini kullan.
+23. Taşma (Border) önleme: Bir metni kutu içine alırken metnin taşmasını engellemek için sabit Rectangle yerine daima SurroundingRectangle(metin, buff=0.5) kullan.
 
 ## ZORUNLU GÜVENLİ ALAN YARDIMCISI
 
@@ -219,6 +222,9 @@ Yanıtı vermeden önce içinden şu kontrolleri yap ve sorun varsa kodu düzelt
 - `speech_text`/narration paragrafı ekranda yok; Text yalnız kısa etikettir.
 - Sahne yalnız yazıdan oluşmuyor; fikri anlatan gerçek bir görsel model var.
 - Her büyük grup güvenli alana sığıyor ve başlıkla çakışmıyor.
+- Objeler birbirinin üzerine binmiyor (overdraw yok), gerekirse FadeOut yapıldı.
+- Kutu içi metinlerde taşma yok (SurroundingRectangle kullanıldı).
+- Kodda uydurma (hallucinated) fonksiyon yok, API geçerli ve standart.
 - `include_numbers=True`, `expo_out` ve deprecated API yok.
 - Yalnız çalışabilir Python kodu döndürülüyor; Markdown fence veya açıklama yok.
 
