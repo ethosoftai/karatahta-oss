@@ -2064,6 +2064,80 @@ async function executeKaraGenerateManim({ toolArgs, userId, lessonId, question, 
   };
 }
 
+// Progressive partials from different segments can finish rendering (and
+// normalizing) out of order once segments render in parallel, but the client
+// streams them by one strictly increasing sequence number and each partial's
+// playback start time is derived from the running total published duration
+// -- so publishing must stay in segment order even though the underlying
+// Manim/ffmpeg work for later segments runs concurrently with earlier ones.
+// Each segment's normalize() step (see renderManimVideo below) produces a
+// "raw" partial with no sequence/startSeconds/id/url yet; those are assigned
+// only once it's actually this segment's turn to publish.
+function drainProgressiveGate(job) {
+  const gate = job._progressiveGate;
+  if (!gate) return;
+  while (job.progressive.status !== 'failed') {
+    const queue = gate.pendingBySegment.get(gate.nextIndex);
+    if (queue && queue.length) {
+      const raw = queue.shift();
+      const sequence = job.progressive.partials.length;
+      const startSeconds = job.progressive.readyDurationSeconds;
+      const finalized = {
+        ...raw,
+        sequence,
+        startSeconds,
+        id: `${job.id}-${sequence}-${raw.checksum.slice(0, 12)}`,
+        url: `/api/jobs/${encodeURIComponent(job.id)}/partials/${sequence}`
+      };
+      if (!appendPartialMetadata(job.progressive, finalized)) continue;
+      job.timings.firstPartialReadyAt ||= finalized.readyAt;
+      if (job.progressive.playbackReadyAt) {
+        job.timings.playbackReadyAt ||= job.progressive.playbackReadyAt;
+      }
+      job.progressive.status = job.progressive.playbackReadyAt ? 'ready' : 'buffering';
+      job.updatedAt = new Date().toISOString();
+      job.eventChannel.emit('job', publicJob(job));
+      logInfo(`Job ${job.id}: progressive partial hazir`, {
+        sequence: finalized.sequence,
+        segmentId: finalized.segmentId,
+        seconds: Number(finalized.durationSeconds).toFixed(2),
+        buffered: Number(job.progressive.readyDurationSeconds).toFixed(2)
+      });
+      continue;
+    }
+    if (gate.doneSegments.has(gate.nextIndex)) {
+      gate.nextIndex += 1;
+      continue;
+    }
+    break;
+  }
+}
+
+function enqueueGatedPartial(job, segmentIndex, rawPartial) {
+  const gate = job._progressiveGate;
+  if (!gate) return;
+  const queue = gate.pendingBySegment.get(segmentIndex) || [];
+  queue.push(rawPartial);
+  gate.pendingBySegment.set(segmentIndex, queue);
+  drainProgressiveGate(job);
+}
+
+// A failed render attempt's partials were normalized but never published
+// (still sitting in the gate's queue), so they're safe to drop before a
+// repair-and-retry regenerates that segment from scratch.
+function discardGatedPartials(job, segmentIndex) {
+  const gate = job._progressiveGate;
+  if (!gate) return;
+  gate.pendingBySegment.set(segmentIndex, []);
+}
+
+function markSegmentProgressiveDone(job, segmentIndex) {
+  const gate = job._progressiveGate;
+  if (!gate) return;
+  gate.doneSegments.add(segmentIndex);
+  drainProgressiveGate(job);
+}
+
 async function renderManimVideo({
   code,
   segmentId,
@@ -2142,13 +2216,18 @@ async function renderManimVideo({
         },
         measureDuration: async (partialPath) => (await probeVideo(partialPath)).durationSeconds,
         batchTargetSeconds: progressiveChunkSeconds,
+        // Segments can normalize partials concurrently now, so nothing here
+        // may read/depend on other segments' progress -- filenames use the
+        // collector's own local segmentSequence (unique within this
+        // segment+attempt's already-unique workDir), and the global
+        // sequence/startSeconds/id/url are assigned later, only once this
+        // partial is actually published (see enqueueGatedPartial below).
         normalize: async (partialPaths, segmentSequence) => {
-          const sequence = progressiveContext.job.progressive.partials.length;
           const sourcePaths = Array.isArray(partialPaths) ? partialPaths : [partialPaths];
           let partialPath = sourcePaths[0];
           if (sourcePaths.length > 1) {
-            const listPath = path.join(progressiveDir, `source-batch-${String(sequence).padStart(5, '0')}.txt`);
-            const groupedPath = path.join(progressiveDir, `source-batch-${String(sequence).padStart(5, '0')}.mp4`);
+            const listPath = path.join(progressiveDir, `source-batch-${String(segmentSequence).padStart(5, '0')}.txt`);
+            const groupedPath = path.join(progressiveDir, `source-batch-${String(segmentSequence).padStart(5, '0')}.mp4`);
             const listContent = sourcePaths
               .map((sourcePath) => `file '${sourcePath.replaceAll("'", "'\\''")}'`)
               .join('\n');
@@ -2167,7 +2246,7 @@ async function renderManimVideo({
             partialPath = groupedPath;
           }
           const probe = await probeVideo(partialPath);
-          const outputPath = path.join(progressiveDir, `partial-${String(sequence).padStart(5, '0')}.mp4`);
+          const outputPath = path.join(progressiveDir, `partial-${String(segmentSequence).padStart(5, '0')}.mp4`);
           const normalizedProbe = await normalizeProgressivePartial({
             sourcePath: partialPath,
             outputPath,
@@ -2175,47 +2254,28 @@ async function renderManimVideo({
             audioStartSeconds: localAudioCursor,
             durationSeconds: probe.durationSeconds
           });
-          const startSeconds = progressiveContext.job.progressive.readyDurationSeconds;
           const checksum = await sha256File(outputPath);
           const codec = `${avcCodecString(normalizedProbe)}, mp4a.40.2`;
           localAudioCursor += normalizedProbe.durationSeconds;
           return {
-            id: `${progressiveContext.job.id}-${sequence}-${checksum.slice(0, 12)}`,
             jobId: progressiveContext.job.id,
             lessonId: progressiveContext.job.lessonId,
             segmentId: safeSegmentId,
             segmentIndex: progressiveContext.segmentIndex,
             segmentSequence,
-            sequence,
-            startSeconds,
             durationSeconds: normalizedProbe.durationSeconds,
             width: normalizedProbe.width,
             height: normalizedProbe.height,
             fps: normalizedProbe.fps,
             codec,
             mimeType: `video/mp4; codecs="${codec}"`,
-            url: `/api/jobs/${encodeURIComponent(progressiveContext.job.id)}/partials/${sequence}`,
             checksum,
             readyAt: new Date().toISOString(),
             _filePath: outputPath
           };
         },
-        onPartial: async (partial) => {
-          const job = progressiveContext.job;
-          if (!appendPartialMetadata(job.progressive, partial)) return;
-          job.timings.firstPartialReadyAt ||= partial.readyAt;
-          if (job.progressive.playbackReadyAt) {
-            job.timings.playbackReadyAt ||= job.progressive.playbackReadyAt;
-          }
-          job.progressive.status = job.progressive.playbackReadyAt ? 'ready' : 'buffering';
-          job.updatedAt = new Date().toISOString();
-          job.eventChannel.emit('job', publicJob(job));
-          logInfo(`Job ${job.id}: progressive partial hazir`, {
-            sequence: partial.sequence,
-            segmentId: partial.segmentId,
-            seconds: Number(partial.durationSeconds).toFixed(2),
-            buffered: Number(job.progressive.readyDurationSeconds).toFixed(2)
-          });
+        onPartial: async (rawPartial) => {
+          enqueueGatedPartial(progressiveContext.job, progressiveContext.segmentIndex, rawPartial);
         }
       });
     }
@@ -2268,6 +2328,12 @@ async function renderManimVideo({
       code: result.code,
       outputTail: renderOutput.slice(-3000)
     });
+    // Whatever this failed attempt normalized was never published (it was
+    // still sitting in the gate's queue), so it's safe to drop before a
+    // repair-and-retry regenerates this segment from scratch.
+    if (progressiveContext?.job) {
+      discardGatedPartials(progressiveContext.job, progressiveContext.segmentIndex);
+    }
     const publishedDuringAttempt = progressiveContext?.job?.progressive?.partials?.some((partial) => (
       partial.sequence >= progressiveStartSequence
       && partial.segmentIndex === progressiveContext.segmentIndex
@@ -2302,6 +2368,13 @@ async function renderManimVideo({
       repairLogs.push(`DeepSeek repair failed: ${repairError.message}`);
       break;
     }
+  }
+
+  // This segment will produce no more progressive partials (render either
+  // succeeded once, or permanently gave up above) -- release its slot in
+  // the gate so later segments' already-buffered partials can publish.
+  if (progressiveContext?.job) {
+    markSegmentProgressiveDone(progressiveContext.job, progressiveContext.segmentIndex);
   }
 
   if (result.code !== 0) {
@@ -2783,85 +2856,119 @@ async function runFullVideoJob(job) {
       scheduleRemaining();
     }
 
-    for (let index = 0; index < job.total; index += 1) {
-      ensureJobActive();
-      const prepared = await schedulePreparation(index);
-      const segmentState = job.segments[index];
-
-      if (!prepared.ok) {
-        throw prepared.error;
+    // Segments render in parallel (bounded by RENDER_CONCURRENCY via
+    // limitRender) instead of strictly one at a time. Nothing about
+    // rendering depends on an earlier segment's *render* finishing -- only
+    // on its *code* (already handled above via codeDeferreds/continuity).
+    // Progressive partial publish order is kept correct separately by the
+    // gate in drainProgressiveGate, regardless of render completion order.
+    const renderTasks = new Array(job.total);
+    const scheduleRenderTask = (index) => {
+      if (renderTasks[index]) {
+        return renderTasks[index];
       }
+      const task = (async () => {
+        ensureJobActive();
+        const prepared = await schedulePreparation(index);
+        const segmentState = job.segments[index];
 
-      segmentState.status = 'render';
-      updateJob(job, {
-        current: `${prepared.segment.id}: sirali render ediliyor...`,
-        message: `Render sirasi: ${index + 1}/${job.total}`
-      });
+        if (!prepared.ok) {
+          throw prepared.error;
+        }
 
-      const render = await limitRender(() => renderManimVideo({
-        code: prepared.code,
-        segmentId: prepared.segment.id,
-        audioRelativePath: prepared.tts.audioRelativePath,
-        speechText: prepared.speech.speech_text,
-        progressiveContext: job.progressive.enabled && job.progressive.status !== 'failed'
-          ? { job, segmentIndex: index }
-          : null,
-        ttsOptions: job.ttsOptions
-      }));
-      if (index === 0) {
-        job.timings.firstSegmentCompletedAt ||= new Date().toISOString();
-      }
-      const uploadedVideo = await persistRequired(`${prepared.segment.id}/video-upload`, () => (
-        job.lessonId
-          ? uploadRenderRelative({
-              bucket: 'videos',
-              userId: job.userId,
-              lessonId: job.lessonId,
-              segmentKey: prepared.segment.id,
-              kind: 'video',
-              relativePath: render.videoRelativePath,
-              contentType: 'video/mp4'
-            })
-          : null
-      ));
-      const dbRender = await persistRequired(`${prepared.segment.id}/video-render`, async () => {
-        if (!prepared.dbSegment?.id) return null;
-        await updateSegment(prepared.dbSegment.id, { status: 'render_done' });
-        return saveVideoRender({
-          segmentId: prepared.dbSegment.id,
-          manimCodeId: prepared.manimCode?.id || null,
-          quality: manimQuality,
-          videoStoragePath: uploadedVideo?.storagePath || null,
-          localVideoPath: render.videoRelativePath,
-          audioStoragePath: prepared.uploadedAudio?.storagePath || null,
-          backgroundMusicPath: render.backgroundMusic,
-          durationSeconds: render.durationSeconds,
-          stdout: render.stdout,
-          stderr: render.stderr
+        segmentState.status = 'render';
+        updateJob(job, {
+          current: `${prepared.segment.id}: render ediliyor...`,
+          message: `${job.progress}/${job.total} segment tamamlandi, ${prepared.segment.id} render ediliyor.`
         });
-      });
 
-      segmentState.status = 'done';
-      const segmentAccess = uploadedVideo?.storagePath
-        ? await createStorageAccessOrNull(`${prepared.segment.id}/video-url`, {
-            bucket: 'videos',
-            storagePath: uploadedVideo.storagePath,
-            expiresInSeconds: signedVideoUrlTtlSeconds
-          })
-        : null;
-      segmentState.videoUrl = segmentAccess?.signedUrl || render.videoUrl;
-      segmentState.videoRelativePath = render.videoRelativePath;
-      segmentState.durationSeconds = render.durationSeconds;
-      segmentState.hasMusic = render.hasMusic;
-      segmentState.backgroundMusic = render.backgroundMusic;
-      segmentState.dbRenderId = dbRender?.id || null;
-      videoPaths[index] = render.videoRelativePath;
-      job._artifactPaths.add(path.dirname(resolveRenderRelative(render.videoRelativePath)));
-      job.progress += 1;
-      updateJob(job, {
-        message: `${job.progress}/${job.total} segment tamamlandi.`,
-        current: `${prepared.segment.id}: tamamlandi.`
-      });
+        const render = await limitRender(() => renderManimVideo({
+          code: prepared.code,
+          segmentId: prepared.segment.id,
+          audioRelativePath: prepared.tts.audioRelativePath,
+          speechText: prepared.speech.speech_text,
+          progressiveContext: job.progressive.enabled && job.progressive.status !== 'failed'
+            ? { job, segmentIndex: index }
+            : null,
+          ttsOptions: job.ttsOptions
+        }));
+        job.timings.firstSegmentCompletedAt ||= new Date().toISOString();
+        const uploadedVideo = await persistRequired(`${prepared.segment.id}/video-upload`, () => (
+          job.lessonId
+            ? uploadRenderRelative({
+                bucket: 'videos',
+                userId: job.userId,
+                lessonId: job.lessonId,
+                segmentKey: prepared.segment.id,
+                kind: 'video',
+                relativePath: render.videoRelativePath,
+                contentType: 'video/mp4'
+              })
+            : null
+        ));
+        const dbRender = await persistRequired(`${prepared.segment.id}/video-render`, async () => {
+          if (!prepared.dbSegment?.id) return null;
+          await updateSegment(prepared.dbSegment.id, { status: 'render_done' });
+          return saveVideoRender({
+            segmentId: prepared.dbSegment.id,
+            manimCodeId: prepared.manimCode?.id || null,
+            quality: manimQuality,
+            videoStoragePath: uploadedVideo?.storagePath || null,
+            localVideoPath: render.videoRelativePath,
+            audioStoragePath: prepared.uploadedAudio?.storagePath || null,
+            backgroundMusicPath: render.backgroundMusic,
+            durationSeconds: render.durationSeconds,
+            stdout: render.stdout,
+            stderr: render.stderr
+          });
+        });
+
+        segmentState.status = 'done';
+        const segmentAccess = uploadedVideo?.storagePath
+          ? await createStorageAccessOrNull(`${prepared.segment.id}/video-url`, {
+              bucket: 'videos',
+              storagePath: uploadedVideo.storagePath,
+              expiresInSeconds: signedVideoUrlTtlSeconds
+            })
+          : null;
+        segmentState.videoUrl = segmentAccess?.signedUrl || render.videoUrl;
+        segmentState.videoRelativePath = render.videoRelativePath;
+        segmentState.durationSeconds = render.durationSeconds;
+        segmentState.hasMusic = render.hasMusic;
+        segmentState.backgroundMusic = render.backgroundMusic;
+        segmentState.dbRenderId = dbRender?.id || null;
+        videoPaths[index] = render.videoRelativePath;
+        job._artifactPaths.add(path.dirname(resolveRenderRelative(render.videoRelativePath)));
+        job.progress += 1;
+        updateJob(job, {
+          message: `${job.progress}/${job.total} segment tamamlandi.`,
+          current: `${prepared.segment.id}: tamamlandi.`
+        });
+      })();
+      renderTasks[index] = task;
+      void task.catch(() => {});
+      return task;
+    };
+
+    if (job.plan.segments.length) {
+      scheduleRenderTask(0);
+    }
+    const scheduleRemainingRenders = () => {
+      for (let index = 1; index < job.total; index += 1) {
+        scheduleRenderTask(index);
+      }
+    };
+    if (job._segmentPromises) {
+      scheduleRemainingRenders();
+    } else if (job._fullPlanPromise) {
+      await fullPlanReadyTask;
+      scheduleRemainingRenders();
+    } else {
+      scheduleRemainingRenders();
+    }
+
+    for (let index = 0; index < renderTasks.length; index += 1) {
+      await renderTasks[index];
     }
 
     updateJob(job, {
@@ -4007,6 +4114,16 @@ async function queueTraditionalVideoJob({
       enabled: progressiveManimEnabled,
       bufferTargetSeconds: progressiveBufferSeconds
     }),
+    // Segments render in parallel (see runFullVideoJob), but progressive
+    // partials must still be published to the client in strict segment
+    // order -- this gate buffers each segment's normalized-but-unpublished
+    // partials until every earlier segment has finished publishing all of
+    // its own. See enqueueGatedPartial/drainProgressiveGate.
+    _progressiveGate: {
+      nextIndex: 0,
+      pendingBySegment: new Map(),
+      doneSegments: new Set()
+    },
     eventChannel: createJobEventChannel(),
     timings: {
       promptReceivedAt: requestTimings.promptReceivedAt || new Date().toISOString(),
