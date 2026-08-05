@@ -843,7 +843,7 @@ async function transcribeQuestionImage(image) {
     models: karaVisionModels,
     prompt: buildQuestionImageTranscriptionPrompt(),
     frame,
-    timeoutMs: lessonPreprocessorTimeoutMs
+    timeoutMs: karaVisionTimeoutMs
   });
   return String(result.answer || '').trim();
 }
@@ -903,12 +903,23 @@ async function preprocessLessonRequest({ image = null, rawText = '', mode = 'top
     return { ...analysis, imageTranscript };
   })();
 
+  // lessonPreprocessorTimeoutMs (default 5s) is sized for the text-only
+  // DeepSeek analysis call. When a question photo is attached, the Gemini
+  // OCR/transcription round trip alone can take longer than that, so racing
+  // the whole thing against 5s was silently dropping the image content on
+  // every slow transcription and falling back to a text-only (often empty)
+  // prompt -- DeepSeek never saw what was in the photo. Give image requests
+  // room for the vision call plus the DeepSeek call that follows it.
+  const effectiveTimeoutMs = image
+    ? Math.max(lessonPreprocessorTimeoutMs, karaVisionTimeoutMs + 5000)
+    : lessonPreprocessorTimeoutMs;
+
   let timeoutHandle;
   const timeout = new Promise((resolve) => {
     timeoutHandle = setTimeout(() => {
-      logInfo('Ders on-isleme zaman asimina ugradi, yerel ozete dusuluyor', { mode, timeoutMs: lessonPreprocessorTimeoutMs });
+      logInfo('Ders on-isleme zaman asimina ugradi, yerel ozete dusuluyor', { mode, timeoutMs: effectiveTimeoutMs });
       resolve({ ...fallbackLessonAnalysis({ rawText: trimmedRawText, mode }), imageTranscript: '' });
-    }, lessonPreprocessorTimeoutMs);
+    }, effectiveTimeoutMs);
   });
 
   try {
