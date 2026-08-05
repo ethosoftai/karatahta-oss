@@ -11,17 +11,33 @@ Railway Bucket'a yazar.
 | --- | --- |
 | Production API | `https://api.example.com` |
 | Backend repo | `https://github.com/ethosoftai/karatahta-backend` |
-| Production branch | `railway` |
+| Production branch | `checkpoint-9` |
 | Railway project | `<railway-project>` |
 | Railway service | `karatahta-backend` |
 | Railway region | `europe-west4-drams3a` (Amsterdam), 1 replica |
-| Frontend | `https://karatahta.ethosoft.org` |
-| Frontend repo | `https://github.com/ethosoftai/karatahta-frontend` (`main`) |
+| Frontend | `https://frontend.example.com` (Cloudflare Workers) |
+| Frontend repo | `https://github.com/ethosoftai/karatahta-frontend` (`checkpoint-9`) |
+| Frontend (legacy) | `https://karatahta.ethosoft.org` (hosting/cPanel; Google OAuth artık bu domaine dönmüyor, bkz. `AUTH_REDIRECT_URL`) |
 | Auth ve ilişkisel veri | Supabase |
 | Kalıcı binary medya | Private Railway Bucket, S3-compatible API |
 
-Railway servisi GitHub'daki `railway` branch'ini deploy etmelidir. `main` veya
-başka bir branch'e push etmek production backend'i güncellemez.
+**Railway servisinin deploy ettiği branch sabit değildir** — Railway proje
+geçmişinde birden fazla `checkpoint-N` branch'i var (bazıları bu reponun farklı
+soylarına ait, ör. HTML/Remotion render motoru denemeleri) ve hangisinin
+deploy edildiği zamanla değişti (`checkpoint-4` → `checkpoint-5` →
+`checkpoint-9` bu session içinde). **Varsayım yapmadan önce her zaman**
+`railway status --json | grep '"branch"'` ile Railway'in şu an gerçekten hangi
+branch'i deploy ettiğini doğrulayın; bu README'deki tablo değeri elle
+güncellenir ve eskiyebilir. Branch'i değiştirmek için:
+
+```bash
+railway service source connect --repo ethosoftai/karatahta-backend --branch <branch> --service karatahta-backend
+```
+
+Değişiklikleri push etmeden önce hedef branch'in gerçekten Railway'in şu an
+deploy ettiği branch'in atası olduğunu (`git merge-base` ile) doğrulayın;
+aksi halde push edilen kod hiç deploy olmaz veya farklı bir kod ailesine
+karışır.
 
 ## Üst seviye mimari
 
@@ -96,7 +112,24 @@ temizlenir. Kalıcı sonuç Railway Bucket'taki final videodur.
   ortak object storage partial'ları ve worker ayrımı yapılana kadar
   `numReplicas: 1` korunmalıdır.
 - `RENDER_CONCURRENCY` aynı process içindeki paralel Manim sayısını belirler;
-  Railway replica sayısı değildir. CPU/RAM ölçmeden yükseltilmemelidir.
+  Railway replica sayısı değildir. **CPU/RAM ölçmeden yükseltilmemelidir** —
+  Railway servisi `"plan": "trial"` üzerinde (`railway status --json` içindeki
+  deployment meta'sında görülür), yani vCPU/RAM kısıtlı ve paylaşımlıdır.
+  `RENDER_CONCURRENCY=3` denendiğinde eşzamanlı Manim process'lerinden biri
+  `exit code: null` ile öldürüldü (muhtemel OOM kill) ve o sırada mux eden
+  başka bir segmentin ffmpeg'i kaynak açlığından hata verdi. Değer şu an
+  `2`'de; plan yükseltilmeden 3'e çıkarmayın, gerekirse geçici olarak `1`'e
+  düşürün.
+- Segmentler artık **paralel render edilir** (sıra sırayla değil): bir
+  segmentin render'ı yalnız bir önceki segmentin *kodu*na bağlıdır (continuity
+  için, `codeDeferreds`), render'ına değil. `PROGRESSIVE_MANIM_PARTIALS=true`
+  iken bu, canlı akışın sırasını bozmaz — `server.js` içindeki
+  `drainProgressiveGate`/`enqueueGatedPartial`/`markSegmentProgressiveDone`
+  segmentlerin normalize ettiği partial'ları gerçek sırayla (job'a bağlı
+  `_progressiveGate`) yayınlar, render bitiş sırasından bağımsız olarak. Bu
+  gate mekanizmasını bozmadan render loop'una dokunmayın; aksi halde partial
+  sequence/startSeconds/id/url yanlış hesaplanır veya `"Progressive partial
+  sirasi bozuk"` hatası atılır.
 - Railway filesystem kalıcı depolama olarak kullanılmaz. Yalnız geçici
   render/work dosyaları burada kalabilir; final sonuç bucket'a yazılmalıdır.
 
@@ -200,11 +233,26 @@ içermez). `POST /api/lessons/:id/save-to-drive` bu refresh token'ı Google'ın
 token endpoint'iyle değiştirip dersin final videosunu kullanıcının Drive'ına
 yükler.
 
-Önerilen CORS:
+Önerilen CORS (production'da güncel değer -- `railway variables` ile
+doğrulayın):
 
 ```env
-CORS_ORIGIN=https://karatahta.ethosoft.org,http://localhost:3001,http://127.0.0.1:3001
+CORS_ORIGIN=https://karatahta.ethosoft.org,http://localhost:3001,http://127.0.0.1:3001,https://frontend.example.com
 ```
+
+`AUTH_REDIRECT_URL` şu an yalnız yeni frontend'i işaret eder
+(`https://frontend.example.com/`) — Google OAuth/
+şifre sıfırlama/e-posta onayı dönüşleri artık `karatahta.ethosoft.org`'a
+gitmez. Bu tek bir sabit URL olduğundan aynı anda yalnız bir frontend OAuth
+dönüşünü doğru alabilir; iki frontend'in aynı anda OAuth'u desteklemesi
+gerekirse `authCallbackUrl` (`server.js`) isteğin `Origin` header'ını
+`CORS_ORIGIN` allowlist'ine karşı doğrulayıp dinamik seçecek şekilde
+değiştirilmelidir (bu henüz yapılmadı).
+
+Supabase projesinin **Authentication → URL Configuration → Redirect URLs**
+allowlist'inde de aynı frontend URL'si bulunmalıdır; yoksa Supabase
+`redirectTo` parametresini yok sayıp kendi Site URL varsayılanına döner —
+backend'deki `AUTH_REDIRECT_URL` doğru olsa bile.
 
 ### LLM
 
@@ -213,9 +261,10 @@ CORS_ORIGIN=https://karatahta.ethosoft.org,http://localhost:3001,http://127.0.0.
 | `LLM_PROVIDER` | Sabit değer: `deepseek` |
 | `DEEPSEEK_API_KEY` | DeepSeek API anahtarı (`DEEPSEEK_API` da desteklenir) |
 | `DEEPSEEK_BASE_URL` | Varsayılan: `https://api.deepseek.com` |
-| `DEEPSEEK_PLAN_MODEL` | Plan modeli; varsayılan `deepseek-v4-flash` |
-| `DEEPSEEK_CODE_MODEL` | Manim kod modeli; varsayılan `deepseek-v4-flash` |
-| `DEEPSEEK_REASONING_EFFORT` | `high` veya `max` |
+| `DEEPSEEK_PLAN_MODEL` | Plan modeli; varsayılan `deepseek-v4-flash`. Her zaman DeepSeek üzerinden çalışır |
+| `DEEPSEEK_CODE_MODEL` | Manim/HTML segment kod modeli; varsayılan `deepseek-v4-flash`. Değer `gemini` ile başlıyorsa (ör. `gemini-2.5-pro`) istek DeepSeek yerine Gemini'nin OpenAI-uyumlu endpoint'ine (`GEMINI_OPENAI_BASE_URL`, `GEMINI_API_KEY`) yönlendirilir — bkz. `resolveLlmClient` (`server.js`) |
+| `GEMINI_OPENAI_BASE_URL` | Gemini OpenAI-uyumlu endpoint override'ı; varsayılan `https://generativelanguage.googleapis.com/v1beta/openai/` |
+| `DEEPSEEK_REASONING_EFFORT` | `high` veya `max` (yalnız DeepSeek çağrılarında; Gemini'ye yönlendirilen kod çağrılarında bu ve `thinking` alanı gönderilmez) |
 | `DEEPSEEK_PIPELINE_THINKING` | Plan/speech/Manim kodu için thinking modu; düşük gecikme için `false` |
 | `DEEPSEEK_REQUEST_TIMEOUT_MS` | İstek timeout'u; varsayılan `120000` |
 | `GEMINI_API_KEY` | Kara'nın o anki video karesini incelemesi için Gemini API anahtarı |
@@ -410,43 +459,71 @@ CORS preflight:
 ```bash
 curl -i -X OPTIONS \
   https://api.example.com/api/config \
-  -H 'Origin: https://karatahta.ethosoft.org' \
+  -H 'Origin: https://frontend.example.com' \
   -H 'Access-Control-Request-Method: GET'
 ```
 
 Yanıtta `Access-Control-Allow-Origin:
-https://karatahta.ethosoft.org` bulunmalıdır.
+https://frontend.example.com` bulunmalıdır.
 
 ## Railway deployment
 
-Normal production akışı:
+Bu proje için Railway CLI birincil operasyon aracıdır (`railway login` +
+`railway link` bir kere yapılır; bu repoda zaten linklidir).
+
+**Önce hangi branch'in deploy edildiğini doğrulayın** — README'deki tablo
+değeri elle güncellenir ve eskiyebilir:
 
 ```bash
-git switch railway
-git pull --ff-only origin railway
+railway status --json | grep -A5 '"branch"'
+```
+
+Normal production akışı (doğrulanan branch üzerinde):
+
+```bash
+git switch <dogrulanan-branch>       # ör. checkpoint-9
+git pull --ff-only origin <branch>
 npm test
 git add <degisen-dosyalar>
 git commit -m "..."
-git push origin railway
+git push origin <branch>
 ```
 
-Railway service ayarlarında source repo `ethosoftai/karatahta-backend`, branch
-`railway` olmalıdır. Deploy sonrasında Railway'in gösterdiği source commit SHA
-ile `git rev-parse origin/railway` aynı olmalıdır. Loglarda server'ın `PORT`
-üzerinde başladığını ve `/api/config` yanıtını kontrol edin.
-
-GitHub source kuyruğu takılırsa:
+Push, Railway'in GitHub entegrasyonu üzerinden otomatik build/deploy tetikler.
+Takip edin:
 
 ```bash
-railway login
-railway link
-railway up . --path-as-root
-railway deployment list
-railway logs --lines 100
+railway status                       # Building -> Online, deployment ID degisir
+railway logs -d --lines 200          # canli log
 ```
 
-CLI deploy yalnız yedek yöntemdir. Önce aynı kodu GitHub `railway` branch'ine
-commit/push edin; aksi halde production ile repo source of truth ayrışır.
+`railway status --json` çıktısındaki `meta.branch` ve `meta.commitHash`
+değerlerinin push ettiğiniz branch/commit ile eştiğini doğrulayın — Railway
+farklı bir branch'e bağlıysa push hiç deploy tetiklemez ve fark edilmeden
+eski kod çalışmaya devam eder (bu session'da tam olarak bu yaşandı:
+`checkpoint-5`'e yapılan push'lar aslında deploy edilen `checkpoint-4`'ü hiç
+etkilemedi, ta ki `railway status --json` ile fark edilene kadar).
+
+Environment değişkeni değiştirmek için (otomatik redeploy tetikler):
+
+```bash
+railway variables --service karatahta-backend --environment production --set "KEY=value"
+```
+
+Deploy edilen branch'i değiştirmek için:
+
+```bash
+railway service source connect --repo ethosoftai/karatahta-backend --branch <branch> --service karatahta-backend
+```
+
+GitHub source kuyruğu takılırsa CLI'dan doğrudan deploy edin (yalnız yedek
+yöntem — önce aynı kodu GitHub'daki deploy edilen branch'e commit/push edin,
+aksi halde production ile repo source of truth ayrışır):
+
+```bash
+railway up . --path-as-root
+railway deployment list
+```
 
 ## VPS deployment (hibrit backend)
 
@@ -476,28 +553,36 @@ birakir ve container'i yeniden olusturur. Idempotent'tir, guvenle tekrar
 calistirilabilir. `railway` CLI'nin login/link olmasi ve VPS SSH erisiminin
 (`VPS_SSH_KEY`, varsayilan yol) hazir olmasi gerekir.
 
-## Frontend/cPanel birlikte deployment
+## Frontend ile birlikte deployment
 
-Backend deploy edilince hosting frontend otomatik olarak yeniden build
-olmaz. API sözleşmesini etkileyen değişikliklerde frontend de ayrı repo içinde
-güncellenmelidir:
+Backend deploy edilince frontend(ler) otomatik olarak yeniden build olmaz.
+API sözleşmesini etkileyen değişikliklerde `ethosoftai/karatahta-frontend`
+reposu da güncellenmelidir (bkz. o repodaki README) — çalışma branch'i şu an
+`checkpoint-9`.
 
-1. `ethosoftai/karatahta-frontend` `main` branch'inde değişikliği yap.
-2. `npm test` ve `npm run build` çalıştır.
-3. Kaynak dosyalarla **birlikte `dist/`yi aynı committe** pushla.
-4. hosting cPanel > Git Version Control içinde **Update from Remote** yap.
-5. cPanel'deki `HEAD == origin/main` olduğunu kontrol et.
-6. Ardından **Deploy HEAD Commit** yap.
+İki ayrı frontend deployment'ı var:
 
-Frontend `.cpanel.yml` build almaz; yalnız commitlenmiş `dist/` klasörünü
-yayın dizinine kopyalar. Bu nedenle remote güncelleme, HEAD eşitliği ve deploy
-adımlarının üçü de gereklidir.
+- **Cloudflare Workers** (`frontend.example.com`,
+  güncel/birincil): build/deploy mekanizması bu repo içinde değil, ayrı bir
+  Cloudflare hesabından yönetiliyor (repoda `wrangler.toml` yok). Hangi
+  branch'i izlediği veya nasıl tetiklendiği bu README'de doğrulanmadı — o
+  Cloudflare projesine erişimi olan kişiye sorun.
+- **hosting/cPanel** (`karatahta.ethosoft.org`, legacy): `main` branch'inden
+  commitlenmiş `dist/` klasörünü manuel "Update from Remote" + "Deploy HEAD
+  Commit" adımlarıyla yayınlar. Google OAuth artık bu domaine dönmüyor (bkz.
+  yukarıdaki `AUTH_REDIRECT_URL` notu), ama statik arayüz hâlâ buradan
+  erişilebilir olabilir.
 
 ## Sonraki geliştirici/LLM için teslim kontrol listesi
 
 - Başlamadan `git status -sb`, `git remote -v`, `git branch -vv` ve son
   commitleri kontrol et.
-- Production backend değişikliği `railway` branch'ine gitmelidir.
+- **Varsayım yapma**: `railway status --json | grep branch` ile Railway'in şu
+  an gerçekten hangi branch/commit'i deploy ettiğini doğrula. Bu repoda birden
+  fazla `checkpoint-N` branch'i var ve bazıları birbirinin devamı değil, farklı
+  soylardan (ör. HTML/Remotion render motoru denemeleri) — README'deki tablo
+  değeri güncel olmayabilir.
+- Production backend değişikliği, doğrulanmış deploy branch'ine gitmelidir.
 - `.env` veya credential JSON dosyalarını okuma çıktısında/gitte ifşa etme.
 - Supabase'i binary depolama olarak geri ekleme; Auth + Postgres olarak tut.
 - Kalıcı video/ses/ekleri Railway Bucket'a yaz; local `/renders` yalnız geçici
