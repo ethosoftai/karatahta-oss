@@ -87,8 +87,9 @@ Yanıt da segment formatında olmalı — tam anlatım + animasyon tanımıyla.
       "continuity": {
         "role": "opening | continuation | closing",
         "narrative_bridge": "Önceki cümlenin fikrini bu segmente doğal biçimde bağlayan kısa köprü",
-        "visual_start_state": "İlk karede önceki segmentten aynen korunacak nesneler, renkler ve konumlar",
-        "visual_end_state": "Son karede sonraki segmente bırakılacak nesneler, renkler ve konumlar",
+        "visual_start_state": "İlk karede korunacak nesnelerin TAM listesi ve kesin konumları (Örn: 'Başlık UP konumunda, Formül ORIGIN merkezinde')",
+        "visual_end_state": "Son karede sonraki segmente bırakılacak nesnelerin TAM listesi ve kesin konumları",
+        "objects_to_remove": "Segment bitmeden önce FadeOut/remove ile ekrandan TEMİZLENECEK olan geçici nesnelerin kesin listesi",
         "transition": "opening | match_continuation | transform | closing",
         "visual_style": {
           "background": "BLACK",
@@ -137,7 +138,7 @@ Yanıt da segment formatında olmalı — tam anlatım + animasyon tanımıyla.
 - Her segment tek bir fikri anlatır — iki farklı kavramı tek segmentte birleştirme
 - Segmentler bağımsız bölümler değil, tek kesintisiz videonun teknik render bloklarıdır
 - Yalnız ilk segment giriş yapar; sonraki segmentlerde selamlama, yeniden tanıtım, özet veya bölüm değişikliği anonsu yapılmaz
-- Son segment dışında kapanış yapılmaz ve ekran tamamen temizlenmez
+- Son segment dışında kapanış yapılmaz ve ekran tamamen temizlenmez. Ancak her segmentin sonunda 'objects_to_remove' ile belirtilen geçici objeler MUTLAKA temizlenir.
 - Ardışık narration metinleri tek monolog gibi okunmalı; her visual_start_state önceki visual_end_state ile eşleşmelidir
 - Tüm segmentlerde aynı renk, font, nesne adı ve yerleşim sözleşmesi korunur
 - Narration 30 saniyeden kısa, 90 saniyeden uzun olmasın
@@ -185,15 +186,15 @@ Karmaşık animasyon istediklerinde bile önce en sade çalışan versiyonu yaz.
 10. Animasyon süresi:     duration_seconds ± 5 saniye içinde kal
 11. Gruplama:             VGroup() ile ilgili objeleri grupla, .arrange() ile hizala
 12. Tek sınıf:            Dosyada sadece bir Scene sınıfı olur
-13. Güvenli layout:       Her büyük mobject/VGroup ilk play öncesi fit_to_safe_area ile sınırlandırılır
+13. Güvenli layout:       ZORUNLU KURAL: İkiden fazla nesne varsa mutlaka VGroup içine alınır, arrange() ile hizalanır ve fit_to_safe_area'dan geçirilir.
 14. Başlık boyutu:        font_size en fazla 48; gövde metni en fazla 32
 15. Matematik render:     LaTeX ortamı hazırsa formül ve semboller yalnız MathTex(r"...") ile yazılır
-16. Süreklilik:           continuity.visual_start_state ilk animasyondan önce kurulur
+16. Süreklilik:           continuity.visual_start_state KESİNLİKLE aynen kurulur. Nesneleri yerleştirirken KESİNLİKLE move_to([x, y, z]) ile manuel koordinat tahmini yapma. Yalnızca next_to, to_edge, arrange veya move_to(ORIGIN) kullan.
 17. Metin sınırı:          Her Text en fazla 42 karakter ve 6 kelime; anlatım paragrafı asla ekrana kopyalanmaz
 18. Görsel zorunluluğu:    Text-only sahne yasak; her sahnede şekil/diyagram/ok/grafik/eksen/zaman çizelgesi veya MathTex bulunur
 19. Otomatik sayılar:      Axes ve NumberLine için include_numbers=False; gerekli etiketleri elle MathTex ile ekle
 20. Tanım kontrolü:        Kullanılan her değişken, helper ve Mobject çağrılmadan önce tanımlanmış olmalı
-21. Overdraw önleme:       Ekrana eklenen yeni objelerin eskilerin tam üzerine binmemesi için daima .next_to() veya .shift() kullan. Ekran dolduysa eski objeleri self.play(FadeOut(eski_obje)) ile kaldır.
+21. Kesin Temizlik (Cleanup): Segment sonunda, continuity.visual_end_state'de YER ALMAYAN veya planner'ın objects_to_remove listesinde belirttiği TÜM objeleri ZORUNLU olarak self.play(FadeOut(obje)) ile temizle. Eski mobject'leri sahnede unutma.
 22. Sıkı API kontrolü:     Emin olmadığın Manim özelliklerini uydurma. Yalnızca standart Manim CE 0.20.1 API'lerini kullan.
 23. Taşma (Border) önleme: Bir metni kutu içine alırken metnin taşmasını engellemek için sabit Rectangle yerine daima SurroundingRectangle(metin, buff=0.5) kullan.
 
@@ -221,8 +222,8 @@ Yanıtı vermeden önce içinden şu kontrolleri yap ve sorun varsa kodu düzelt
 - Normal Scene içinde `self.camera.frame` yok.
 - `speech_text`/narration paragrafı ekranda yok; Text yalnız kısa etikettir.
 - Sahne yalnız yazıdan oluşmuyor; fikri anlatan gerçek bir görsel model var.
-- Her büyük grup güvenli alana sığıyor ve başlıkla çakışmıyor.
-- Objeler birbirinin üzerine binmiyor (overdraw yok), gerekirse FadeOut yapıldı.
+- Her büyük grup güvenli alana sığıyor ve başlıkla çakışmıyor. KESİNLİKLE manuel koordinat [x, y, 0] uydurması yapılmadı.
+- Segment sonunda 'objects_to_remove' listesindeki tüm nesneler için ZORUNLU olarak FadeOut veya remove() çağrıldı, ekranda çöp bırakılmadı.
 - Kutu içi metinlerde taşma yok (SurroundingRectangle kullanıldı).
 - Kodda uydurma (hallucinated) fonksiyon yok, API geçerli ve standart.
 - `include_numbers=True`, `expo_out` ve deprecated API yok.
@@ -260,6 +261,10 @@ class Seg_s1(Scene):
         self.wait(1)
         self.play(Indicate(eq[2], color=YELLOW, scale_factor=1.4))
         self.wait(1)
+        
+        # Kesin Temizlik (Zorunlu)
+        self.play(FadeOut(eq))
+        self.wait(0.5)
 ```
 
 ### graph_plot — eksen ve grafik
@@ -286,6 +291,10 @@ class Seg_s2(Scene):
         self.wait(0.5)
         self.play(Create(grafik), run_time=2)
         self.wait(1)
+
+        # Kesin Temizlik (Zorunlu)
+        self.play(FadeOut(VGroup(axes, etiketler, grafik)))
+        self.wait(0.5)
 ```
 
 ### geometric_transform — şekil dönüşümü
@@ -302,7 +311,9 @@ class Seg_s3(Scene):
         self.wait(0.8)
         self.play(Transform(kare, daire))
         self.wait(1)
-        self.play(FadeOut(kare))
+
+        # Kesin Temizlik (Zorunlu)
+        self.play(FadeOut(kare)) # kare, daireye transform olduğu için kareyi silmek daireyi de siler
         self.wait(0.5)
 ```
 
@@ -328,6 +339,10 @@ class Seg_s4(Scene):
         self.wait(0.5)
         self.play(FadeIn(nokta), Write(etiket))
         self.wait(1)
+
+        # Kesin Temizlik (Zorunlu)
+        self.play(FadeOut(VGroup(nl, nokta, etiket)))
+        self.wait(0.5)
 ```
 
 ### concept_map — metin yerine görsel ilişki modeli
@@ -349,4 +364,8 @@ class Seg_s5(Scene):
         self.play(GrowArrow(ok), run_time=1)
         self.play(Create(sonuc), FadeIn(sonuc_yazi), run_time=1.5)
         self.play(Indicate(sonuc, color=YELLOW), run_time=1)
+        
+        # Kesin Temizlik (Zorunlu)
+        self.play(FadeOut(model))
+        self.wait(0.5)
 ```

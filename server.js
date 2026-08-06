@@ -27,6 +27,8 @@ import { buildKaraLiveSystemInstruction, createKaraLiveSession, DEFAULT_KARA_LIV
 import { assertSafeKaraManimCode } from './services/karaManimSafety.js';
 import { runKaraTools } from './services/karaTools.js';
 import { searchWeb } from './services/webSearch.js';
+import { cardsRouter } from './routes/cards.js';
+import { liveTeacherRouter } from './routes/liveTeacher.js';
 import {
   buildKaraPrompt,
   generateKaraVisionAnswerWithFallback,
@@ -310,6 +312,10 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static(publicDir));
+// Canlı öğretmen ve Kart bölümleri: kendi routes/ dosyalarında tanımlı,
+// server.js'i büyütmemek için burada yalnız mount ediliyor.
+app.use(cardsRouter);
+app.use(liveTeacherRouter);
 app.get('/media/*mediaPath', async (req, res, next) => {
   try {
     const objectKey = Array.isArray(req.params.mediaPath)
