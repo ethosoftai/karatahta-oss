@@ -136,6 +136,25 @@ temizlenir. Kalıcı sonuç Railway Bucket'taki final videodur.
 - Railway filesystem kalıcı depolama olarak kullanılmaz. Yalnız geçici
   render/work dosyaları burada kalabilir; final sonuç bucket'a yazılmalıdır.
 
+## Dağıtık render worker geçişi (feature branch)
+
+`feature/redis-render-workers` branch'i, Manim/FFmpeg yükünü API'den ayrı
+Railway servislerine taşımak için kontrollü geçiş temelini içerir. Hedef
+mimari API → Redis/BullMQ → 1..N private `render-worker` service → Railway
+Bucket + Supabase'dir. Her worker `PROCESS_ROLE=render-worker` ve
+`RENDER_CONCURRENCY=1` ile yalnız bir ağır render çalıştırmalıdır.
+
+Bu branch'in ilk adımı queue payload sözleşmesini, `render_worker_jobs` audit
+tablosunu ve shadow worker'ı ekler. `RENDER_QUEUE_ENABLED=false` varsayılanı
+bilinçlidir: mevcut API render fallback'i çalışmaya devam eder. Redis service,
+en az bir private worker ve Bucket-temelli input/output transferi eksiksiz
+hazır olmadan bu flag production'da açılmamalıdır.
+
+Worker'lar aynı instance'ta child process olarak değil, Railway canvas'ta aynı
+repo kaynaklı **ayrı service/container** olarak oluşturulmalıdır. Böylece her
+worker kendi CPU/RAM limitine sahip olur; API'nin HTTP/SSE süreci Manim'in
+resource spike'larından ayrılır.
+
 ## Repo haritası
 
 ```text

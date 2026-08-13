@@ -15,6 +15,7 @@ import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { extractFrameAtTime } from './services/frameExtractor.js';
 import { extractManimErrorSummary } from './services/manimErrorSummary.js';
 import { classifyManimRenderFailure } from './services/manimRenderFailure.js';
+import { enqueueRenderTask, renderQueueConfigured } from './services/renderQueue.js';
 import { EDGE_TTS_VOICE_OPTIONS, parseTtsOptions } from './services/ttsOptions.js';
 import {
   buildLessonAnalysisPrompt,
@@ -2833,6 +2834,30 @@ async function runFullVideoJob(job) {
               })
             : null
         ));
+        if (renderQueueConfigured()) {
+          try {
+            const shadowTask = await enqueueRenderTask({
+              appJobId: job.id,
+              lessonId: job.lessonId,
+              segmentId: segment.id,
+              segmentIndex: index,
+              audioStoragePath: uploadedAudio?.storagePath || null,
+              metadata: {
+                mode: 'shadow',
+                manimCodeId: manimCode?.id || null,
+                durationSeconds: tts.durationSeconds
+              }
+            });
+            logInfo(`${segment.id}: render worker shadow task kuyruga eklendi`, {
+              queueJobId: shadowTask.id
+            });
+          } catch (queueError) {
+            // Shadow telemetry cannot make the existing render pipeline fail.
+            logInfo(`${segment.id}: render worker shadow task eklenemedi`, {
+              error: queueError.message
+            });
+          }
+        }
         segmentState.tts = {
           audioUrl: tts.audioUrl,
           durationSeconds: tts.durationSeconds,

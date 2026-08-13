@@ -36,4 +36,4 @@ RUN mkdir -p renders downloads
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "if [ \"$PROCESS_ROLE\" = \"social-worker\" ]; then node workers/socialPublisher.js; else node server.js; fi"]
+CMD ["sh", "-c", "case \"$PROCESS_ROLE\" in social-worker) node workers/socialPublisher.js ;; render-worker) node workers/renderWorker.js ;; *) node server.js ;; esac"]
