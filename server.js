@@ -50,6 +50,14 @@ import {
   sanitizeManimForLocalRender as sanitizeManimCompatibility
 } from './services/manimSanitizer.js';
 import {
+  assertStandardVideoProbe,
+  VIDEO_FPS,
+  VIDEO_HEIGHT,
+  VIDEO_WIDTH,
+  resolveManimFont,
+  resolveManimQuality
+} from './services/renderQuality.js';
+import {
   buildBurnSubtitleArgs,
   buildConcatArgs,
   buildFilterConcatArgs,
@@ -197,8 +205,8 @@ const deepseekReasoningEffort = process.env.DEEPSEEK_REASONING_EFFORT === 'max' 
 const deepseekPipelineThinkingEnabled = String(
   process.env.DEEPSEEK_PIPELINE_THINKING || 'false'
 ).toLowerCase() === 'true';
-const manimQuality = process.env.MANIM_QUALITY || '-qm';
-const manimFont = process.env.MANIM_FONT || 'Georgia';
+const manimQuality = resolveManimQuality();
+const manimFont = resolveManimFont();
 const mathTexMode = String(process.env.MANIM_ENABLE_MATHTEX || 'auto').toLowerCase();
 const mathTexAvailable = (
   mathTexMode === '1'
@@ -1466,6 +1474,10 @@ async function probeVideo(filePath) {
   };
 }
 
+function validateRenderedVideo(probe, context) {
+  return assertStandardVideoProbe(probe, context);
+}
+
 function avcCodecString(probe) {
   const profileHex = /high/i.test(probe.profile || '')
     ? '64'
@@ -1699,6 +1711,7 @@ async function concatVideos(videoRelativePaths) {
     error.stderr = result.stderr;
     throw error;
   }
+  validateRenderedVideo(await probeVideo(outputPath), 'final concat video');
 
   const payload = {
     videoUrl: createLocalMediaUrl(path.relative(rendersDir, outputPath)),
@@ -2331,10 +2344,10 @@ async function renderManimVideo({
     if (progressiveContext?.job && attempt === 0) {
       progressiveContext.job.timings.manimStartedAt ||= new Date().toISOString();
     }
-    const manimArgs = ['-m', 'manim', manimQuality, '-c', manimTexCacheConfigPath];
-    if (progressiveContext?.job?.progressive?.enabled) {
-      manimArgs.push('--resolution', '1280,720', '--fps', '30');
-    }
+  const manimArgs = ['-m', 'manim', manimQuality, '-c', manimTexCacheConfigPath];
+  if (progressiveContext?.job?.progressive?.enabled) {
+    manimArgs.push('--resolution', `${VIDEO_WIDTH},${VIDEO_HEIGHT}`, '--fps', String(VIDEO_FPS));
+  }
     manimArgs.push(filePath, className, '--media_dir', mediaDir);
     result = await runCommand('python', manimArgs, { timeoutMs: 180000 });
     if (partialCollector && result.code === 0) {
@@ -2527,6 +2540,7 @@ async function renderManimVideo({
   }
 
   const relativeVideo = path.relative(rendersDir, finalVideoPath).replaceAll(path.sep, '/');
+  validateRenderedVideo(await probeVideo(finalVideoPath), `${safeSegmentId} final video`);
   const durationSeconds = await getMediaDurationSeconds(finalVideoPath).catch(() => null);
 
   const resultPayload = {

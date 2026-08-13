@@ -8,10 +8,11 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveManimQuality } from './renderQuality.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rendersDir = path.join(__dirname, '..', 'renders', 'cards');
-const manimQuality = process.env.MANIM_QUALITY === '-qh' ? '-qh' : '-ql';
+const manimQuality = resolveManimQuality();
 
 function stripCodeFence(code) {
   return String(code || '')

@@ -9,6 +9,7 @@ import {
   updateRenderWorkerJob
 } from '../services/supabaseStore.js';
 import { renderWorkerManimVideo } from '../services/workerManimRenderer.js';
+import { resolveManimQuality } from '../services/renderQuality.js';
 
 const workerId = process.env.RAILWAY_REPLICA_ID || process.env.RENDER_WORKER_ID || process.pid;
 const shadowMode = String(process.env.RENDER_WORKER_SHADOW_MODE || 'true').toLowerCase() !== 'false';
@@ -83,7 +84,7 @@ const worker = createRenderWorker(async (task, queueJob) => {
     const savedRender = await saveVideoRender({
       segmentId: input.segment.id,
       manimCodeId: input.code.id,
-      quality: '-qm',
+      quality: resolveManimQuality(),
       videoStoragePath: upload.storagePath,
       localVideoPath: null,
       audioStoragePath: input.tts.storage_path,

@@ -3,6 +3,7 @@
 // (card N's explanation can reference that card N was "just drawn").
 import { askDeepSeek } from './deepseekClient.js';
 import { renderCardStill } from './manimStillRenderer.js';
+import { resolveManimFont } from './renderQuality.js';
 
 const MAX_CARDS = 4;
 
@@ -22,7 +23,7 @@ MANIM KURALLARI:
 - İlk satır: self.camera.background_color = BLACK
 - Koordinatlar x in [-6.5,6.5], y in [-3.5,3.5]
 - Sade renkler: BLUE, GREEN, RED, YELLOW, WHITE, GOLD_A, TEAL, ORANGE
-- Text("...", font="Georgia") kullan, en fazla 6 kelime/satır
+- Text("...", font="${resolveManimFont()}") kullan, en fazla 6 kelime/satır
 - Basit şekil/diyagram/ok/eksen içersin, yalnız yazı olmasın
 - Kod render edilip DURACAK bir still görüntü olacağı için self.wait(0.3) ile bitir, uzun animasyon yapma
 - "is_last": bu konunun anlatımı için yeterli kart üretildiyse true, değilse false
@@ -30,7 +31,7 @@ MANIM KURALLARI:
 
 function fallbackCardCode(title) {
   const safeTitle = String(title || 'Kart').slice(0, 30).replace(/["\\]/g, '');
-  return `from manim import *\nclass Card(Scene):\n    def construct(self):\n        self.camera.background_color = BLACK\n        t = Text("${safeTitle}", font="Georgia", font_size=36, color=WHITE)\n        self.play(Write(t))\n        self.wait(0.3)\n`;
+  return `from manim import *\nclass Card(Scene):\n    def construct(self):\n        self.camera.background_color = BLACK\n        t = Text("${safeTitle}", font="${resolveManimFont()}", font_size=36, color=WHITE)\n        self.play(Write(t))\n        self.wait(0.3)\n`;
 }
 
 export async function* generateCardsStream({ prompt }) {

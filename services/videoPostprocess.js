@@ -1,3 +1,9 @@
+import {
+  VIDEO_FPS,
+  VIDEO_HEIGHT,
+  VIDEO_WIDTH
+} from './renderQuality.js';
+
 function srtTimestamp(seconds) {
   const totalMs = Math.round(Math.max(0, seconds) * 1000);
   const hours = Math.floor(totalMs / 3600000);
@@ -72,8 +78,8 @@ export function buildProgressivePartialArgs({
     '-filter_complex', `[0:v]trim=duration=${duration},setpts=PTS-STARTPTS[v]`,
     '-map', '[v]', '-map', '1:a:0', '-t', duration,
     '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p',
-    '-bf', '0', '-g', '30', '-keyint_min', '30', '-sc_threshold', '0',
-    '-fps_mode', 'cfr', '-r', '30',
+    '-bf', '0', '-g', String(VIDEO_FPS), '-keyint_min', String(VIDEO_FPS), '-sc_threshold', '0',
+    '-fps_mode', 'cfr', '-r', String(VIDEO_FPS),
     '-c:a', 'copy',
     '-movflags', '+empty_moov+default_base_moof+frag_keyframe+omit_tfhd_offset',
     '-frag_duration', '1000000', '-video_track_timescale', '90000',
@@ -116,7 +122,7 @@ export function buildConcatArgs({ listPath, outputPath, hasAudio = true }) {
     '-preset', 'veryfast',
     '-crf', '20',
     '-pix_fmt', 'yuv420p',
-    '-r', '30',
+    '-r', String(VIDEO_FPS),
     ...(hasAudio ? [
       '-c:a', 'aac',
       '-b:a', '192k',
@@ -128,7 +134,7 @@ export function buildConcatArgs({ listPath, outputPath, hasAudio = true }) {
   ];
 }
 
-export function buildFilterConcatArgs({ inputPaths, outputPath, width = 1280, height = 720 }) {
+export function buildFilterConcatArgs({ inputPaths, outputPath, width = VIDEO_WIDTH, height = VIDEO_HEIGHT }) {
   const paths = Array.isArray(inputPaths) ? inputPaths.filter(Boolean) : [];
   if (!paths.length) throw new Error('Filter concat icin en az bir video gerekli.');
   const filters = [];
@@ -137,7 +143,7 @@ export function buildFilterConcatArgs({ inputPaths, outputPath, width = 1280, he
     inputs.push('-i', inputPath);
     filters.push(
       `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,`
-      + `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,setpts=PTS-STARTPTS[v${index}]`
+      + `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=${VIDEO_FPS},setpts=PTS-STARTPTS[v${index}]`
     );
     filters.push(`[${index}:a]aresample=48000:async=1:first_pts=0,asetpts=PTS-STARTPTS[a${index}]`);
   });

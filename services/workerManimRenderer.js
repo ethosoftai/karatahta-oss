@@ -4,6 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { sanitizeManimForLocalRender } from './manimSanitizer.js';
+import {
+  VIDEO_FPS,
+  VIDEO_HEIGHT,
+  VIDEO_WIDTH,
+  assertStandardVideoProbe,
+  resolveManimQuality
+} from './renderQuality.js';
 
 function run(command, args, { cwd, timeoutMs = 180000 } = {}) {
   return new Promise((resolve) => {
@@ -57,10 +64,40 @@ async function durationSeconds(filePath) {
   return result.code === 0 && Number.isFinite(duration) ? duration : null;
 }
 
-export async function renderWorkerManimVideo({ code, audioUrl, quality = '-qm', onLog = () => {} }) {
+async function probeVideo(filePath) {
+  const result = await run('ffprobe', [
+    '-v', 'error',
+    '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height,avg_frame_rate,codec_name,profile,level:format=duration',
+    '-of', 'json',
+    filePath
+  ], { timeoutMs: 30000 });
+  if (result.code !== 0) {
+    throw new Error(`Worker video okunamadi: ${result.stderr || result.stdout}`);
+  }
+  const payload = JSON.parse(result.stdout || '{}');
+  const stream = payload.streams?.[0];
+  const duration = Number(payload.format?.duration);
+  if (!stream || !Number.isFinite(duration) || duration <= 0) {
+    throw new Error('Worker video streami veya suresi gecersiz.');
+  }
+  const [fpsNumerator, fpsDenominator] = String(stream.avg_frame_rate || '0/1').split('/').map(Number);
+  return {
+    width: Number(stream.width),
+    height: Number(stream.height),
+    fps: fpsDenominator ? fpsNumerator / fpsDenominator : 0,
+    codec: stream.codec_name,
+    profile: stream.profile,
+    level: Number(stream.level),
+    durationSeconds: duration
+  };
+}
+
+export async function renderWorkerManimVideo({ code, audioUrl, quality = resolveManimQuality(), onLog = () => {} }) {
   const renderId = `kara-render-worker-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `${renderId}-`));
   try {
+    const manimQuality = resolveManimQuality(quality);
     const source = sanitizeManimForLocalRender(String(code || ''));
     const className = sceneClassName(source);
     const sourcePath = path.join(workDir, `${className}.py`);
@@ -73,7 +110,7 @@ export async function renderWorkerManimVideo({ code, audioUrl, quality = '-qm', 
     if (!audioResponse.ok) throw new Error(`Worker ses indirilemedi: HTTP ${audioResponse.status}`);
     await fs.writeFile(audioPath, Buffer.from(await audioResponse.arrayBuffer()));
     onLog('Manim basladi', { className });
-    const manim = await run('python', ['-m', 'manim', quality, '--resolution', '1280,720', '--fps', '30', sourcePath, className, '--media_dir', mediaDir], { cwd: workDir });
+    const manim = await run('python', ['-m', 'manim', manimQuality, '--resolution', `${VIDEO_WIDTH},${VIDEO_HEIGHT}`, '--fps', String(VIDEO_FPS), sourcePath, className, '--media_dir', mediaDir], { cwd: workDir });
     if (manim.code !== 0) {
       const error = new Error(manim.signal ? `Manim ${manim.signal} ile sonlandi.` : 'Manim render basarisiz oldu.');
       Object.assign(error, { manim });
@@ -88,7 +125,8 @@ export async function renderWorkerManimVideo({ code, audioUrl, quality = '-qm', 
       Object.assign(error, { mux });
       throw error;
     }
-    return { workDir, outputPath, durationSeconds: await durationSeconds(outputPath), manim, mux };
+    const probe = assertStandardVideoProbe(await probeVideo(outputPath), 'worker final video');
+    return { workDir, outputPath, durationSeconds: await durationSeconds(outputPath), probe, manim, mux };
   } catch (error) {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     throw error;
