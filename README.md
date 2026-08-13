@@ -118,8 +118,11 @@ temizlenir. Kalıcı sonuç Railway Bucket'taki final videodur.
   `RENDER_CONCURRENCY=3` denendiğinde eşzamanlı Manim process'lerinden biri
   `exit code: null` ile öldürüldü (muhtemel OOM kill) ve o sırada mux eden
   başka bir segmentin ffmpeg'i kaynak açlığından hata verdi. Değer şu an
-  `2`'de; plan yükseltilmeden 3'e çıkarmayın, gerekirse geçici olarak `1`'e
-  düşürün.
+  `2`'de; production smoke testinde birden fazla render sırasında Manim
+  süreçleri Python traceback üretmeden `exit code: null` ile sonlandı. Bu
+  nedenle güvenli varsayılan `1`'dir; CPU/RAM ölçümü olmadan yükseltmeyin.
+  Renderer `SIGKILL`/timeout/exit-code'suz kapanmayı kod hatası değil altyapı
+  hatası sayar ve LLM kod onarımı denemez.
 - Segmentler artık **paralel render edilir** (sıra sırayla değil): bir
   segmentin render'ı yalnız bir önceki segmentin *kodu*na bağlıdır (continuity
   için, `codeDeferreds`), render'ına değil. `PROGRESSIVE_MANIM_PARTIALS=true`
@@ -307,7 +310,7 @@ yer alır.
 | `EDGE_TTS_TIMEOUT_MS` | Takılan Edge TTS process'i için üst süre |
 | `GOOGLE_*` | Opsiyonel Google Cloud TTS credential/voice |
 | `MANIM_QUALITY=-qm` | 720p/30 FPS medium kalite |
-| `MANIM_FONT` | Üretilen sahnelerin varsayılan fontu |
+| `MANIM_FONT` | Üretilen sahnelerin varsayılan fontu (Docker image'da bulunan güvenli varsayılan: `DejaVu Serif`) |
 | `MANIM_ENABLE_MATHTEX` | LaTeX kullanım kontrolü |
 | `STREAMING_PLAN_FIRST_SEGMENT=true` | Tam planı beklemeden ilk segmenti başlatır |
 | `PROGRESSIVE_MANIM_PARTIALS=true` | Gerçek Manim partial canlı akışı |
@@ -323,7 +326,7 @@ yer alır.
 | `SPEECH_CONCURRENCY` | Speech hazırlama iş limiti |
 | `TTS_CONCURRENCY` | Paralel TTS limiti |
 | `CODE_CONCURRENCY` | Paralel Manim kod üretim limiti |
-| `RENDER_CONCURRENCY` | Paralel Manim render limiti |
+| `RENDER_CONCURRENCY=1` | Paralel Manim render limiti; trial ortamı için güvenli varsayılan |
 
 ### Supabase: Auth ve Postgres
 

@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { synthesizeWithEdgeTts } from './services/edgeTts.js';
 import { extractFrameAtTime } from './services/frameExtractor.js';
 import { extractManimErrorSummary } from './services/manimErrorSummary.js';
+import { classifyManimRenderFailure } from './services/manimRenderFailure.js';
 import { EDGE_TTS_VOICE_OPTIONS, parseTtsOptions } from './services/ttsOptions.js';
 import {
   buildLessonAnalysisPrompt,
@@ -1331,6 +1332,7 @@ async function repairManimCodeWithLlm(code, renderOutput, segmentId) {
 
 function runCommand(command, args, options = {}) {
   return new Promise((resolve) => {
+    const startedAt = Date.now();
     const child = spawn(command, args, {
       cwd: options.cwd || __dirname,
       shell: false,
@@ -1341,13 +1343,20 @@ function runCommand(command, args, options = {}) {
     let stderr = '';
     let settled = false;
     let forceKillTimer = null;
+    let timedOut = false;
 
     const finish = (payload) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       clearTimeout(forceKillTimer);
-      resolve({ stdout, stderr, ...payload });
+      resolve({
+        stdout,
+        stderr,
+        durationMs: Date.now() - startedAt,
+        timedOut,
+        ...payload
+      });
     };
 
     child.stdout.on('data', (chunk) => {
@@ -1358,6 +1367,7 @@ function runCommand(command, args, options = {}) {
     });
 
     const timeout = setTimeout(() => {
+      timedOut = true;
       child.kill('SIGTERM');
       stderr += '\nRender zaman asimina ugradi.';
       forceKillTimer = setTimeout(() => {
@@ -1365,12 +1375,12 @@ function runCommand(command, args, options = {}) {
       }, Math.max(1000, Number(options.killGraceMs || 5000)));
     }, options.timeoutMs || 180000);
 
-    child.on('close', (code) => {
-      finish({ code });
+    child.on('close', (code, signal) => {
+      finish({ code, signal: signal || null });
     });
     child.on('error', (error) => {
       stderr += `\nKomut baslatilamadi: ${error.message}`;
-      finish({ code: -1 });
+      finish({ code: -1, signal: null });
     });
   });
 }
@@ -2182,6 +2192,7 @@ async function renderManimVideo({
   const mediaDir = path.join(workDir, 'media');
   let filePath = path.join(workDir, `${className}.py`);
   let result = null;
+  let finalFailure = null;
   const repairLogs = [];
   const progressiveStartSequence = progressiveContext?.job?.progressive?.partials?.length || 0;
 
@@ -2325,15 +2336,24 @@ async function renderManimVideo({
 
     const renderOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
     const errorSummary = extractManimErrorSummary(renderOutput);
+    const processFailure = classifyManimRenderFailure(result);
+    finalFailure = processFailure;
     // Single-line, greppable summary for scanning many generations' worth of
     // logs for a recurring pattern (MANIM_HATA prefix makes it easy to grep).
     // The detailed outputTail below stays for one-off deep-dive debugging.
-    logInfo(`MANIM_HATA ${safeSegmentId}: ${errorSummary?.oneLine || 'ozetlenemeyen hata'}`, {
-      attempt: attempt + 1
+    logInfo(`MANIM_HATA ${safeSegmentId}: ${errorSummary?.oneLine || processFailure.oneLine}`, {
+      attempt: attempt + 1,
+      kind: processFailure.kind,
+      durationMs: result.durationMs,
+      signal: result.signal,
+      timedOut: result.timedOut
     });
     logInfo(`${safeSegmentId}: Manim render hata verdi, duzeltme denenecek`, {
       attempt: attempt + 1,
       code: result.code,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      durationMs: result.durationMs,
       outputTail: renderOutput.slice(-3000)
     });
     // Whatever this failed attempt normalized was never published (it was
@@ -2351,6 +2371,10 @@ async function renderManimVideo({
       progressiveContext.job.progressive.error = 'Canli yayinlanan render sonradan hata verdi; farkli goruntuyle devam edilmedi.';
       progressiveContext.job.eventChannel.emit('job', publicJob(progressiveContext.job));
       repairLogs.push('Repair skipped because already-published frames cannot be replaced safely.');
+      break;
+    }
+    if (!processFailure.shouldRepair) {
+      repairLogs.push(`Manim repair skipped: ${processFailure.oneLine}`);
       break;
     }
     if (attempt >= 2) {
@@ -2386,7 +2410,9 @@ async function renderManimVideo({
   }
 
   if (result.code !== 0) {
-    const error = new Error('Manim render basarisiz oldu.');
+    const error = new Error(finalFailure?.shouldRepair === false
+      ? `Manim render altyapi hatasi: ${finalFailure.oneLine}`
+      : 'Manim render basarisiz oldu.');
     error.stdout = [result.stdout, ...repairLogs].filter(Boolean).join('\n');
     error.stderr = result.stderr;
     error.statusCode = 500;
@@ -2890,16 +2916,21 @@ async function runFullVideoJob(job) {
           message: `${job.progress}/${job.total} segment tamamlandi, ${prepared.segment.id} render ediliyor.`
         });
 
-        const render = await limitRender(() => renderManimVideo({
-          code: prepared.code,
-          segmentId: prepared.segment.id,
-          audioRelativePath: prepared.tts.audioRelativePath,
-          speechText: prepared.speech.speech_text,
-          progressiveContext: job.progressive.enabled && job.progressive.status !== 'failed'
-            ? { job, segmentIndex: index }
-            : null,
-          ttsOptions: job.ttsOptions
-        }));
+        const render = await limitRender(() => {
+          // This task may sit in the render limiter after another segment has
+          // failed. Re-check cancellation at the moment it gets a slot.
+          ensureJobActive();
+          return renderManimVideo({
+            code: prepared.code,
+            segmentId: prepared.segment.id,
+            audioRelativePath: prepared.tts.audioRelativePath,
+            speechText: prepared.speech.speech_text,
+            progressiveContext: job.progressive.enabled && job.progressive.status !== 'failed'
+              ? { job, segmentIndex: index }
+              : null,
+            ttsOptions: job.ttsOptions
+          });
+        });
         job.timings.firstSegmentCompletedAt ||= new Date().toISOString();
         const uploadedVideo = await persistRequired(`${prepared.segment.id}/video-upload`, () => (
           job.lessonId
