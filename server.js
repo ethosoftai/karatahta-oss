@@ -29,6 +29,8 @@ import { runKaraTools } from './services/karaTools.js';
 import { searchWeb } from './services/webSearch.js';
 import { cardsRouter } from './routes/cards.js';
 import { liveTeacherRouter } from './routes/liveTeacher.js';
+import { publishReelToInstagram } from './services/instagramPublish.js';
+import { publishVideoToYoutube } from './services/youtubePublish.js';
 import {
   buildKaraPrompt,
   generateKaraVisionAnswerWithFallback,
@@ -3392,6 +3394,66 @@ app.get('/api/lessons/:id/video-url', async (req, res, next) => {
       expiresInSeconds: videoAccess.videoUrlExpiresInSeconds,
       expiresAt: videoAccess.videoUrlExpiresAt
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+function absoluteMediaUrl(req, videoUrl) {
+  if (!videoUrl || /^https?:\/\//i.test(videoUrl)) {
+    return videoUrl;
+  }
+  const base = (process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+  return `${base}${videoUrl}`;
+}
+
+async function resolvePublishVideoUrl(req) {
+  const userContext = await resolveRequestUser(req);
+  const { lesson_id: lessonId } = req.body || {};
+  if (!lessonId) {
+    const error = new Error('lesson_id gerekli.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const result = await getLessonVideoForUser({ lessonId, userId: userContext.profileId });
+  if (!result) {
+    const error = new Error('Ders bulunamadi.');
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!result.video?.video_storage_path && !result.video?.local_video_path) {
+    const error = new Error('Bu ders icin henuz tamamlanmis bir video yok.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const videoAccess = await createVideoAccessPayload(result.video);
+  return absoluteMediaUrl(req, videoAccess.videoUrl);
+}
+
+// Deliberately NOT called automatically after a lesson video finishes rendering --
+// publishing to a real Instagram/YouTube account is outward-facing and hard to
+// reverse, so it stays a separate, explicit action triggered on purpose per video.
+app.post('/api/publish-instagram', async (req, res, next) => {
+  try {
+    const videoUrl = await resolvePublishVideoUrl(req);
+    const { caption } = req.body || {};
+    logInfo('Instagram Reels yayinlama basladi', { videoUrl });
+    const result = await publishReelToInstagram({ videoUrl, caption });
+    logInfo('Instagram Reels yayinlandi', result);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/publish-youtube', async (req, res, next) => {
+  try {
+    const videoUrl = await resolvePublishVideoUrl(req);
+    const { title, description, privacy_status: privacyStatus } = req.body || {};
+    logInfo('YouTube yayinlama basladi', { videoUrl });
+    const result = await publishVideoToYoutube({ videoUrl, title, description, privacyStatus });
+    logInfo('YouTube video yayinlandi', result);
+    res.json(result);
   } catch (error) {
     next(error);
   }
