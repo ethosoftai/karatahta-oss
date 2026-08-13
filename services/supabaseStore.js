@@ -534,7 +534,7 @@ export async function getLessonVideoForUser({ lessonId, userId }) {
   const [lessonResult, videoResult] = await Promise.all([
     client
       .from('lessons')
-      .select('id')
+      .select('id,title,topic')
       .eq('id', lessonId)
       .eq('user_id', userId)
       .maybeSingle(),
@@ -553,6 +553,29 @@ export async function getLessonVideoForUser({ lessonId, userId }) {
     lesson: lessonResult.data,
     video: videoResult.data || null
   };
+}
+
+export async function getLessonVideoByIdForUser({ videoId, userId }) {
+  if (!videoId || !userId) return null;
+  const client = requireSupabase();
+  const videoResult = await client
+    .from('lesson_videos')
+    .select('*')
+    .eq('id', videoId)
+    .maybeSingle();
+  if (videoResult.error) throw videoResult.error;
+  if (!videoResult.data) return null;
+
+  const lessonResult = await client
+    .from('lessons')
+    .select('id,title,topic')
+    .eq('id', videoResult.data.lesson_id)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (lessonResult.error) throw lessonResult.error;
+  if (!lessonResult.data) return null;
+
+  return { lesson: lessonResult.data, video: videoResult.data };
 }
 
 export async function savePlan({ lessonId, provider, model, prompt, plan, rawResponse }) {

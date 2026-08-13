@@ -61,6 +61,7 @@ import {
   appendGenerationEvent,
   createOAuthSignInUrl,
   getOAuthConnection,
+  getLessonVideoByIdForUser,
   saveOAuthDriveFolderId,
   saveOAuthRefreshToken,
   createGenerationJob,
@@ -168,12 +169,6 @@ const googleDriveScope = 'https://www.googleapis.com/auth/drive.file';
 const googleDriveFolderName = 'Kara Tahta Dersleri';
 const googleDriveEnabled = Boolean(googleOAuthEnabled && googleOAuthClientId && googleOAuthClientSecret);
 const signedVideoUrlTtlSeconds = process.env.SUPABASE_SIGNED_URL_TTL_SECONDS || 3600;
-// Publishing is intentionally opt-in per platform. When enabled, publishing is
-// performed by this Railway service after the final video has reached storage;
-// the browser never receives or uploads the video bytes.
-const autoPublishInstagram = String(process.env.AUTO_PUBLISH_INSTAGRAM || 'false').toLowerCase() === 'true';
-const autoPublishYoutube = String(process.env.AUTO_PUBLISH_YOUTUBE || 'false').toLowerCase() === 'true';
-const autoPublishYoutubePrivacyStatus = String(process.env.AUTO_PUBLISH_YOUTUBE_PRIVACY_STATUS || 'private').toLowerCase();
 const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
   .map((origin) => origin.trim())
@@ -1678,58 +1673,6 @@ async function concatVideos(videoRelativePaths) {
   return payload;
 }
 
-async function autoPublishFinalVideo({ job, videoUrl }) {
-  const results = {};
-  if (!videoUrl) {
-    return { skipped: 'Final video storage URL could not be created.' };
-  }
-
-  const lessonTitle = String(job.plan?.topic || 'Kara Tahta dersi').slice(0, 100);
-  const youtubeDescription = `Kara Tahta ile hazirlanan ders videosu.\n\nKonu: ${lessonTitle}`;
-  const instagramCaption = `Kara Tahta | ${lessonTitle}`;
-
-  // Both platform operations are isolated: a rejected social-media upload must
-  // never turn an otherwise finished Railway render into a failed lesson.
-  if (autoPublishInstagram) {
-    try {
-      logInfo(`Job ${job.id}: Instagram otomatik yayinlama basladi`);
-      results.instagram = {
-        status: 'published',
-        ...(await publishReelToInstagram({ videoUrl, caption: instagramCaption }))
-      };
-      logInfo(`Job ${job.id}: Instagram otomatik yayinlandi`, results.instagram);
-    } catch (error) {
-      results.instagram = { status: 'failed', error: error.message };
-      logInfo(`Job ${job.id}: Instagram otomatik yayinlanamadi`, results.instagram);
-    }
-  } else {
-    results.instagram = { status: 'disabled' };
-  }
-
-  if (autoPublishYoutube) {
-    try {
-      logInfo(`Job ${job.id}: YouTube otomatik yayinlama basladi`);
-      results.youtube = {
-        status: 'published',
-        ...(await publishVideoToYoutube({
-          videoUrl,
-          title: lessonTitle,
-          description: youtubeDescription,
-          privacyStatus: autoPublishYoutubePrivacyStatus
-        }))
-      };
-      logInfo(`Job ${job.id}: YouTube otomatik yayinlandi`, results.youtube);
-    } catch (error) {
-      results.youtube = { status: 'failed', error: error.message };
-      logInfo(`Job ${job.id}: YouTube otomatik yayinlanamadi`, results.youtube);
-    }
-  } else {
-    results.youtube = { status: 'disabled' };
-  }
-
-  return results;
-}
-
 async function createSpeechScript(segment) {
   logInfo(`${segment?.id || 'segment'}: speech metni hazirlaniyor`);
   if (!segment) {
@@ -3060,7 +3003,7 @@ async function runFullVideoJob(job) {
           })
         : null
     ));
-    await persistRequired('final-video/db', async () => {
+    const savedFinalVideo = await persistRequired('final-video/db', async () => {
       if (!job.lessonId) return null;
       const durationSeconds = concat.videoRelativePath
         ? await getMediaDurationSeconds(resolveRenderRelative(concat.videoRelativePath)).catch(() => null)
@@ -3086,18 +3029,10 @@ async function runFullVideoJob(job) {
         concat.videoUrlExpiresAt = finalAccess.expiresAt;
       }
     }
-    if (autoPublishInstagram || autoPublishYoutube) {
-      updateJob(job, {
-        current: 'Final video sosyal platformlara yukleniyor...',
-        message: 'Railway Bucket videosu otomatik yayinlaniyor.'
-      });
-      concat.autoPublish = await autoPublishFinalVideo({
-        job,
-        // A storage URL is essential here: no video bytes are sent through the
-        // Cloudflare frontend or an end-user browser.
-        videoUrl: uploadedFinalVideo?.storagePath ? concat.videoUrl : null
-      });
-    }
+    // This is the durable Bucket-video identifier returned after create-video
+    // completes. A separate /api/social-publish trigger consumes it later.
+    concat.videoId = savedFinalVideo?.id || null;
+    concat.lessonId = job.lessonId;
     job.timings.finalVideoReadyAt = new Date().toISOString();
     if (job.progressive.enabled && job.progressive.status !== 'failed') {
       job.progressive.status = 'done';
@@ -3477,17 +3412,19 @@ function absoluteMediaUrl(req, videoUrl) {
   return `${base}${videoUrl}`;
 }
 
-async function resolvePublishVideoUrl(req) {
+async function resolvePublishVideo(req) {
   const userContext = await resolveRequestUser(req);
-  const { lesson_id: lessonId } = req.body || {};
-  if (!lessonId) {
-    const error = new Error('lesson_id gerekli.');
+  const { lesson_id: lessonId, video_id: videoId } = req.body || {};
+  if (!lessonId && !videoId) {
+    const error = new Error('video_id veya lesson_id gerekli.');
     error.statusCode = 400;
     throw error;
   }
-  const result = await getLessonVideoForUser({ lessonId, userId: userContext.profileId });
+  const result = videoId
+    ? await getLessonVideoByIdForUser({ videoId, userId: userContext.profileId })
+    : await getLessonVideoForUser({ lessonId, userId: userContext.profileId });
   if (!result) {
-    const error = new Error('Ders bulunamadi.');
+    const error = new Error('Video bulunamadi veya bu kullaniciya ait degil.');
     error.statusCode = 404;
     throw error;
   }
@@ -3497,7 +3434,11 @@ async function resolvePublishVideoUrl(req) {
     throw error;
   }
   const videoAccess = await createVideoAccessPayload(result.video);
-  return absoluteMediaUrl(req, videoAccess.videoUrl);
+  return {
+    lesson: result.lesson,
+    video: result.video,
+    videoUrl: absoluteMediaUrl(req, videoAccess.videoUrl)
+  };
 }
 
 // Deliberately NOT called automatically after a lesson video finishes rendering --
@@ -3505,7 +3446,7 @@ async function resolvePublishVideoUrl(req) {
 // reverse, so it stays a separate, explicit action triggered on purpose per video.
 app.post('/api/publish-instagram', async (req, res, next) => {
   try {
-    const videoUrl = await resolvePublishVideoUrl(req);
+    const { videoUrl } = await resolvePublishVideo(req);
     const { caption } = req.body || {};
     logInfo('Instagram Reels yayinlama basladi', { videoUrl });
     const result = await publishReelToInstagram({ videoUrl, caption });
@@ -3518,12 +3459,57 @@ app.post('/api/publish-instagram', async (req, res, next) => {
 
 app.post('/api/publish-youtube', async (req, res, next) => {
   try {
-    const videoUrl = await resolvePublishVideoUrl(req);
+    const { videoUrl } = await resolvePublishVideo(req);
     const { title, description, privacy_status: privacyStatus } = req.body || {};
     logInfo('YouTube yayinlama basladi', { videoUrl });
     const result = await publishVideoToYoutube({ videoUrl, title, description, privacyStatus });
     logInfo('YouTube video yayinlandi', result);
     res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// API gate for the separate social-media workflow. The client provides only a
+// durable video_id (or lesson_id); Railway retrieves bytes from its own Bucket
+// and publishes to both destinations without proxying media through Cloudflare.
+app.post('/api/social-publish', async (req, res, next) => {
+  try {
+    const target = await resolvePublishVideo(req);
+    const {
+      caption,
+      title,
+      description = '',
+      privacy_status: privacyStatus = 'private'
+    } = req.body || {};
+    const defaultTitle = String(target.lesson?.title || target.lesson?.topic || 'Kara Tahta dersi').slice(0, 100);
+    const youtubeTitle = String(title || defaultTitle).trim().slice(0, 100);
+    const instagramCaption = String(caption || `Kara Tahta | ${defaultTitle}`).trim();
+
+    logInfo('Sosyal medya yayin triggeri basladi', {
+      lessonId: target.lesson.id,
+      videoId: target.video.id
+    });
+    const [instagram, youtube] = await Promise.allSettled([
+      publishReelToInstagram({ videoUrl: target.videoUrl, caption: instagramCaption }),
+      publishVideoToYoutube({
+        videoUrl: target.videoUrl,
+        title: youtubeTitle,
+        description: String(description),
+        privacyStatus
+      })
+    ]);
+    const toPublishResult = (result) => result.status === 'fulfilled'
+      ? { status: 'published', ...result.value }
+      : { status: 'failed', error: result.reason?.message || 'Yayinlama basarisiz.' };
+    const response = {
+      lessonId: target.lesson.id,
+      videoId: target.video.id,
+      instagram: toPublishResult(instagram),
+      youtube: toPublishResult(youtube)
+    };
+    logInfo('Sosyal medya yayin triggeri tamamlandi', response);
+    res.json(response);
   } catch (error) {
     next(error);
   }
