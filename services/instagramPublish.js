@@ -1,5 +1,8 @@
 const GRAPH_API_VERSION = process.env.INSTAGRAM_GRAPH_API_VERSION || 'v21.0';
-const GRAPH_API_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
+// Instagram Login tokens (IGA...) are valid on graph.instagram.com. They are
+// intentionally not Facebook Login/Page tokens and graph.facebook.com rejects
+// them before a publish container can be created.
+const GRAPH_API_BASE = `https://graph.instagram.com/${GRAPH_API_VERSION}`;
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
