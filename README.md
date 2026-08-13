@@ -11,9 +11,9 @@ Railway Bucket'a yazar.
 | --- | --- |
 | Production API | `https://api.example.com` |
 | Backend repo | `https://github.com/ethosoftai/karatahta-backend` |
-| Production branch | `checkpoint-9` |
+| Production branch | `feature/redis-render-workers` (13 Ağustos 2026 itibarıyla) |
 | Railway project | `<railway-project>` |
-| Railway service | `karatahta-backend` |
+| Railway services | `karatahta-backend`, `karatahta-render-worker-2`, `karatahta-social-publisher`, `Redis` |
 | Railway region | `europe-west4-drams3a` (Amsterdam), 1 replica |
 | Frontend | `https://frontend.example.com` (Cloudflare Workers) |
 | Frontend repo | `https://github.com/ethosoftai/karatahta-frontend` (`checkpoint-9`) |
@@ -26,7 +26,7 @@ geçmişinde birden fazla `checkpoint-N` branch'i var (bazıları bu reponun far
 soylarına ait, ör. HTML/Remotion render motoru denemeleri) ve hangisinin
 deploy edildiği zamanla değişti (`checkpoint-4` → `checkpoint-5` →
 `checkpoint-9` bu session içinde). **Varsayım yapmadan önce her zaman**
-`railway status --json | grep '"branch"'` ile Railway'in şu an gerçekten hangi
+`railway deployment list --service <service> --json` ile Railway'in şu an gerçekten hangi
 branch'i deploy ettiğini doğrulayın; bu README'deki tablo değeri elle
 güncellenir ve eskiyebilir. Branch'i değiştirmek için:
 
@@ -57,9 +57,15 @@ Railway / Express (server.js)
   ├─ TTS
   │    ├─ Edge TTS
   │    └─ opsiyonel Google Cloud TTS
-  ├─ Manim 0.20.1 + FFmpeg
-  │    ├─ geçici progressive fMP4 parçaları
-  │    └─ final 720p/30 FPS MP4
+  ├─ Redis + BullMQ
+  │    └─ kalıcı render iş kuyruğu
+  ├─ Render worker (ayrı Railway service)
+  │    ├─ Manim 0.20.1 + FFmpeg
+  │    └─ Bucket'a 720p/30 FPS segment MP4
+  ├─ API finalizer
+  │    └─ worker segmentlerini Bucket'tan indirip final MP4'e birleştirir
+  ├─ Social publish worker (ayrı Railway service)
+  │    └─ YouTube/Instagram yayın işleri
   └─ Railway Bucket
        ├─ final video
        ├─ segment video/ses
@@ -80,19 +86,23 @@ içindir.
 4. Streaming segment narration'ı uygunsa speech script yeniden LLM çağrısı
    yapılmadan hazırlanır. TTS, Manim kod üretimi ve uygun işler concurrency
    limitlerine göre yürür.
-5. Manim normal `self.play()` / `self.wait()` sınırlarında
-   `partial_movie_files` üretir.
-6. `PROGRESSIVE_MANIM_PARTIALS=true` ise collector yalnız kapanmış ve
+5. API her hazırlanmış segment için Supabase'de `render_worker_jobs` audit
+   kaydı oluşturur ve Redis/BullMQ kuyruğuna kalıcı kimliklerle iş bırakır.
+6. Ayrı `render-worker` service Manim + FFmpeg'i çalıştırır, segment MP4'ünü
+   Railway Bucket'a yükler ve audit kaydını `done`/`failed` olarak günceller.
+7. API worker sonucunu bekler, Bucket'tan segmenti indirir ve final birleştirme
+   için geçici olarak tutar; ağır Manim işlemi API process'inde çalışmaz.
+8. Shadow modda veya legacy render'da `PROGRESSIVE_MANIM_PARTIALS=true` ise collector yalnız kapanmış ve
    `ffprobe` doğrulamasından geçmiş MP4 parçalarını sıralı fMP4 partial olarak
    job manifestine ekler.
-7. Job güncellemeleri SSE ile `/api/jobs/:id/events` üzerinden gönderilir.
+9. Job güncellemeleri SSE ile `/api/jobs/:id/events` üzerinden gönderilir.
    Frontend manifesti ve authenticated partial endpointlerini kullanarak
    tampon hedefi dolduğunda oynatmayı başlatır.
-8. Segmentler tamamlanınca FFmpeg ses/video işlemlerini yapar; bütün
+10. Segmentler tamamlanınca API bütün
    segmentler final MP4'e birleştirilir ve faststart uygulanır.
-9. Segment/final medya Railway Bucket'a yüklenir. Supabase'e yalnız metadata
+11. Segment/final medya Railway Bucket'a yüklenir. Supabase'e yalnız metadata
    ve `railway://...` storage path yazılır.
-10. Geçmişten erişimde backend sahipliği kontrol eder ve kısa ömürlü signed S3
+12. Geçmişten erişimde backend sahipliği kontrol eder ve kısa ömürlü signed S3
     URL üretir.
 
 Progressive parçalar kullanıcı geçmişinin kalıcı videosu değildir. Bunlar
@@ -107,10 +117,9 @@ temizlenir. Kalıcı sonuç Railway Bucket'taki final videodur.
 - Railway restart/deploy sırasında canlı partial tamponu kaybolur. Frontend
   polling'e düştüğünde backend Supabase'deki lesson planını bulur ve yarım
   job'ı aynı uygulama job kimliğiyle güvenli biçimde baştan kuyruğa alır.
-- Mevcut mimaride birden fazla replica güvenli değildir: sonraki HTTP/SSE
-  isteği job'ın bulunmadığı başka replica'ya düşebilir. Redis/durable queue,
-  ortak object storage partial'ları ve worker ayrımı yapılana kadar
-  `numReplicas: 1` korunmalıdır.
+- API/SSE job state'i hâlâ `fullVideoJobs` belleğinde olduğundan API için
+  `numReplicas: 1` korunmalıdır. Render worker ise Redis üzerinden yatay
+  ölçeklenebilir; her replica yalnız `RENDER_CONCURRENCY=1` çalıştırmalıdır.
 - `RENDER_CONCURRENCY` aynı process içindeki paralel Manim sayısını belirler;
   Railway replica sayısı değildir. **CPU/RAM ölçmeden yükseltilmemelidir** —
   Railway servisi `"plan": "trial"` üzerinde (`railway status --json` içindeki
@@ -121,7 +130,7 @@ temizlenir. Kalıcı sonuç Railway Bucket'taki final videodur.
   `2`'de; production smoke testinde birden fazla render sırasında Manim
   süreçleri Python traceback üretmeden `exit code: null` ile sonlandı. Bu
   nedenle güvenli varsayılan `1`'dir; CPU/RAM ölçümü olmadan yükseltmeyin.
-  Renderer `SIGKILL`/timeout/exit-code'suz kapanmayı kod hatası değil altyapı
+  Worker renderer `SIGKILL`/timeout/exit-code'suz kapanmayı kod hatası değil altyapı
   hatası sayar ve LLM kod onarımı denemez.
 - Segmentler artık **paralel render edilir** (sıra sırayla değil): bir
   segmentin render'ı yalnız bir önceki segmentin *kodu*na bağlıdır (continuity
@@ -136,27 +145,51 @@ temizlenir. Kalıcı sonuç Railway Bucket'taki final videodur.
 - Railway filesystem kalıcı depolama olarak kullanılmaz. Yalnız geçici
   render/work dosyaları burada kalabilir; final sonuç bucket'a yazılmalıdır.
 
-## Dağıtık render worker geçişi (feature branch)
+## Dağıtık render worker (canlı)
 
-`feature/redis-render-workers` branch'i, Manim/FFmpeg yükünü API'den ayrı
-Railway servislerine taşımak için kontrollü geçiş temelini içerir. Hedef
-mimari API → Redis/BullMQ → 1..N private `render-worker` service → Railway
-Bucket + Supabase'dir. Her worker `PROCESS_ROLE=render-worker` ve
+`feature/redis-render-workers` branch'i production'da aktiftir. Mimari API →
+Redis/BullMQ → 1..N private `render-worker` service → Railway Bucket +
+Supabase'dir. Her worker `PROCESS_ROLE=render-worker` ve
 `RENDER_CONCURRENCY=1` ile yalnız bir ağır render çalıştırmalıdır.
 
-Bu branch queue payload sözleşmesini, `render_worker_jobs` audit tablosunu ve
-Bucket-temelli worker render'ını ekler. `RENDER_QUEUE_ENABLED=false` ve
-`RENDER_WORKER_SHADOW_MODE=true` varsayılanları bilinçlidir: mevcut API render
-fallback'i çalışmaya devam eder. Shadow mod yalnız teslimatı doğrular; `false`
-ile worker bağımsız MP4 üretip audit kaydını günceller. Final birleştirme ve
-SSE'nin worker sonucunu otorite kabul etmesi ayrı cutover adımıdır; o adım
-tamamlanmadan execute modunu production'da açmak aynı segmenti hem API hem
-worker üzerinde render eder.
+`migrations/009_render_worker_jobs.sql` uygulanmıştır. Execute modda
+`RENDER_QUEUE_ENABLED=true` ve `RENDER_WORKER_SHADOW_MODE=false` olmalıdır:
+API lokal render yapmaz; worker sonucu Bucket'a yazar, API final birleştirmeyi
+yapar. Shadow mod (`true`) yalnız queue teslimatını kontrol eder ve aynı
+segmenti API ile worker'da iki kez render edebilir; production execute modunda
+kullanılmamalıdır.
 
 Worker'lar aynı instance'ta child process olarak değil, Railway canvas'ta aynı
 repo kaynaklı **ayrı service/container** olarak oluşturulmalıdır. Böylece her
 worker kendi CPU/RAM limitine sahip olur; API'nin HTTP/SSE süreci Manim'in
 resource spike'larından ayrılır.
+
+### Railway değişkenleri ve rollout
+
+API ve render worker'da ortak olarak şunlar tanımlı olmalıdır:
+
+```dotenv
+RENDER_QUEUE_ENABLED=true
+REDIS_URL=${{Redis.REDIS_URL}}
+RENDER_WORKER_SHADOW_MODE=false
+RENDER_CONCURRENCY=1
+PROCESS_ROLE=render-worker # yalnız render worker service'te
+```
+
+Render worker ayrıca API'nin `SUPABASE_URL`, `SUPABASE_SECRET_KEY` ve Railway
+Bucket `MEDIA_S3_*` değişkenlerine referans vermelidir. Railway ücretsiz planı
+bu projede tek render worker service'i ile sınırlı kaldı; plan yükseltilirse
+ayrı service eklemek yerine aynı `render-worker` service'ini 2--4 replica'ya
+ölçeklemek tercih edilir.
+
+### Doğrulanmış production ölçümü
+
+13 Ağustos 2026 smoke testinde Pisagor Teoremi için hedefi 1.5 dakika olan
+video 91.9 saniye çıktı ve yaklaşık 1 dakika 40 saniyede üretildi. İki worker
+segmenti tek worker üzerinde sırayla 23.3 sn ve 26.1 sn sürdü; final
+birleştirme/Bucket aşaması yaklaşık 24 sn sürdü. Aynı iş iki worker replica ile
+render bölümü paralelleşir. Worker audit kayıtları `render_worker_jobs`
+tablosundan takip edilir.
 
 ## Repo haritası
 
@@ -169,6 +202,8 @@ services/
 ├── manimSanitizer.js             üretilen Manim kodu güvenlik/uyumluluk
 ├── progressiveManim.js           partial collector, job event kanalı
 ├── videoPostprocess.js           video normalizasyon/faststart
+├── renderQueue.js                Redis/BullMQ render queue sözleşmesi
+├── workerManimRenderer.js        worker Manim + FFmpeg render işlemi
 ├── mediaStore.js                 Railway S3 veya legacy Supabase Storage
 ├── supabaseStore.js              Auth, Postgres ve persistence
 └── karaContext.js                chat bağlamı
@@ -177,6 +212,8 @@ scripts/
 ├── configure_railway_bucket_cors.js
 └── migrate_supabase_media_to_railway.js
 migrations/                       Supabase SQL şeması
+workers/renderWorker.js           ayrı render worker giriş noktası
+workers/socialPublisher.js        YouTube/Instagram publish worker giriş noktası
 test/                             Node testleri
 Dockerfile                        Node + Python + Manim + FFmpeg image
 railway.json                      Amsterdam ve replica ayarı
@@ -435,6 +472,9 @@ node scripts/migrate_supabase_media_to_railway.js --delete-source --delete-bucke
 | `GET /api/lessons/:id` | Ders, segment, chat ve video detayı |
 | `GET /api/lessons/:id/video-url` | Private final video için signed URL |
 | `POST /api/generate-lesson` | Planı başlatır ve `202` job döndürür |
+| `POST /api/publish-youtube` | Tamamlanmış dersi social worker ile YouTube'a yollar (`privacy_status`: `private`/`unlisted`/`public`) |
+| `POST /api/publish-instagram` | Tamamlanmış dersi Instagram worker'a yollar |
+| `GET /api/social-publish/:id` | Yayın işinin durumunu ve platform sonucunu döndürür |
 | `GET /api/jobs/:id` | Job snapshot/polling fallback |
 | `GET /api/jobs/:id/events` | Authenticated SSE job akışı |
 | `GET /api/jobs/:id/stream-manifest` | Sıralı progressive partial metadata |
