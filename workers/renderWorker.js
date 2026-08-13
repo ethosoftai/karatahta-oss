@@ -43,7 +43,7 @@ const worker = createRenderWorker(async (task, queueJob) => {
     id: task.workerJobId,
     status: 'running',
     workerId,
-    attempt: Number(queueJob.attemptsStartedOn || 0),
+    attempt: Number(queueJob.attemptsStarted || 0),
     queueJobId: String(queueJob.id)
   });
   let rendered = null;
