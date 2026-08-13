@@ -53,7 +53,9 @@ export function normalizeRenderTask(task = {}) {
 export async function enqueueRenderTask(task, { queue = null } = {}) {
   const payload = normalizeRenderTask(task);
   return (queue || createRenderQueue()).add('render-segment', payload, {
-    jobId: `${payload.appJobId}:${payload.segmentIndex}`,
+    // BullMQ custom IDs reject colons. Base64url preserves every app job ID
+    // without collisions while keeping the queue ID delimiter-safe.
+    jobId: `${Buffer.from(payload.appJobId).toString('base64url')}--segment-${payload.segmentIndex}`,
     attempts: 1,
     removeOnComplete: { age: 24 * 60 * 60 },
     removeOnFail: { age: 7 * 24 * 60 * 60 }
