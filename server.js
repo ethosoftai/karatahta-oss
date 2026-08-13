@@ -168,6 +168,12 @@ const googleDriveScope = 'https://www.googleapis.com/auth/drive.file';
 const googleDriveFolderName = 'Kara Tahta Dersleri';
 const googleDriveEnabled = Boolean(googleOAuthEnabled && googleOAuthClientId && googleOAuthClientSecret);
 const signedVideoUrlTtlSeconds = process.env.SUPABASE_SIGNED_URL_TTL_SECONDS || 3600;
+// Publishing is intentionally opt-in per platform. When enabled, publishing is
+// performed by this Railway service after the final video has reached storage;
+// the browser never receives or uploads the video bytes.
+const autoPublishInstagram = String(process.env.AUTO_PUBLISH_INSTAGRAM || 'false').toLowerCase() === 'true';
+const autoPublishYoutube = String(process.env.AUTO_PUBLISH_YOUTUBE || 'false').toLowerCase() === 'true';
+const autoPublishYoutubePrivacyStatus = String(process.env.AUTO_PUBLISH_YOUTUBE_PRIVACY_STATUS || 'private').toLowerCase();
 const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
   .map((origin) => origin.trim())
@@ -1672,6 +1678,58 @@ async function concatVideos(videoRelativePaths) {
   return payload;
 }
 
+async function autoPublishFinalVideo({ job, videoUrl }) {
+  const results = {};
+  if (!videoUrl) {
+    return { skipped: 'Final video storage URL could not be created.' };
+  }
+
+  const lessonTitle = String(job.plan?.topic || 'Kara Tahta dersi').slice(0, 100);
+  const youtubeDescription = `Kara Tahta ile hazirlanan ders videosu.\n\nKonu: ${lessonTitle}`;
+  const instagramCaption = `Kara Tahta | ${lessonTitle}`;
+
+  // Both platform operations are isolated: a rejected social-media upload must
+  // never turn an otherwise finished Railway render into a failed lesson.
+  if (autoPublishInstagram) {
+    try {
+      logInfo(`Job ${job.id}: Instagram otomatik yayinlama basladi`);
+      results.instagram = {
+        status: 'published',
+        ...(await publishReelToInstagram({ videoUrl, caption: instagramCaption }))
+      };
+      logInfo(`Job ${job.id}: Instagram otomatik yayinlandi`, results.instagram);
+    } catch (error) {
+      results.instagram = { status: 'failed', error: error.message };
+      logInfo(`Job ${job.id}: Instagram otomatik yayinlanamadi`, results.instagram);
+    }
+  } else {
+    results.instagram = { status: 'disabled' };
+  }
+
+  if (autoPublishYoutube) {
+    try {
+      logInfo(`Job ${job.id}: YouTube otomatik yayinlama basladi`);
+      results.youtube = {
+        status: 'published',
+        ...(await publishVideoToYoutube({
+          videoUrl,
+          title: lessonTitle,
+          description: youtubeDescription,
+          privacyStatus: autoPublishYoutubePrivacyStatus
+        }))
+      };
+      logInfo(`Job ${job.id}: YouTube otomatik yayinlandi`, results.youtube);
+    } catch (error) {
+      results.youtube = { status: 'failed', error: error.message };
+      logInfo(`Job ${job.id}: YouTube otomatik yayinlanamadi`, results.youtube);
+    }
+  } else {
+    results.youtube = { status: 'disabled' };
+  }
+
+  return results;
+}
+
 async function createSpeechScript(segment) {
   logInfo(`${segment?.id || 'segment'}: speech metni hazirlaniyor`);
   if (!segment) {
@@ -3027,6 +3085,18 @@ async function runFullVideoJob(job) {
         concat.videoUrlExpiresInSeconds = finalAccess.expiresInSeconds;
         concat.videoUrlExpiresAt = finalAccess.expiresAt;
       }
+    }
+    if (autoPublishInstagram || autoPublishYoutube) {
+      updateJob(job, {
+        current: 'Final video sosyal platformlara yukleniyor...',
+        message: 'Railway Bucket videosu otomatik yayinlaniyor.'
+      });
+      concat.autoPublish = await autoPublishFinalVideo({
+        job,
+        // A storage URL is essential here: no video bytes are sent through the
+        // Cloudflare frontend or an end-user browser.
+        videoUrl: uploadedFinalVideo?.storagePath ? concat.videoUrl : null
+      });
     }
     job.timings.finalVideoReadyAt = new Date().toISOString();
     if (job.progressive.enabled && job.progressive.status !== 'failed') {
