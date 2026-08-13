@@ -7,7 +7,7 @@ function requireQueue() {
   return supabase;
 }
 
-export async function createSocialPublishJob({ lessonId, videoId, userId, caption, title, description, privacyStatus }) {
+export async function createSocialPublishJob({ lessonId, videoId, userId, targetPlatform, caption, title, description, privacyStatus }) {
   const client = requireQueue();
   const { data, error } = await client
     .from('social_publish_jobs')
@@ -15,6 +15,7 @@ export async function createSocialPublishJob({ lessonId, videoId, userId, captio
       lesson_id: lessonId,
       video_id: videoId,
       user_id: userId,
+      target_platform: targetPlatform,
       caption: caption || null,
       title: title || null,
       description: description || null,

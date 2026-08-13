@@ -29,8 +29,6 @@ import { runKaraTools } from './services/karaTools.js';
 import { searchWeb } from './services/webSearch.js';
 import { cardsRouter } from './routes/cards.js';
 import { liveTeacherRouter } from './routes/liveTeacher.js';
-import { publishReelToInstagram } from './services/instagramPublish.js';
-import { publishVideoToYoutube } from './services/youtubePublish.js';
 import { createSocialPublishJob, getSocialPublishJobForUser } from './services/socialPublishQueue.js';
 import {
   buildKaraPrompt,
@@ -3445,44 +3443,10 @@ async function resolvePublishVideo(req) {
 // Deliberately NOT called automatically after a lesson video finishes rendering --
 // publishing to a real Instagram/YouTube account is outward-facing and hard to
 // reverse, so it stays a separate, explicit action triggered on purpose per video.
-app.post('/api/publish-instagram', async (req, res, next) => {
-  try {
-    const { videoUrl } = await resolvePublishVideo(req);
-    const { caption } = req.body || {};
-    logInfo('Instagram Reels yayinlama basladi', { videoUrl });
-    const result = await publishReelToInstagram({ videoUrl, caption });
-    logInfo('Instagram Reels yayinlandi', result);
-    res.json(result);
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post('/api/publish-youtube', async (req, res, next) => {
-  try {
-    const { videoUrl } = await resolvePublishVideo(req);
-    const { title, description, privacy_status: privacyStatus } = req.body || {};
-    logInfo('YouTube yayinlama basladi', { videoUrl });
-    const result = await publishVideoToYoutube({ videoUrl, title, description, privacyStatus });
-    logInfo('YouTube video yayinlandi', result);
-    res.json(result);
-  } catch (error) {
-    next(error);
-  }
-});
-
-// API gate for the separate social-media workflow. The client provides only a
-// durable video_id (or lesson_id); Railway retrieves bytes from its own Bucket
-// and publishes to both destinations without proxying media through Cloudflare.
-app.post('/api/social-publish', async (req, res, next) => {
+async function queuePlatformPublish(req, res, next, targetPlatform) {
   try {
     const target = await resolvePublishVideo(req);
-    const {
-      caption,
-      title,
-      description = '',
-      privacy_status: privacyStatus = 'private'
-    } = req.body || {};
+    const { caption, title, description = '', privacy_status: privacyStatus = 'private' } = req.body || {};
     const normalizedPrivacyStatus = String(privacyStatus).toLowerCase();
     if (!['private', 'unlisted', 'public'].includes(normalizedPrivacyStatus)) {
       const error = new Error('privacy_status private, unlisted veya public olmali.');
@@ -3494,12 +3458,13 @@ app.post('/api/social-publish', async (req, res, next) => {
       lessonId: target.lesson.id,
       videoId: target.video.id,
       userId: userContext.profileId,
+      targetPlatform,
       caption: String(caption || '').trim(),
       title: String(title || '').trim().slice(0, 100),
       description: String(description),
       privacyStatus: normalizedPrivacyStatus
     });
-    logInfo('Sosyal medya yayin isi kuyruga eklendi', {
+    logInfo(`${targetPlatform} yayin isi kuyruga eklendi`, {
       lessonId: target.lesson.id,
       videoId: target.video.id,
       publishJobId: job.id
@@ -3508,11 +3473,27 @@ app.post('/api/social-publish', async (req, res, next) => {
       publishJobId: job.id,
       lessonId: target.lesson.id,
       videoId: target.video.id,
+      platform: targetPlatform,
       status: job.status
     });
   } catch (error) {
     next(error);
   }
+}
+
+app.post('/api/publish-instagram', async (req, res, next) => {
+  await queuePlatformPublish(req, res, next, 'instagram');
+});
+
+app.post('/api/publish-youtube', async (req, res, next) => {
+  await queuePlatformPublish(req, res, next, 'youtube');
+});
+
+// API gate for the separate social-media workflow. The client provides only a
+// durable video_id (or lesson_id); Railway retrieves bytes from its own Bucket
+// and publishes to both destinations without proxying media through Cloudflare.
+app.post('/api/social-publish', async (req, res, next) => {
+  await queuePlatformPublish(req, res, next, 'both');
 });
 
 app.get('/api/social-publish/:id', async (req, res, next) => {
