@@ -67,6 +67,7 @@ import {
   saveOAuthRefreshToken,
   createGenerationJob,
   createRenderWorkerJob,
+  getRenderWorkerJob,
   updateRenderWorkerJob,
   createLesson,
   deleteLesson,
@@ -284,6 +285,7 @@ const ttsConcurrency = positiveConcurrency(process.env.TTS_CONCURRENCY, 4);
 const codeConcurrency = positiveConcurrency(process.env.CODE_CONCURRENCY, 2);
 const renderConcurrency = positiveConcurrency(process.env.RENDER_CONCURRENCY, 2);
 const renderWorkerShadowMode = String(process.env.RENDER_WORKER_SHADOW_MODE || 'true').toLowerCase() !== 'false';
+const renderWorkerExecuteEnabled = renderQueueConfigured() && !renderWorkerShadowMode;
 const streamingPlanFirstSegmentEnabled = String(
   process.env.STREAMING_PLAN_FIRST_SEGMENT || 'false'
 ).toLowerCase() === 'true';
@@ -1279,6 +1281,28 @@ async function uploadRenderRelative({ bucket, userId, lessonId, segmentKey, kind
     fileName: fileNameFromLocalPath(localPath)
   });
   return uploadLocalFile({ bucket, localPath, storagePath, contentType });
+}
+
+async function downloadWorkerVideo({ storagePath, segmentId }) {
+  const access = await createStorageSignedUrl({ bucket: 'videos', storagePath, expiresInSeconds: 3600 });
+  const response = await fetch(access.signedUrl);
+  if (!response.ok) throw new Error(`Worker videosu indirilemedi: HTTP ${response.status}`);
+  const targetDir = path.join(rendersDir, `worker-${Date.now()}-${randomUUID().slice(0, 8)}-${sanitizeSegmentId(segmentId)}`);
+  const localPath = path.join(targetDir, 'segment.mp4');
+  await fs.mkdir(targetDir, { recursive: true });
+  await fs.writeFile(localPath, Buffer.from(await response.arrayBuffer()));
+  return path.relative(rendersDir, localPath).replaceAll(path.sep, '/');
+}
+
+async function waitForWorkerRender(workerJobId, { timeoutMs = 12 * 60 * 1000, pollMs = 1500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const record = await getRenderWorkerJob(workerJobId);
+    if (record?.status === 'done') return record;
+    if (record?.status === 'failed') throw new Error(`Render worker basarisiz oldu: ${record.error || 'bilinmeyen hata'}`);
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  throw new Error('Render worker sonucu zaman asimina ugradi.');
 }
 
 function getSceneClassName(code) {
@@ -2837,9 +2861,10 @@ async function runFullVideoJob(job) {
               })
             : null
         ));
+        let workerRecord = null;
         if (renderQueueConfigured()) {
           try {
-            const workerRecord = await persistRequired(`${segment.id}/render-worker-job`, () => (
+            workerRecord = await persistRequired(`${segment.id}/render-worker-job`, () => (
               createRenderWorkerJob({
                 generationJobId: job.dbJobId,
                 lessonId: job.lessonId,
@@ -2890,7 +2915,7 @@ async function runFullVideoJob(job) {
         if (index === 0) {
           logInfo(`Job ${job.id}: ilk segment render icin hazir; diger Manim kodlari baslayabilir`);
         }
-        return { ok: true, segment, dbSegment, speech, manimCode, code, tts, uploadedAudio };
+        return { ok: true, segment, dbSegment, speech, manimCode, code, tts, uploadedAudio, workerRecord };
       } catch (error) {
         codeDeferreds[index].reject(error);
         logInfo(`${segment.id}: segment hazirlanamadi`, { error: error.message });
@@ -2962,7 +2987,23 @@ async function runFullVideoJob(job) {
           message: `${job.progress}/${job.total} segment tamamlandi, ${prepared.segment.id} render ediliyor.`
         });
 
-        const render = await limitRender(() => {
+        let render;
+        let workerRenderRecord = null;
+        if (renderWorkerExecuteEnabled) {
+          if (!prepared.workerRecord?.id) throw new Error('Render worker kaydi bulunamadi.');
+          updateJob(job, { current: `${prepared.segment.id}: render worker bekleniyor...` });
+          workerRenderRecord = await waitForWorkerRender(prepared.workerRecord.id);
+          const workerStoragePath = workerRenderRecord.output?.videoStoragePath;
+          if (!workerStoragePath) throw new Error('Render worker video nesne yolunu dondurmedi.');
+          const videoRelativePath = await downloadWorkerVideo({ storagePath: workerStoragePath, segmentId: prepared.segment.id });
+          render = {
+            videoRelativePath,
+            durationSeconds: workerRenderRecord.output?.durationSeconds || null,
+            stdout: '', stderr: '', hasMusic: false, backgroundMusic: null,
+            videoUrl: createLocalMediaUrl(videoRelativePath)
+          };
+        } else {
+          render = await limitRender(() => {
           // This task may sit in the render limiter after another segment has
           // failed. Re-check cancellation at the moment it gets a slot.
           ensureJobActive();
@@ -2971,14 +3012,17 @@ async function runFullVideoJob(job) {
             segmentId: prepared.segment.id,
             audioRelativePath: prepared.tts.audioRelativePath,
             speechText: prepared.speech.speech_text,
-            progressiveContext: job.progressive.enabled && job.progressive.status !== 'failed'
+            progressiveContext: !renderWorkerExecuteEnabled && job.progressive.enabled && job.progressive.status !== 'failed'
               ? { job, segmentIndex: index }
               : null,
             ttsOptions: job.ttsOptions
           });
-        });
+          });
+        }
         job.timings.firstSegmentCompletedAt ||= new Date().toISOString();
-        const uploadedVideo = await persistRequired(`${prepared.segment.id}/video-upload`, () => (
+        const uploadedVideo = workerRenderRecord?.output?.videoStoragePath
+          ? { storagePath: workerRenderRecord.output.videoStoragePath }
+          : await persistRequired(`${prepared.segment.id}/video-upload`, () => (
           job.lessonId
             ? uploadRenderRelative({
                 bucket: 'videos',
@@ -2992,6 +3036,10 @@ async function runFullVideoJob(job) {
             : null
         ));
         const dbRender = await persistRequired(`${prepared.segment.id}/video-render`, async () => {
+          if (workerRenderRecord?.output?.videoRenderId) {
+            await updateSegment(prepared.dbSegment.id, { status: 'render_done' });
+            return { id: workerRenderRecord.output.videoRenderId };
+          }
           if (!prepared.dbSegment?.id) return null;
           await updateSegment(prepared.dbSegment.id, { status: 'render_done' });
           return saveVideoRender({
@@ -3064,7 +3112,7 @@ async function runFullVideoJob(job) {
 
     const concat = await concatVideos(videoPaths);
     job._artifactPaths.add(path.dirname(resolveRenderRelative(concat.videoRelativePath)));
-    concat.source = job.progressive.enabled && job.progressive.status !== 'failed'
+    concat.source = !renderWorkerExecuteEnabled && job.progressive.enabled && job.progressive.status !== 'failed'
       ? 'progressive_partials'
       : 'traditional';
     const uploadedFinalVideo = await persistRequired('final-video/upload', () => (

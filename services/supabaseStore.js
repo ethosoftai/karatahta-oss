@@ -847,6 +847,17 @@ export async function updateRenderWorkerJob({ id, status, workerId, attempt, que
   return rows?.[0] || null;
 }
 
+export async function getRenderWorkerJob(id) {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('render_worker_jobs')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
 export async function getRenderWorkerInput({ lessonId, segmentId }) {
   const client = requireSupabase();
   const { data: segment, error: segmentError } = await client
