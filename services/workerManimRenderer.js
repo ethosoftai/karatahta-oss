@@ -38,12 +38,16 @@ function sceneClassName(code) {
 
 async function newestMp4(rootDir) {
   const entries = await fs.readdir(rootDir, { withFileTypes: true });
-  const files = (await Promise.all(entries.map(async (entry) => {
+  const nestedFiles = await Promise.all(entries.map(async (entry) => {
     const fullPath = path.join(rootDir, entry.name);
-    if (entry.isDirectory()) return newestMp4(fullPath).catch(() => []);
+    if (entry.isDirectory()) {
+      const nested = await newestMp4(fullPath).catch(() => null);
+      return nested ? [{ fullPath: nested, mtimeMs: (await fs.stat(nested)).mtimeMs }] : [];
+    }
     if (!entry.isFile() || !entry.name.endsWith('.mp4')) return [];
     return [{ fullPath, mtimeMs: (await fs.stat(fullPath)).mtimeMs }];
-  }))).flat();
+  }));
+  const files = nestedFiles.flat().filter((file) => file && Number.isFinite(file.mtimeMs));
   return files.sort((left, right) => right.mtimeMs - left.mtimeMs)[0]?.fullPath || null;
 }
 
