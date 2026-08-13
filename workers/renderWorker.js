@@ -26,6 +26,16 @@ if (!renderQueueConfigured()) {
 // intentionally produces a second, Bucket-backed render for comparison.
 const worker = createRenderWorker(async (task, queueJob) => {
   if (shadowMode) {
+    if (task.workerJobId) {
+      await updateRenderWorkerJob({
+        id: task.workerJobId,
+        status: 'done',
+        workerId,
+        attempt: Number(queueJob.attemptsStarted || 0),
+        queueJobId: String(queueJob.id),
+        output: { mode: 'shadow', receivedAt: new Date().toISOString() }
+      });
+    }
     log('Shadow render task dogrulandi', {
       appJobId: task.appJobId,
       lessonId: task.lessonId,
