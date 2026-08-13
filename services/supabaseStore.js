@@ -384,7 +384,9 @@ export async function createLesson({ userId = devUserId, title, topic, studentLe
     title: title || topic || 'Yeni ders',
     topic: topic || title || null,
     student_level: studentLevel || null,
-    target_minutes: targetMinutes || null,
+    // The legacy schema stores this display field as integer minutes. The
+    // persisted lesson plan retains the precise duration (e.g. 1.5 minutes).
+    target_minutes: Number.isFinite(Number(targetMinutes)) ? Math.ceil(Number(targetMinutes)) : null,
     target_segment_count: targetSegmentCount || null,
     status: 'planned',
     source_type: sourceType || 'topic'
