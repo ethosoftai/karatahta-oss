@@ -31,6 +31,7 @@ import { cardsRouter } from './routes/cards.js';
 import { liveTeacherRouter } from './routes/liveTeacher.js';
 import { publishReelToInstagram } from './services/instagramPublish.js';
 import { publishVideoToYoutube } from './services/youtubePublish.js';
+import { createSocialPublishJob, getSocialPublishJobForUser } from './services/socialPublishQueue.js';
 import {
   buildKaraPrompt,
   generateKaraVisionAnswerWithFallback,
@@ -3482,34 +3483,44 @@ app.post('/api/social-publish', async (req, res, next) => {
       description = '',
       privacy_status: privacyStatus = 'private'
     } = req.body || {};
-    const defaultTitle = String(target.lesson?.title || target.lesson?.topic || 'Kara Tahta dersi').slice(0, 100);
-    const youtubeTitle = String(title || defaultTitle).trim().slice(0, 100);
-    const instagramCaption = String(caption || `Kara Tahta | ${defaultTitle}`).trim();
-
-    logInfo('Sosyal medya yayin triggeri basladi', {
-      lessonId: target.lesson.id,
-      videoId: target.video.id
-    });
-    const [instagram, youtube] = await Promise.allSettled([
-      publishReelToInstagram({ videoUrl: target.videoUrl, caption: instagramCaption }),
-      publishVideoToYoutube({
-        videoUrl: target.videoUrl,
-        title: youtubeTitle,
-        description: String(description),
-        privacyStatus
-      })
-    ]);
-    const toPublishResult = (result) => result.status === 'fulfilled'
-      ? { status: 'published', ...result.value }
-      : { status: 'failed', error: result.reason?.message || 'Yayinlama basarisiz.' };
-    const response = {
+    const normalizedPrivacyStatus = String(privacyStatus).toLowerCase();
+    if (!['private', 'unlisted', 'public'].includes(normalizedPrivacyStatus)) {
+      const error = new Error('privacy_status private, unlisted veya public olmali.');
+      error.statusCode = 400;
+      throw error;
+    }
+    const userContext = await resolveRequestUser(req);
+    const job = await createSocialPublishJob({
       lessonId: target.lesson.id,
       videoId: target.video.id,
-      instagram: toPublishResult(instagram),
-      youtube: toPublishResult(youtube)
-    };
-    logInfo('Sosyal medya yayin triggeri tamamlandi', response);
-    res.json(response);
+      userId: userContext.profileId,
+      caption: String(caption || '').trim(),
+      title: String(title || '').trim().slice(0, 100),
+      description: String(description),
+      privacyStatus: normalizedPrivacyStatus
+    });
+    logInfo('Sosyal medya yayin isi kuyruga eklendi', {
+      lessonId: target.lesson.id,
+      videoId: target.video.id,
+      publishJobId: job.id
+    });
+    res.status(202).json({
+      publishJobId: job.id,
+      lessonId: target.lesson.id,
+      videoId: target.video.id,
+      status: job.status
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/social-publish/:id', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const job = await getSocialPublishJobForUser({ jobId: req.params.id, userId: userContext.profileId });
+    if (!job) return res.status(404).json({ error: 'Sosyal medya yayin isi bulunamadi.' });
+    res.json(job);
   } catch (error) {
     next(error);
   }

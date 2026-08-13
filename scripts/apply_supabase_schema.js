@@ -36,7 +36,8 @@ async function main() {
     '003_security_and_storage.sql',
     '004_lesson_detail_indexes.sql',
     '005_oauth_connections.sql',
-    '006_oauth_drive_folder.sql'
+    '006_oauth_drive_folder.sql',
+    '007_social_publish_jobs.sql'
   ];
   const client = new Client({
     connectionString: getConnectionString(),
