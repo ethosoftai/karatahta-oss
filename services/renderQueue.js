@@ -31,6 +31,7 @@ export function normalizeRenderTask(task = {}) {
   const appJobId = String(task.appJobId || '').trim();
   const lessonId = String(task.lessonId || '').trim();
   const segmentId = String(task.segmentId || '').trim();
+  const workerJobId = String(task.workerJobId || '').trim();
   const segmentIndex = Number(task.segmentIndex);
   if (!appJobId || !lessonId || !segmentId || !Number.isInteger(segmentIndex) || segmentIndex < 0) {
     throw new Error('Render task appJobId, lessonId, segmentId ve segmentIndex gerektirir.');
@@ -39,6 +40,7 @@ export function normalizeRenderTask(task = {}) {
     appJobId,
     lessonId,
     segmentId,
+    workerJobId: workerJobId || null,
     segmentIndex,
     requestedAt: task.requestedAt || new Date().toISOString(),
     // Worker payloads may only refer to durable Bucket data, never /renders.

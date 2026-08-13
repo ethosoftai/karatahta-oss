@@ -822,6 +822,64 @@ export async function appendGenerationEvent({ jobId, lessonId, segmentId, level 
   });
 }
 
+export async function createRenderWorkerJob({ generationJobId, lessonId, segmentId, segmentIndex, input }) {
+  return insertRow('render_worker_jobs', {
+    generation_job_id: generationJobId,
+    lesson_id: lessonId,
+    segment_id: segmentId || null,
+    segment_index: segmentIndex,
+    input: input || {}
+  });
+}
+
+export async function updateRenderWorkerJob({ id, status, workerId, attempt, queueJobId, output, error, completedAt }) {
+  const payload = { updated_at: new Date().toISOString() };
+  if (status !== undefined) payload.status = status;
+  if (workerId !== undefined) payload.worker_id = workerId || null;
+  if (Number.isFinite(attempt)) payload.attempt = attempt;
+  if (queueJobId !== undefined) payload.queue_job_id = queueJobId || null;
+  if (output !== undefined) payload.output = output || null;
+  if (error !== undefined) payload.error = error || null;
+  if (status === 'running') payload.started_at = new Date().toISOString();
+  if (completedAt !== undefined) payload.completed_at = completedAt;
+  else if (['done', 'failed'].includes(status)) payload.completed_at = new Date().toISOString();
+  const rows = await updateRows('render_worker_jobs', { id }, payload);
+  return rows?.[0] || null;
+}
+
+export async function getRenderWorkerInput({ lessonId, segmentId }) {
+  const client = requireSupabase();
+  const { data: segment, error: segmentError } = await client
+    .from('lesson_segments')
+    .select('id, lesson_id, segment_key, lessons!inner(user_id)')
+    .eq('lesson_id', lessonId)
+    .eq('segment_key', segmentId)
+    .maybeSingle();
+  if (segmentError) throw segmentError;
+  if (!segment) return null;
+  const { data: code, error: codeError } = await client
+    .from('manim_codes')
+    .select('*')
+    .eq('segment_id', segment.id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (codeError) throw codeError;
+  const { data: tts, error: ttsError } = await client
+    .from('tts_outputs')
+    .select('*')
+    .eq('segment_id', segment.id)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (ttsError) throw ttsError;
+  return {
+    segment: { ...segment, user_id: segment.lessons?.user_id || null },
+    code,
+    tts
+  };
+}
+
 export async function getOrCreateChat({ userId = devUserId, lessonId }) {
   if (userId === devUserId) {
     await ensureDevProfile();

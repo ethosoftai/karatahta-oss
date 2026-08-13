@@ -5,10 +5,12 @@ import { normalizeRenderTask, renderQueueConfigured } from '../services/renderQu
 test('render task yalniz kalici kimlik ve storage referanslariyla normalize edilir', () => {
   const task = normalizeRenderTask({
     appJobId: 'job-1', lessonId: 'lesson-1', segmentId: 's1', segmentIndex: 0,
+    workerJobId: 'worker-job-1',
     audioStoragePath: 'railway://audio/u/l/s1.mp3'
   });
   assert.equal(task.segmentIndex, 0);
   assert.equal(task.audioStoragePath, 'railway://audio/u/l/s1.mp3');
+  assert.equal(task.workerJobId, 'worker-job-1');
 });
 
 test('eksik render task kimliklerini reddeder', () => {

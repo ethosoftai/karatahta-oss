@@ -144,11 +144,14 @@ mimari API → Redis/BullMQ → 1..N private `render-worker` service → Railway
 Bucket + Supabase'dir. Her worker `PROCESS_ROLE=render-worker` ve
 `RENDER_CONCURRENCY=1` ile yalnız bir ağır render çalıştırmalıdır.
 
-Bu branch'in ilk adımı queue payload sözleşmesini, `render_worker_jobs` audit
-tablosunu ve shadow worker'ı ekler. `RENDER_QUEUE_ENABLED=false` varsayılanı
-bilinçlidir: mevcut API render fallback'i çalışmaya devam eder. Redis service,
-en az bir private worker ve Bucket-temelli input/output transferi eksiksiz
-hazır olmadan bu flag production'da açılmamalıdır.
+Bu branch queue payload sözleşmesini, `render_worker_jobs` audit tablosunu ve
+Bucket-temelli worker render'ını ekler. `RENDER_QUEUE_ENABLED=false` ve
+`RENDER_WORKER_SHADOW_MODE=true` varsayılanları bilinçlidir: mevcut API render
+fallback'i çalışmaya devam eder. Shadow mod yalnız teslimatı doğrular; `false`
+ile worker bağımsız MP4 üretip audit kaydını günceller. Final birleştirme ve
+SSE'nin worker sonucunu otorite kabul etmesi ayrı cutover adımıdır; o adım
+tamamlanmadan execute modunu production'da açmak aynı segmenti hem API hem
+worker üzerinde render eder.
 
 Worker'lar aynı instance'ta child process olarak değil, Railway canvas'ta aynı
 repo kaynaklı **ayrı service/container** olarak oluşturulmalıdır. Böylece her

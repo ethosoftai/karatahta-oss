@@ -66,6 +66,8 @@ import {
   saveOAuthDriveFolderId,
   saveOAuthRefreshToken,
   createGenerationJob,
+  createRenderWorkerJob,
+  updateRenderWorkerJob,
   createLesson,
   deleteLesson,
   extensionFromContentType,
@@ -281,6 +283,7 @@ const speechConcurrency = positiveConcurrency(process.env.SPEECH_CONCURRENCY, 3)
 const ttsConcurrency = positiveConcurrency(process.env.TTS_CONCURRENCY, 4);
 const codeConcurrency = positiveConcurrency(process.env.CODE_CONCURRENCY, 2);
 const renderConcurrency = positiveConcurrency(process.env.RENDER_CONCURRENCY, 2);
+const renderWorkerShadowMode = String(process.env.RENDER_WORKER_SHADOW_MODE || 'true').toLowerCase() !== 'false';
 const streamingPlanFirstSegmentEnabled = String(
   process.env.STREAMING_PLAN_FIRST_SEGMENT || 'false'
 ).toLowerCase() === 'true';
@@ -2836,24 +2839,42 @@ async function runFullVideoJob(job) {
         ));
         if (renderQueueConfigured()) {
           try {
-            const shadowTask = await enqueueRenderTask({
+            const workerRecord = await persistRequired(`${segment.id}/render-worker-job`, () => (
+              createRenderWorkerJob({
+                generationJobId: job.dbJobId,
+                lessonId: job.lessonId,
+                segmentId: dbSegment?.id || null,
+                segmentIndex: index,
+                input: {
+                  mode: renderWorkerShadowMode ? 'shadow' : 'execute',
+                  audioStoragePath: uploadedAudio?.storagePath || null,
+                  manimCodeId: manimCode?.id || null
+                }
+              })
+            ));
+            if (!workerRecord?.id) {
+              throw new Error('Render worker audit kaydi olusturulamadi.');
+            }
+            const queuedTask = await enqueueRenderTask({
               appJobId: job.id,
               lessonId: job.lessonId,
               segmentId: segment.id,
               segmentIndex: index,
+              workerJobId: workerRecord?.id || null,
               audioStoragePath: uploadedAudio?.storagePath || null,
               metadata: {
-                mode: 'shadow',
+                mode: renderWorkerShadowMode ? 'shadow' : 'execute',
                 manimCodeId: manimCode?.id || null,
                 durationSeconds: tts.durationSeconds
               }
             });
-            logInfo(`${segment.id}: render worker shadow task kuyruga eklendi`, {
-              queueJobId: shadowTask.id
+            await updateRenderWorkerJob({ id: workerRecord.id, status: 'queued', queueJobId: String(queuedTask.id) });
+            logInfo(`${segment.id}: render worker ${renderWorkerShadowMode ? 'shadow ' : ''}task kuyruga eklendi`, {
+              queueJobId: queuedTask.id
             });
           } catch (queueError) {
-            // Shadow telemetry cannot make the existing render pipeline fail.
-            logInfo(`${segment.id}: render worker shadow task eklenemedi`, {
+            // Queue telemetry cannot make the existing API render pipeline fail.
+            logInfo(`${segment.id}: render worker task eklenemedi`, {
               error: queueError.message
             });
           }
