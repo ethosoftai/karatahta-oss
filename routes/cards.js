@@ -167,13 +167,13 @@ cardsRouter.post('/api/cards/sessions/:id/publish-instagram', async (req, res, n
       }
       const jpegBuffer = await convertPngBufferToJpeg(Buffer.from(await response.arrayBuffer()));
       const jpegPath = `cards/${userContext.profileId}/${session.id}/carousel/card-${index}.jpg`;
-      await uploadDataUrl({
+      const uploadedJpeg = await uploadDataUrl({
         bucket: 'attachments',
         storagePath: jpegPath,
         dataUrl: `data:image/jpeg;base64,${jpegBuffer.toString('base64')}`,
         contentType: 'image/jpeg'
       });
-      const jpegSigned = await createStorageSignedUrl({ bucket: 'attachments', storagePath: jpegPath, expiresInSeconds: 600 });
+      const jpegSigned = await createStorageSignedUrl({ bucket: 'attachments', storagePath: uploadedJpeg.storagePath, expiresInSeconds: 600 });
       return jpegSigned.signedUrl;
     }));
 
