@@ -30,7 +30,9 @@ import { assertSafeKaraManimCode } from './services/karaManimSafety.js';
 import { runKaraTools } from './services/karaTools.js';
 import { searchWeb } from './services/webSearch.js';
 import { cardsRouter } from './routes/cards.js';
-import { liveTeacherRouter } from './routes/liveTeacher.js';
+// Canlı öğretmen bölümü devre dışı bırakıldı; routes/liveTeacher.js ve
+// services/liveTeacherEngine.js silinmedi, yalnızca mount edilmiyor.
+// import { liveTeacherRouter } from './routes/liveTeacher.js';
 import { createSocialPublishJob, getSocialPublishJobForUser } from './services/socialPublishQueue.js';
 import {
   buildKaraPrompt,
@@ -100,6 +102,9 @@ import {
   saveTtsOutput,
   saveVideoRender,
   listLessonsForUser,
+  listPublicCatalogLessons,
+  listCatalogLessonsForUser,
+  getPublicLessonVideo,
   signInWithPassword,
   signUpWithPassword,
   supabaseConfigured,
@@ -119,6 +124,15 @@ import {
   uploadDataUrl,
   uploadLocalFile
 } from './services/mediaStore.js';
+import { generateAndUploadPoster, fetchAndUploadExternalImage } from './services/videoThumbnail.js';
+import {
+  parseYoutubeVideoId,
+  isYoutubeStoragePath,
+  youtubeVideoIdFromStoragePath,
+  fetchYoutubeMetadata,
+  captureYoutubeFrame,
+  YOUTUBE_STORAGE_PREFIX
+} from './services/youtubeSource.js';
 import {
   ManimPartialCollector,
   appendPartialMetadata,
@@ -329,10 +343,9 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.static(publicDir));
-// Canlı öğretmen ve Kart bölümleri: kendi routes/ dosyalarında tanımlı,
-// server.js'i büyütmemek için burada yalnız mount ediliyor.
+// Kart bölümü: kendi routes/ dosyasında tanımlı, server.js'i büyütmemek
+// için burada yalnız mount ediliyor. Canlı öğretmen bölümü devre dışı.
 app.use(cardsRouter);
-app.use(liveTeacherRouter);
 app.get('/media/*mediaPath', async (req, res, next) => {
   try {
     const objectKey = Array.isArray(req.params.mediaPath)
@@ -472,8 +485,30 @@ async function requireOwnedLesson(lessonId, userContext) {
   return lesson;
 }
 
+async function requireOwnedOrPublicLesson(lessonId, userContext) {
+  if (!lessonId || !supabaseConfigured) {
+    return null;
+  }
+  const owned = await getLessonVideoForUser({ lessonId, userId: userContext.profileId });
+  if (owned) return owned;
+  const publicResult = await getPublicLessonVideo({ lessonId });
+  if (publicResult?.lesson) return publicResult;
+  const error = new Error('Ders bulunamadi veya bu kullaniciya ait degil.');
+  error.statusCode = 403;
+  throw error;
+}
+
 async function createVideoAccessPayload(video) {
   const storagePath = video?.video_storage_path;
+  if (isYoutubeStoragePath(storagePath)) {
+    return {
+      videoUrl: null,
+      videoUrlExpiresInSeconds: null,
+      videoUrlExpiresAt: null,
+      isYoutube: true,
+      youtubeVideoId: youtubeVideoIdFromStoragePath(storagePath)
+    };
+  }
   if (!storagePath) {
     if (video?.local_video_path) {
       return {
@@ -3141,6 +3176,13 @@ async function runFullVideoJob(job) {
           })
         : null
     ));
+    const posterStoragePath = job.lessonId && concat.videoRelativePath
+      ? await generateAndUploadPoster({
+          localVideoPath: resolveRenderRelative(concat.videoRelativePath),
+          userId: job.userId,
+          lessonId: job.lessonId
+        })
+      : null;
     const savedFinalVideo = await persistRequired('final-video/db', async () => {
       if (!job.lessonId) return null;
       const durationSeconds = concat.videoRelativePath
@@ -3152,7 +3194,8 @@ async function runFullVideoJob(job) {
         videoStoragePath: uploadedFinalVideo?.storagePath || null,
         localVideoPath: concat.videoRelativePath,
         durationSeconds,
-        segmentRenderIds: job.segments.map((segment) => segment.dbRenderId).filter(Boolean)
+        segmentRenderIds: job.segments.map((segment) => segment.dbRenderId).filter(Boolean),
+        posterStoragePath
       });
     });
     if (uploadedFinalVideo?.storagePath) {
@@ -3535,7 +3578,122 @@ app.get('/api/lessons/:id/video-url', async (req, res, next) => {
     res.json({
       videoUrl: videoAccess.videoUrl,
       expiresInSeconds: videoAccess.videoUrlExpiresInSeconds,
-      expiresAt: videoAccess.videoUrlExpiresAt
+      expiresAt: videoAccess.videoUrlExpiresAt,
+      isYoutube: videoAccess.isYoutube || false,
+      youtubeVideoId: videoAccess.youtubeVideoId || null
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+async function posterUrlFor(video) {
+  if (!video?.poster_storage_path) return null;
+  const signed = await createStorageAccessOrNull('catalog/poster-url', {
+    bucket: 'videos',
+    storagePath: video.poster_storage_path,
+    expiresInSeconds: signedVideoUrlTtlSeconds
+  });
+  return signed?.signedUrl || null;
+}
+
+async function toCatalogEntry(lesson) {
+  return {
+    id: lesson.id,
+    title: lesson.title,
+    topic: lesson.topic,
+    createdAt: lesson.created_at,
+    updatedAt: lesson.updated_at,
+    durationSeconds: lesson.video?.duration_seconds || null,
+    posterUrl: await posterUrlFor(lesson.video)
+  };
+}
+
+app.post('/api/catalog/import-youtube', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const url = String(req.body?.url || '').trim();
+    const videoId = parseYoutubeVideoId(url);
+    if (!videoId) {
+      return res.status(400).json({ error: 'Gecerli bir YouTube video URL si girin.' });
+    }
+
+    const metadata = await fetchYoutubeMetadata(url);
+    const title = String(req.body?.title || metadata.title || 'YouTube dersi').slice(0, 240);
+
+    const lesson = await createLesson({
+      userId: userContext.profileId,
+      title,
+      topic: 'YouTube',
+      sourceType: 'youtube_import'
+    });
+    await updateLesson(lesson.id, { status: 'done' });
+
+    const posterStoragePath = await fetchAndUploadExternalImage({
+      url: metadata.thumbnail,
+      userId: userContext.profileId,
+      lessonId: lesson.id
+    });
+
+    await saveLessonVideo({
+      lessonId: lesson.id,
+      videoStoragePath: `${YOUTUBE_STORAGE_PREFIX}${videoId}`,
+      durationSeconds: metadata.duration,
+      posterStoragePath
+    });
+
+    const posterUrl = await posterUrlFor({ poster_storage_path: posterStoragePath });
+    res.status(201).json({
+      id: lesson.id,
+      title,
+      topic: 'YouTube',
+      createdAt: lesson.created_at,
+      updatedAt: lesson.created_at,
+      durationSeconds: metadata.duration,
+      posterUrl
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/catalog', async (req, res, next) => {
+  try {
+    const lessons = await listPublicCatalogLessons({});
+    const entries = await Promise.all(lessons.map(toCatalogEntry));
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.json({ lessons: entries });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/catalog/mine', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const lessons = await listCatalogLessonsForUser({ userId: userContext.profileId });
+    const entries = await Promise.all(lessons.map(toCatalogEntry));
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ lessons: entries });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/catalog/:id/video-url', async (req, res, next) => {
+  try {
+    const result = await getPublicLessonVideo({ lessonId: req.params.id });
+    if (!result || !result.video?.video_storage_path) {
+      return res.status(404).json({ error: 'Ders bulunamadi.' });
+    }
+    const videoAccess = await createVideoAccessPayload(result.video);
+    res.setHeader('Cache-Control', 'public, max-age=30');
+    res.json({
+      videoUrl: videoAccess.videoUrl,
+      expiresInSeconds: videoAccess.videoUrlExpiresInSeconds,
+      expiresAt: videoAccess.videoUrlExpiresAt,
+      isYoutube: videoAccess.isYoutube || false,
+      youtubeVideoId: videoAccess.youtubeVideoId || null
     });
   } catch (error) {
     next(error);
@@ -3568,6 +3726,11 @@ async function resolvePublishVideo(req) {
   }
   if (!result.video?.video_storage_path && !result.video?.local_video_path) {
     const error = new Error('Bu ders icin henuz tamamlanmis bir video yok.');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (isYoutubeStoragePath(result.video?.video_storage_path)) {
+    const error = new Error('YouTube kaynakli dersler tekrar yayinlanamaz.');
     error.statusCode = 400;
     throw error;
   }
@@ -4158,11 +4321,26 @@ app.post('/api/ask-kara', async (req, res, next) => {
       return res.status(400).json({ error: 'Soru bos olamaz.' });
     }
     const lessonId = req.body.lesson_id || req.body.lesson_plan?._lesson_id || null;
-    await requireOwnedLesson(lessonId, userContext);
+    const access = await requireOwnedOrPublicLesson(lessonId, userContext);
+
+    let frame = req.body.frame;
+    const videoStoragePath = access?.video?.video_storage_path;
+    if (!frame && videoStoragePath && isYoutubeStoragePath(videoStoragePath)) {
+      if (req.body.timestamp_seconds == null) {
+        return res.status(400).json({ error: 'timestamp_seconds gerekli.' });
+      }
+      try {
+        const videoId = youtubeVideoIdFromStoragePath(videoStoragePath);
+        frame = await captureYoutubeFrame({ videoId, timestampSeconds: req.body.timestamp_seconds });
+      } catch (error) {
+        logInfo('YouTube kare yakalama basarisiz', { error: error.message, lessonId });
+        return res.status(502).json({ error: 'YouTube videosundan su an kare alinamadi, birazdan tekrar dene.' });
+      }
+    }
 
     const answerPromise = answerKaraQuestion({
       question,
-      frame: req.body.frame,
+      frame,
       timestampSeconds: req.body.timestamp_seconds,
       timestampLabel: req.body.timestamp_label,
       lessonTitle: req.body.lesson_title,

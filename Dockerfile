@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python -m venv /opt/venv \
   && pip install --no-cache-dir --upgrade pip setuptools wheel \
-  && pip install --no-cache-dir manim==0.20.1 edge-tts==7.2.8
+  && pip install --no-cache-dir manim==0.20.1 edge-tts==7.2.8 yt-dlp
 
 COPY package*.json ./
 RUN npm ci --omit=dev

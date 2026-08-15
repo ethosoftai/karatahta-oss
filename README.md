@@ -109,6 +109,33 @@ Progressive parçalar kullanıcı geçmişinin kalıcı videosu değildir. Bunla
 Railway instance diskinde geçicidir ve `PROGRESSIVE_ARTIFACT_TTL_MS` sonunda
 temizlenir. Kalıcı sonuç Railway Bucket'taki final videodur.
 
+## Katalog (Netflix tarzı) bölümü
+
+`lessons.is_public` ve `lesson_videos.poster_storage_path` (bkz.
+`migrations/010_catalog.sql`) katalog için eklendi. Final video pipeline'ı
+artık her tamamlanmış derste otomatik olarak videonun 1. saniyesinden bir
+poster JPEG'i çıkarıp (`services/videoThumbnail.js`, `services/frameExtractor.js`
+üzerinden ffmpeg) Bucket'a yükler; `saveLessonVideo` bu yolu
+`poster_storage_path` olarak kaydeder. Poster üretimi hata verirse final
+video teslimatını bloklamaz (best-effort).
+
+`GET /api/catalog` `is_public=true` işaretli dersleri (auth gerekmez),
+`GET /api/catalog/mine` giriş yapan kullanıcının kendi tamamlanmış derslerini
+döner; ikisi de yalnız `lesson_videos.status='done'` olan dersleri listeler.
+Video oynatma her zaman ayrı, kısa ömürlü signed URL veren bir endpoint'ten
+gelir (`/api/catalog/:id/video-url` veya kullanıcı sahipse `/api/lessons/:id/video-url`) —
+Bucket private kalmaya devam eder.
+
+Hazır (elde bulunan) videoları kataloğa eklemek için:
+
+```bash
+node scripts/import_catalog_video.js --file ./ders.mp4 --title "Pisagor Teoremi" \
+  --topic "Matematik" --user-id <profileId> --public
+```
+
+`--public` verilmezse ders yalnız o kullanıcının özel katalog sekmesinde
+görünür.
+
 ## Önemli runtime sınırlamaları
 
 - Aktif job nesneleri ve SSE event geçmişi `fullVideoJobs` içinde bellekte
@@ -206,10 +233,13 @@ services/
 ├── workerManimRenderer.js        worker Manim + FFmpeg render işlemi
 ├── mediaStore.js                 Railway S3 veya legacy Supabase Storage
 ├── supabaseStore.js              Auth, Postgres ve persistence
+├── videoThumbnail.js             final videodan katalog posteri üretme
+├── frameExtractor.js             ffmpeg ile video karesi çıkarma
 └── karaContext.js                chat bağlamı
 scripts/
 ├── apply_supabase_schema.js
 ├── configure_railway_bucket_cors.js
+├── import_catalog_video.js       hazır videoyu Katalog'a (lesson + poster) ekler
 └── migrate_supabase_media_to_railway.js
 migrations/                       Supabase SQL şeması
 workers/renderWorker.js           ayrı render worker giriş noktası
@@ -411,6 +441,10 @@ Yeni Supabase projesinde SQL Editor'da sırayla:
 4. `migrations/004_lesson_detail_indexes.sql`
 5. `migrations/005_oauth_connections.sql`
 6. `migrations/006_oauth_drive_folder.sql`
+7. `migrations/007_social_publish_jobs.sql`
+8. `migrations/008_social_publish_platform.sql`
+9. `migrations/009_render_worker_jobs.sql`
+10. `migrations/010_catalog.sql`
 
 çalıştırılmalıdır. Alternatif: `SUPABASE_DB_URL` tanımlayıp
 `npm run supabase:schema`.
@@ -475,6 +509,9 @@ node scripts/migrate_supabase_media_to_railway.js --delete-source --delete-bucke
 | `POST /api/publish-youtube` | Tamamlanmış dersi social worker ile YouTube'a yollar (`privacy_status`: `private`/`unlisted`/`public`) |
 | `POST /api/publish-instagram` | Tamamlanmış dersi Instagram worker'a yollar |
 | `GET /api/social-publish/:id` | Yayın işinin durumunu ve platform sonucunu döndürür |
+| `GET /api/catalog` | Herkese acik (Netflix tarzi) katalog listesi; auth gerektirmez |
+| `GET /api/catalog/mine` | Giris yapan kullanicinin tamamlanmis dersleri (katalog "ozel" sekmesi) |
+| `GET /api/catalog/:id/video-url` | Herkese acik (`is_public=true`) bir katalog dersi icin signed video URL |
 | `GET /api/jobs/:id` | Job snapshot/polling fallback |
 | `GET /api/jobs/:id/events` | Authenticated SSE job akışı |
 | `GET /api/jobs/:id/stream-manifest` | Sıralı progressive partial metadata |

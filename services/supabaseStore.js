@@ -460,6 +460,107 @@ export async function listLessonsForUser({ userId, limit = 30 }) {
   }));
 }
 
+function mapCatalogLesson(lesson) {
+  const doneVideo = [...(lesson.lesson_videos || [])]
+    .filter((video) => video.status === 'done' && video.video_storage_path)
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+  return {
+    id: lesson.id,
+    title: lesson.title,
+    topic: lesson.topic,
+    is_public: lesson.is_public,
+    created_at: lesson.created_at,
+    updated_at: lesson.updated_at,
+    video: doneVideo
+  };
+}
+
+export async function listPublicCatalogLessons({ limit = 60 } = {}) {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('lessons')
+    .select(`
+      id,
+      title,
+      topic,
+      is_public,
+      created_at,
+      updated_at,
+      lesson_videos (
+        id,
+        status,
+        video_storage_path,
+        poster_storage_path,
+        duration_seconds,
+        created_at
+      )
+    `)
+    .eq('is_public', true)
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data || [])
+    .map(mapCatalogLesson)
+    .filter((lesson) => lesson.video);
+}
+
+export async function listCatalogLessonsForUser({ userId, limit = 60 }) {
+  if (!userId) return [];
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('lessons')
+    .select(`
+      id,
+      title,
+      topic,
+      is_public,
+      created_at,
+      updated_at,
+      lesson_videos (
+        id,
+        status,
+        video_storage_path,
+        poster_storage_path,
+        duration_seconds,
+        created_at
+      )
+    `)
+    .eq('user_id', userId)
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data || [])
+    .map(mapCatalogLesson)
+    .filter((lesson) => lesson.video);
+}
+
+export async function getPublicLessonVideo({ lessonId }) {
+  if (!lessonId) return null;
+  const client = requireSupabase();
+  const [lessonResult, videoResult] = await Promise.all([
+    client
+      .from('lessons')
+      .select('id,title,topic,is_public')
+      .eq('id', lessonId)
+      .eq('is_public', true)
+      .maybeSingle(),
+    client
+      .from('lesson_videos')
+      .select('*')
+      .eq('lesson_id', lessonId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+  ]);
+  if (lessonResult.error) throw lessonResult.error;
+  if (videoResult.error) throw videoResult.error;
+  if (!lessonResult.data) return null;
+  return {
+    lesson: lessonResult.data,
+    video: videoResult.data || null
+  };
+}
+
 export async function getLessonDetailForUser({ lessonId, userId, messageLimit = 50 }) {
   if (!lessonId || !userId) return null;
   const client = requireSupabase();
@@ -761,14 +862,15 @@ export async function saveVideoRender({ segmentId, manimCodeId, quality, videoSt
   });
 }
 
-export async function saveLessonVideo({ lessonId, videoStoragePath, localVideoPath, durationSeconds, segmentRenderIds }) {
+export async function saveLessonVideo({ lessonId, videoStoragePath, localVideoPath, durationSeconds, segmentRenderIds, posterStoragePath }) {
   return insertRow('lesson_videos', {
     lesson_id: lessonId,
     status: 'done',
     video_storage_path: videoStoragePath || null,
     local_video_path: localVideoPath || null,
     duration_seconds: durationSeconds || null,
-    segment_render_ids: segmentRenderIds || []
+    segment_render_ids: segmentRenderIds || [],
+    poster_storage_path: posterStoragePath || null
   });
 }
 

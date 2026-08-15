@@ -47,19 +47,24 @@ function runFfmpeg(args, { timeoutMs = 20000 } = {}) {
   });
 }
 
-export async function extractFrameAtTime({ videoUrl, timestampSeconds, timeoutMs = 20000 }) {
+export async function extractFrameToFile({ videoUrl, timestampSeconds, outputPath, timeoutMs = 20000 }) {
   if (!videoUrl) {
-    throw new Error('get_frame icin video kaynagi bulunamadi.');
+    throw new Error('Kare cikarma icin video kaynagi bulunamadi.');
   }
-  const outputPath = path.join(os.tmpdir(), `kara-live-frame-${randomUUID()}.jpg`);
   const args = buildFrameExtractArgs({ videoUrl, timestampSeconds, outputPath });
+  await runFfmpeg(args, { timeoutMs });
+  const stat = await fs.stat(outputPath).catch(() => null);
+  if (!stat || !stat.size) {
+    throw new Error('ffmpeg bos kare dosyasi uretti.');
+  }
+  return outputPath;
+}
 
+export async function extractFrameAtTime({ videoUrl, timestampSeconds, timeoutMs = 20000 }) {
+  const outputPath = path.join(os.tmpdir(), `kara-live-frame-${randomUUID()}.jpg`);
   try {
-    await runFfmpeg(args, { timeoutMs });
+    await extractFrameToFile({ videoUrl, timestampSeconds, outputPath, timeoutMs });
     const buffer = await fs.readFile(outputPath);
-    if (!buffer.length) {
-      throw new Error('ffmpeg bos kare dosyasi uretti.');
-    }
     return { mimeType: 'image/jpeg', data: buffer.toString('base64') };
   } finally {
     await fs.rm(outputPath, { force: true }).catch(() => {});
