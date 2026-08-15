@@ -30,6 +30,7 @@ import { assertSafeKaraManimCode } from './services/karaManimSafety.js';
 import { runKaraTools } from './services/karaTools.js';
 import { searchWeb } from './services/webSearch.js';
 import { cardsRouter } from './routes/cards.js';
+import { resolveRequestUser, bearerTokenFromRequest } from './services/requestAuth.js';
 // Canlı öğretmen bölümü devre dışı bırakıldı; routes/liveTeacher.js ve
 // services/liveTeacherEngine.js silinmedi, yalnızca mount edilmiyor.
 // import { liveTeacherRouter } from './routes/liveTeacher.js';
@@ -104,6 +105,7 @@ import {
   listLessonsForUser,
   listPublicCatalogLessons,
   listCatalogLessonsForUser,
+  listChatsForUser,
   getPublicLessonVideo,
   signInWithPassword,
   signUpWithPassword,
@@ -434,42 +436,6 @@ async function createStorageAccessOrNull(label, options) {
     logInfo(`Imzali medya URL gecici olarak olusturulamadi: ${label}`, { error: error.message });
     return null;
   }
-}
-
-function bearerTokenFromRequest(req) {
-  const header = String(req.headers.authorization || '');
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  return match?.[1] || null;
-}
-
-async function resolveRequestUser(req) {
-  if (req.userContext) {
-    return req.userContext;
-  }
-
-  const token = bearerTokenFromRequest(req);
-  if (token) {
-    const profile = await getProfileForAccessToken(token);
-    req.userContext = {
-      profileId: profile.id,
-      profile,
-      mode: 'auth'
-    };
-    return req.userContext;
-  }
-
-  if (authRequired) {
-    const error = new Error('Giris yapman gerekiyor.');
-    error.statusCode = 401;
-    throw error;
-  }
-
-  req.userContext = {
-    profileId: process.env.DEV_USER_ID,
-    profile: null,
-    mode: 'dev'
-  };
-  return req.userContext;
 }
 
 async function requireOwnedLesson(lessonId, userContext) {
@@ -3663,6 +3629,24 @@ app.get('/api/catalog', async (req, res, next) => {
     const entries = await Promise.all(lessons.map(toCatalogEntry));
     res.setHeader('Cache-Control', 'public, max-age=60');
     res.json({ lessons: entries });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/catalog/chats', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const chats = await listChatsForUser({ userId: userContext.profileId });
+    const entries = await Promise.all(chats.map(async (chat) => ({
+      lessonId: chat.lessonId,
+      title: chat.title,
+      topic: chat.topic,
+      createdAt: chat.createdAt,
+      posterUrl: await posterUrlFor({ poster_storage_path: chat.posterStoragePath })
+    })));
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ chats: entries });
   } catch (error) {
     next(error);
   }

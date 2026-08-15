@@ -40,7 +40,8 @@ async function main() {
     '007_social_publish_jobs.sql',
     '008_social_publish_platform.sql',
     '009_render_worker_jobs.sql',
-    '010_catalog.sql'
+    '010_catalog.sql',
+    '011_card_sessions.sql'
   ];
   const client = new Client({
     connectionString: getConnectionString(),

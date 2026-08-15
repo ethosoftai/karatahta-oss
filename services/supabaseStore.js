@@ -1050,3 +1050,95 @@ export function fileNameFromLocalPath(localPath, fallbackName) {
 export function extensionFromContentType(mimeType) {
   return extensionFromMime(mimeType);
 }
+
+export async function createCardSession({ userId = devUserId, title, cards }) {
+  if (userId === devUserId) {
+    await ensureDevProfile();
+  }
+  return insertRow('card_sessions', {
+    user_id: userId,
+    title: String(title || 'Kart oturumu').slice(0, 240),
+    cards: cards || [],
+    messages: []
+  });
+}
+
+export async function appendCardSessionMessages({ sessionId, userId, messages }) {
+  if (!sessionId || !userId || !messages?.length) return null;
+  const client = requireSupabase();
+  const { data: existing, error: selectError } = await client
+    .from('card_sessions')
+    .select('messages')
+    .eq('id', sessionId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (selectError) throw selectError;
+  if (!existing) return null;
+  const nextMessages = [...(existing.messages || []), ...messages];
+  const rows = await updateRows('card_sessions', { id: sessionId, user_id: userId }, {
+    messages: nextMessages,
+    updated_at: new Date().toISOString()
+  });
+  return rows?.[0] || null;
+}
+
+export async function listCardSessionsForUser({ userId, limit = 60 }) {
+  if (!userId) return [];
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('card_sessions')
+    .select('id, title, created_at, updated_at, cards')
+    .eq('user_id', userId)
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data || [];
+}
+
+export async function getCardSessionForUser({ sessionId, userId }) {
+  if (!sessionId || !userId) return null;
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('card_sessions')
+    .select('*')
+    .eq('id', sessionId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export async function listChatsForUser({ userId, limit = 60 }) {
+  if (!userId) return [];
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('chats')
+    .select(`
+      id,
+      lesson_id,
+      created_at,
+      lessons (
+        id,
+        title,
+        topic,
+        lesson_videos ( poster_storage_path, created_at )
+      )
+    `)
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data || [])
+    .filter((chat) => chat.lessons)
+    .map((chat) => {
+      const latestVideo = [...(chat.lessons.lesson_videos || [])]
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+      return {
+        lessonId: chat.lesson_id,
+        title: chat.lessons.title,
+        topic: chat.lessons.topic,
+        createdAt: chat.created_at,
+        posterStoragePath: latestVideo?.poster_storage_path || null
+      };
+    });
+}
