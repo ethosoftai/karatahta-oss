@@ -223,6 +223,34 @@ export async function uploadBufferToRailway({
   };
 }
 
+// Small plain-text objects (e.g. the scheduler's content_pool.txt) --
+// deliberately separate from uploadBufferToRailway/createStorageSignedUrl
+// since these are read/written directly server-side, never signed for a
+// browser.
+export async function readRailwayObjectText({ bucket, storagePath }) {
+  const client = requireRailwayMedia();
+  const objectKey = railwayObjectKeyFor(bucket, storagePath);
+  const response = await client.send(new GetObjectCommand({ Bucket: railwayBucket, Key: objectKey }));
+  const chunks = [];
+  for await (const chunk of response.Body) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+export async function writeRailwayObjectText({ bucket, storagePath, text }) {
+  const client = requireRailwayMedia();
+  const objectKey = railwayObjectKeyFor(bucket, storagePath);
+  const body = Buffer.from(String(text ?? ''), 'utf8');
+  await client.send(new PutObjectCommand({
+    Bucket: railwayBucket,
+    Key: objectKey,
+    Body: body,
+    ContentLength: body.length,
+    ContentType: 'text/plain; charset=utf-8'
+  }));
+}
+
 async function uploadLocalFileToRailway({ bucket, localPath, storagePath, contentType }) {
   const client = requireRailwayMedia();
   const objectKey = railwayObjectKeyFor(bucket, storagePath);

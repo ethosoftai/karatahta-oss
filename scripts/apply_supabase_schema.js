@@ -41,7 +41,9 @@ async function main() {
     '008_social_publish_platform.sql',
     '009_render_worker_jobs.sql',
     '010_catalog.sql',
-    '011_card_sessions.sql'
+    '011_card_sessions.sql',
+    '012_chat_source.sql',
+    '013_content_scheduler.sql'
   ];
   const client = new Client({
     connectionString: getConnectionString(),

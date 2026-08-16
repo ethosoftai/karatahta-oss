@@ -9,6 +9,7 @@ import {
   finishSocialPublishJob
 } from '../services/socialPublishQueue.js';
 import { getLessonDetailForUser, getLessonVideoByIdForUser } from '../services/supabaseStore.js';
+import { startSchedulerLoop } from '../services/scheduler.js';
 
 const pollMs = Math.max(1000, Number(process.env.SOCIAL_PUBLISH_POLL_MS || 5000));
 let running = false;
@@ -115,3 +116,4 @@ async function tick() {
 log('Worker basladi', { pollMs });
 await tick();
 setInterval(() => { void tick(); }, pollMs);
+startSchedulerLoop();

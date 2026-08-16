@@ -449,6 +449,7 @@ export async function listLessonsForUser({ userId, limit = 30 }) {
       )
     `)
     .eq('user_id', userId)
+    .not('source_type', 'in', '("youtube_import","catalog_curated")')
     .order('updated_at', { ascending: false })
     .limit(limit);
   if (error) throw error;
@@ -995,7 +996,7 @@ export async function getRenderWorkerInput({ lessonId, segmentId }) {
   };
 }
 
-export async function getOrCreateChat({ userId = devUserId, lessonId }) {
+export async function getOrCreateChat({ userId = devUserId, lessonId, source }) {
   if (userId === devUserId) {
     await ensureDevProfile();
   }
@@ -1007,10 +1008,22 @@ export async function getOrCreateChat({ userId = devUserId, lessonId }) {
     .eq('user_id', userId)
     .maybeSingle();
   if (selectError) throw selectError;
-  if (existing) return existing;
+  if (existing) {
+    // Bir ders Katalog'dan "Open in chat" ile acildiysa, o sohbeti daha once
+    // Karatahta akisinda olusmus olsa bile Katalog gecmisine "yukselt" --
+    // tersi olmaz (source alani yalnizca migration uygulandiysa referans
+    // edilir, o yuzden normal Karatahta akisi bu parametre hic gecilmeden
+    // migration'sIz calismaya devam eder).
+    if (source === 'catalog' && existing.source !== 'catalog') {
+      const rows = await updateRows('chats', { id: existing.id }, { source: 'catalog' });
+      return rows?.[0] || existing;
+    }
+    return existing;
+  }
   return insertRow('chats', {
     lesson_id: lessonId,
-    user_id: userId
+    user_id: userId,
+    ...(source ? { source } : {})
   });
 }
 
@@ -1108,6 +1121,35 @@ export async function getCardSessionForUser({ sessionId, userId }) {
   return data;
 }
 
+export async function getSchedulerJob(jobType) {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('scheduler_jobs')
+    .select('*')
+    .eq('job_type', jobType)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+export async function listSchedulerJobs() {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('scheduler_jobs')
+    .select('*')
+    .order('job_type');
+  if (error) throw error;
+  return data || [];
+}
+
+export async function updateSchedulerJob(jobType, patch) {
+  const rows = await updateRows('scheduler_jobs', { job_type: jobType }, {
+    ...patch,
+    updated_at: new Date().toISOString()
+  });
+  return rows[0] || null;
+}
+
 export async function listChatsForUser({ userId, limit = 60 }) {
   if (!userId) return [];
   const client = requireSupabase();
@@ -1125,6 +1167,7 @@ export async function listChatsForUser({ userId, limit = 60 }) {
       )
     `)
     .eq('user_id', userId)
+    .eq('source', 'catalog')
     .order('created_at', { ascending: false })
     .limit(limit);
   if (error) throw error;

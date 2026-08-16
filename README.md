@@ -136,6 +136,67 @@ node scripts/import_catalog_video.js --file ./ders.mp4 --title "Pisagor Teoremi"
 `--public` verilmezse ders yalnız o kullanıcının özel katalog sekmesinde
 görünür.
 
+## Kart bölümü ve Instagram carousel
+
+`routes/cards.js` + `services/cardsEngine.js`: bir prompt/soru/soru fotoğrafından
+(Gemini vision ile transkript) sırayla 2-4 kart (DeepSeek metin + Manim still PNG)
+üretir, `card_sessions` tablosuna kalıcı olarak kaydeder (`migrations/011_card_sessions.sql`).
+Kartlar üretildikten sonra `POST /api/cards/ask` ile ask-kara tarzı normal bir
+takip sohbeti sürer.
+
+`POST /api/cards/sessions/:id/publish-instagram` bir oturumun kart görsellerini
+(2-10 adet) Instagram carousel olarak yayınlar. Instagram'ın Content Publishing
+API'si `image_url` için yalnız JPEG kabul eder; kart still'leri PNG olduğundan
+her görsel önce indirilip `services/imageConvert.js` (ffmpeg) ile JPEG'e
+çevrilir, ayrı bir storage path'e yeniden yüklenir, imzalı URL üretilir, sonra
+`services/instagramPublish.js:publishCarouselToInstagram` ile yayınlanır.
+
+## Zamanlanmış içerik üretimi (scheduler)
+
+`services/scheduler.js`, `karatahta-social-publisher` worker'ı (`workers/socialPublisher.js`)
+içinde ayrı bir döngü olarak çalışır. Etkinleştirildiğinde, kendi aralığında
+(`interval_minutes`) `scheduler_jobs` tablosundaki (`migrations/013_content_scheduler.sql`)
+iki iş türünden hangisi zamanı gelmişse tetikler:
+
+- `cards_carousel`: `POST /api/cards/generate` ile kart üretir, ardından
+  `POST /api/cards/sessions/:id/publish-instagram` ile carousel yayınlar.
+- `lesson_video`: `POST /api/generate-lesson` ile tam ders videosu başlatır,
+  `GET /api/jobs/:id` ile bitene kadar polling yapar, sonra
+  `POST /api/social-publish` ile YouTube + Instagram'a (`privacy_status: public`)
+  yayınlar.
+
+Fikirler Railway Bucket'ta `system/content_pool.txt` dosyasından (satır başına
+bir konu/soru) sırayla, iş türü başına ayrı bir cursor (`scheduler_jobs.content_pool_cursor`)
+ile çekilir ve liste bitince başa sarılır. Dosyayı `GET`/`PUT /api/scheduler/content-pool`
+ile okuyup değiştirebilirsiniz (`PUT` body: `{ "text": "konu 1\nkonu 2\n..." }`).
+
+Worker, kendi API'sine sıradan bir istemci gibi HTTP ile istek atar
+(`BACKEND_INTERNAL_URL`), gerçek bir kullanıcı oturumu olmadığı için
+`X-Scheduler-Token: $SCHEDULER_INTERNAL_TOKEN` header'ıyla kimlik kanıtlar;
+backend bu token'ı doğrularsa isteği `SCHEDULER_USER_ID` profiline ait sayar
+(`services/requestAuth.js`). Bu üç değişken (`BACKEND_INTERNAL_URL`,
+`SCHEDULER_INTERNAL_TOKEN`, `SCHEDULER_USER_ID`) hem `karatahta-backend` hem
+`karatahta-social-publisher` servisinde aynı olmalıdır; biri eksikse scheduler
+döngüsü hiç başlamaz (log: "BACKEND_INTERNAL_URL veya SCHEDULER_INTERNAL_TOKEN
+tanimli degil").
+
+Varsayılan olarak iki iş de kapalıdır (`enabled=false`). Açmak/kapatmak ve
+sıklığı değiştirmek için:
+
+```bash
+curl -X POST https://api.example.com/api/scheduler/start \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+  -d '{"job_type":"cards_carousel","interval_minutes":1440}'
+
+curl -X POST https://api.example.com/api/scheduler/stop \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+  -d '{"job_type":"lesson_video"}'
+```
+
+`GET /api/scheduler/status` her iki işin `enabled`, `interval_minutes`,
+`next_run_at`, `last_run_at`, `last_status`, `last_error` ve `last_result`
+alanlarını döner.
+
 ## Önemli runtime sınırlamaları
 
 - Aktif job nesneleri ve SSE event geçmişi `fullVideoJobs` içinde bellekte
@@ -235,7 +296,16 @@ services/
 ├── supabaseStore.js              Auth, Postgres ve persistence
 ├── videoThumbnail.js             final videodan katalog posteri üretme
 ├── frameExtractor.js             ffmpeg ile video karesi çıkarma
+├── cardsEngine.js                Kart pipeline (DeepSeek + Manim still)
+├── instagramPublish.js           Reels + carousel (Content Publishing API)
+├── imageConvert.js               kart PNG'lerini Instagram için JPEG'e çevirir
+├── contentPool.js                Railway Bucket'taki content_pool.txt okuma/yazma
+├── scheduler.js                  zamanlanmış kart/ders üretim+yayın döngüsü
+├── requestAuth.js                resolveRequestUser + scheduler internal token
 └── karaContext.js                chat bağlamı
+routes/
+├── cards.js                      Kart section endpointleri
+└── scheduler.js                  scheduler start/stop/status + content pool
 scripts/
 ├── apply_supabase_schema.js
 ├── configure_railway_bucket_cors.js
@@ -243,7 +313,7 @@ scripts/
 └── migrate_supabase_media_to_railway.js
 migrations/                       Supabase SQL şeması
 workers/renderWorker.js           ayrı render worker giriş noktası
-workers/socialPublisher.js        YouTube/Instagram publish worker giriş noktası
+workers/socialPublisher.js        YouTube/Instagram publish worker + scheduler döngüsü
 test/                             Node testleri
 Dockerfile                        Node + Python + Manim + FFmpeg image
 railway.json                      Amsterdam ve replica ayarı
@@ -445,6 +515,9 @@ Yeni Supabase projesinde SQL Editor'da sırayla:
 8. `migrations/008_social_publish_platform.sql`
 9. `migrations/009_render_worker_jobs.sql`
 10. `migrations/010_catalog.sql`
+11. `migrations/011_card_sessions.sql`
+12. `migrations/012_chat_source.sql`
+13. `migrations/013_content_scheduler.sql`
 
 çalıştırılmalıdır. Alternatif: `SUPABASE_DB_URL` tanımlayıp
 `npm run supabase:schema`.
@@ -509,6 +582,13 @@ node scripts/migrate_supabase_media_to_railway.js --delete-source --delete-bucke
 | `POST /api/publish-youtube` | Tamamlanmış dersi social worker ile YouTube'a yollar (`privacy_status`: `private`/`unlisted`/`public`) |
 | `POST /api/publish-instagram` | Tamamlanmış dersi Instagram worker'a yollar |
 | `GET /api/social-publish/:id` | Yayın işinin durumunu ve platform sonucunu döndürür |
+| `POST /api/cards/generate` | Prompt/soru/soru fotoğrafından NDJSON kart akışı üretir, oturumu kaydeder |
+| `POST /api/cards/ask` | Kartlar üretildikten sonra ask-kara tarzı takip sohbeti |
+| `GET /api/cards/sessions` / `GET /api/cards/sessions/:id` | Kullanıcının kart geçmişi ve tek bir oturumun detayı |
+| `POST /api/cards/sessions/:id/publish-instagram` | Oturumun kart görsellerini (PNG→JPEG) Instagram carousel olarak yayınlar |
+| `GET /api/scheduler/status` | İki zamanlanmış işin (`cards_carousel`, `lesson_video`) durumu |
+| `POST /api/scheduler/start` / `POST /api/scheduler/stop` | `{ job_type, interval_minutes? }` ile zamanlanmış içerik üretimini açar/kapatır |
+| `GET/PUT /api/scheduler/content-pool` | Railway Bucket'taki `content_pool.txt`'i (satır başına bir fikir) okur/değiştirir |
 | `GET /api/catalog` | Herkese acik (Netflix tarzi) katalog listesi; auth gerektirmez |
 | `GET /api/catalog/mine` | Giris yapan kullanicinin tamamlanmis dersleri (katalog "ozel" sekmesi) |
 | `GET /api/catalog/:id/video-url` | Herkese acik (`is_public=true`) bir katalog dersi icin signed video URL |

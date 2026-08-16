@@ -30,6 +30,7 @@ import { assertSafeKaraManimCode } from './services/karaManimSafety.js';
 import { runKaraTools } from './services/karaTools.js';
 import { searchWeb } from './services/webSearch.js';
 import { cardsRouter } from './routes/cards.js';
+import { schedulerRouter } from './routes/scheduler.js';
 import { resolveRequestUser, bearerTokenFromRequest } from './services/requestAuth.js';
 // Canlı öğretmen bölümü devre dışı bırakıldı; routes/liveTeacher.js ve
 // services/liveTeacherEngine.js silinmedi, yalnızca mount edilmiyor.
@@ -348,6 +349,7 @@ app.use(express.static(publicDir));
 // Kart bölümü: kendi routes/ dosyasında tanımlı, server.js'i büyütmemek
 // için burada yalnız mount ediliyor. Canlı öğretmen bölümü devre dışı.
 app.use(cardsRouter);
+app.use(schedulerRouter);
 app.get('/media/*mediaPath', async (req, res, next) => {
   try {
     const objectKey = Array.isArray(req.params.mediaPath)
@@ -4334,7 +4336,7 @@ app.post('/api/ask-kara', async (req, res, next) => {
       lessonId
     });
     const chatPromise = persist('kara-chat/get-or-create', () => (
-      lessonId ? getOrCreateChat({ userId: userContext.profileId, lessonId }) : null
+      lessonId ? getOrCreateChat({ userId: userContext.profileId, lessonId, source: req.body.source }) : null
     ));
     const frameAttachmentPromise = persist('kara-chat/frame', async () => {
       if (!lessonId || !req.body.frame?.data) return null;
