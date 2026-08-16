@@ -1712,6 +1712,9 @@ async function concatVideos(videoRelativePaths) {
     const error = new Error('ffmpeg segment videolarini birlestiremedi.');
     error.stdout = result.stdout;
     error.stderr = result.stderr;
+    error.exitCode = result.code;
+    error.signal = result.signal;
+    error.timedOut = result.timedOut;
     throw error;
   }
   validateRenderedVideo(await probeVideo(outputPath), 'final concat video');
@@ -3205,6 +3208,9 @@ async function runFullVideoJob(job) {
     }
     logInfo(`Job ${job.id}: tam ders uretimi hata verdi`, {
       error: error.message,
+      exitCode: error.exitCode,
+      signal: error.signal,
+      timedOut: error.timedOut,
       stderr: typeof error.stderr === 'string' ? error.stderr.slice(-2000) : undefined
     });
     await persist('lesson/status-failed', () => (
