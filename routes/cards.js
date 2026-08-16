@@ -47,15 +47,18 @@ cardsRouter.post('/api/cards/generate', async (req, res) => {
     }
     if (collected.length) {
       try {
-        const sessionId = randomUUID();
+        // Just a storage-path prefix so images can upload before the DB row
+        // (and its own generated id) exists -- not the session id returned
+        // to the client, which is session.id below.
+        const storagePathSessionId = randomUUID();
         const persistedCards = await Promise.all(collected.map(async (card, index) => ({
           title: card.title,
           explanation: card.explanation,
-          imageStoragePath: await uploadCardImage({ userId: userContext.profileId, sessionId, index, imageDataUrl: card.imageDataUrl })
+          imageStoragePath: await uploadCardImage({ userId: userContext.profileId, sessionId: storagePathSessionId, index, imageDataUrl: card.imageDataUrl })
         })));
         const title = String(req.body?.prompt || req.body?.topic || question || 'Kart oturumu').slice(0, 240);
-        await createCardSession({ userId: userContext.profileId, title, cards: persistedCards });
-        res.write(`${JSON.stringify({ type: 'session', id: sessionId })}\n`);
+        const session = await createCardSession({ userId: userContext.profileId, title, cards: persistedCards });
+        res.write(`${JSON.stringify({ type: 'session', id: session.id })}\n`);
       } catch (persistError) {
         // Kart uretimi kullaniciya zaten ulasti; kalicilik basarisiz olsa da
         // akisi bozmuyoruz, sadece gecmise eklenmiyor.
