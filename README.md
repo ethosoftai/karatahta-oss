@@ -164,7 +164,12 @@ tetikler:
 - `lesson_video`: `POST /api/generate-lesson` ile tam ders videosu başlatır,
   `GET /api/jobs/:id` ile bitene kadar polling yapar, sonra
   `POST /api/social-publish` ile YouTube + Instagram'a (`privacy_status: public`)
-  yayınlar.
+  yayınlar. Varsayılan 8 segment/10 dakikalık "konu anlat" uzunluğu tek
+  trial-plan render-worker replikasını fazlasıyla zorlayıp gerçekten
+  başarısız olduğu için (canlıda doğrulandı: segment'ler 5-6 kat yavaşladı,
+  final concat OOM-kill'le sessizce öldü), zamanlanmış çalıştırmalar
+  `SCHEDULER_VIDEO_SEGMENT_COUNT`/`SCHEDULER_VIDEO_MINUTES` (varsayılan 3
+  segment / 3.5 dakika) ile kasıtlı olarak kısa tutulur.
 - `combo`: aynı fikirle önce `lesson_video` adımını çalıştırır, `SCHEDULER_COMBO_GAP_MS`
   (varsayılan 10 dakika) bekler, sonra aynı fikirle `cards_carousel` adımını
   çalıştırır — yani aynı konu için önce video (YouTube + Instagram Reel),

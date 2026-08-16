@@ -87,10 +87,24 @@ async function runCardsCarousel(idea) {
   return { sessionId, cardCount, instagram: publishData };
 }
 
+// Kept short on purpose: the default topic-mode length (8 segments / 10 min)
+// overloads the single trial-plan render-worker replica badly enough to
+// fail outright (segments taking 5-6x their normal render time, final
+// concat OOM-killed) -- caught live when the scheduler's first real run
+// failed twice in a row. 3 short segments is comfortably inside what's
+// actually been verified to work reliably.
+const SCHEDULED_VIDEO_SEGMENT_COUNT = Math.max(1, Number(process.env.SCHEDULER_VIDEO_SEGMENT_COUNT) || 3);
+const SCHEDULED_VIDEO_MINUTES = Math.max(1, Number(process.env.SCHEDULER_VIDEO_MINUTES) || 3.5);
+
 async function runLessonVideo(idea) {
   const genResponse = await internalFetch('/api/generate-lesson', {
     method: 'POST',
-    body: JSON.stringify({ topic: idea })
+    body: JSON.stringify({
+      topic: idea,
+      duration_touched: true,
+      target_segment_count: SCHEDULED_VIDEO_SEGMENT_COUNT,
+      target_video_minutes: SCHEDULED_VIDEO_MINUTES
+    })
   });
   const genData = await genResponse.json();
   if (!genResponse.ok) {
