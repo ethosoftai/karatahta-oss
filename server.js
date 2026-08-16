@@ -3203,7 +3203,10 @@ async function runFullVideoJob(job) {
       job.progressive.status = 'failed';
       job.progressive.error = error.message || 'Progressive video uretimi basarisiz oldu.';
     }
-    logInfo(`Job ${job.id}: tam ders uretimi hata verdi`, { error: error.message });
+    logInfo(`Job ${job.id}: tam ders uretimi hata verdi`, {
+      error: error.message,
+      stderr: typeof error.stderr === 'string' ? error.stderr.slice(-2000) : undefined
+    });
     await persist('lesson/status-failed', () => (
       job.lessonId ? updateLesson(job.lessonId, { status: 'failed' }) : null
     ));
