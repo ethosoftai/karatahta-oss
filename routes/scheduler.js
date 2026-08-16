@@ -5,12 +5,12 @@ import { readContentPool, writeContentPool } from '../services/contentPool.js';
 
 export const schedulerRouter = Router();
 
-const JOB_TYPES = new Set(['cards_carousel', 'lesson_video']);
+const JOB_TYPES = new Set(['cards_carousel', 'lesson_video', 'combo']);
 
 function requireJobType(value) {
   const jobType = String(value || '').trim();
   if (!JOB_TYPES.has(jobType)) {
-    const error = new Error(`job_type 'cards_carousel' veya 'lesson_video' olmali (gelen: ${jobType || '(bos)'}).`);
+    const error = new Error(`job_type 'cards_carousel', 'lesson_video' veya 'combo' olmali (gelen: ${jobType || '(bos)'}).`);
     error.statusCode = 400;
     throw error;
   }
@@ -72,13 +72,18 @@ schedulerRouter.get('/api/scheduler/content-pool', async (req, res, next) => {
   try {
     await resolveRequestUser(req);
     const items = await readContentPool();
-    const cardsJob = await getSchedulerJob('cards_carousel');
-    const lessonJob = await getSchedulerJob('lesson_video');
+    const [cardsJob, lessonJob, comboJob] = await Promise.all([
+      getSchedulerJob('cards_carousel'),
+      getSchedulerJob('lesson_video'),
+      getSchedulerJob('combo')
+    ]);
+    const cursorOf = (job) => (items.length ? Number(job?.content_pool_cursor || 0) % items.length : 0);
     res.json({
       items,
       cursors: {
-        cards_carousel: items.length ? Number(cardsJob?.content_pool_cursor || 0) % items.length : 0,
-        lesson_video: items.length ? Number(lessonJob?.content_pool_cursor || 0) % items.length : 0
+        cards_carousel: cursorOf(cardsJob),
+        lesson_video: cursorOf(lessonJob),
+        combo: cursorOf(comboJob)
       }
     });
   } catch (error) {

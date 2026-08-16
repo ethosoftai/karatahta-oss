@@ -12,8 +12,9 @@ const INTERNAL_TOKEN = process.env.SCHEDULER_INTERNAL_TOKEN || '';
 const TICK_MS = Math.max(15000, Number(process.env.SCHEDULER_TICK_MS) || 60000);
 const JOB_POLL_MS = 5000;
 const JOB_TIMEOUT_MS = Math.max(60000, Number(process.env.SCHEDULER_JOB_TIMEOUT_MS) || 15 * 60 * 1000);
+const COMBO_GAP_MS = Math.max(0, Number(process.env.SCHEDULER_COMBO_GAP_MS) || 10 * 60 * 1000);
 
-const JOB_TYPES = ['cards_carousel', 'lesson_video'];
+const JOB_TYPES = ['cards_carousel', 'lesson_video', 'combo'];
 const runningLock = new Set();
 
 function log(message, meta = null) {
@@ -141,7 +142,18 @@ async function runLessonVideo(idea) {
   return { lessonId, jobId, publishJobId: publishData.publishJobId };
 }
 
-const RUNNERS = { cards_carousel: runCardsCarousel, lesson_video: runLessonVideo };
+// Same idea, two posts in sequence: full lesson video first (YouTube +
+// Instagram Reel), then -- once it's had a few minutes to actually appear --
+// a second Instagram post as a kart carousel of the same topic.
+async function runCombo(idea) {
+  const lesson = await runLessonVideo(idea);
+  log('Combo: video adimi bitti, carousel icin bekleniyor', { idea, gapMs: COMBO_GAP_MS });
+  await sleep(COMBO_GAP_MS);
+  const cards = await runCardsCarousel(idea);
+  return { lesson, cards };
+}
+
+const RUNNERS = { cards_carousel: runCardsCarousel, lesson_video: runLessonVideo, combo: runCombo };
 
 async function runJob(jobType) {
   if (runningLock.has(jobType)) return;

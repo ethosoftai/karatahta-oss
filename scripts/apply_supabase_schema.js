@@ -43,7 +43,8 @@ async function main() {
     '010_catalog.sql',
     '011_card_sessions.sql',
     '012_chat_source.sql',
-    '013_content_scheduler.sql'
+    '013_content_scheduler.sql',
+    '014_combo_scheduler.sql'
   ];
   const client = new Client({
     connectionString: getConnectionString(),

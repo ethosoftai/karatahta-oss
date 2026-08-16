@@ -155,8 +155,9 @@ her görsel önce indirilip `services/imageConvert.js` (ffmpeg) ile JPEG'e
 
 `services/scheduler.js`, `karatahta-social-publisher` worker'ı (`workers/socialPublisher.js`)
 içinde ayrı bir döngü olarak çalışır. Etkinleştirildiğinde, kendi aralığında
-(`interval_minutes`) `scheduler_jobs` tablosundaki (`migrations/013_content_scheduler.sql`)
-iki iş türünden hangisi zamanı gelmişse tetikler:
+(`interval_minutes`) `scheduler_jobs` tablosundaki (`migrations/013_content_scheduler.sql`,
+`migrations/014_combo_scheduler.sql`) iş türlerinden hangisi zamanı gelmişse
+tetikler:
 
 - `cards_carousel`: `POST /api/cards/generate` ile kart üretir, ardından
   `POST /api/cards/sessions/:id/publish-instagram` ile carousel yayınlar.
@@ -164,10 +165,17 @@ iki iş türünden hangisi zamanı gelmişse tetikler:
   `GET /api/jobs/:id` ile bitene kadar polling yapar, sonra
   `POST /api/social-publish` ile YouTube + Instagram'a (`privacy_status: public`)
   yayınlar.
+- `combo`: aynı fikirle önce `lesson_video` adımını çalıştırır, `SCHEDULER_COMBO_GAP_MS`
+  (varsayılan 10 dakika) bekler, sonra aynı fikirle `cards_carousel` adımını
+  çalıştırır — yani aynı konu için önce video (YouTube + Instagram Reel),
+  birkaç dakika sonra da kart carousel'i (Instagram) ayrı bir post olarak gider.
+  Önerilen tekil kullanım şekli budur; `cards_carousel`/`lesson_video` ayrı
+  ayrı da açılabilir ama bağımsız cursor/interval'leriyle farklı konulara denk gelebilirler.
 
 Fikirler Railway Bucket'ta `system/content_pool.txt` dosyasından (satır başına
 bir konu/soru) sırayla, iş türü başına ayrı bir cursor (`scheduler_jobs.content_pool_cursor`)
-ile çekilir ve liste bitince başa sarılır. Dosyayı `GET`/`PUT /api/scheduler/content-pool`
+ile çekilir ve liste bitince başa sarılır (`combo` kendi cursor'unu kullanır,
+adımları aynı fikri paylaşır). Dosyayı `GET`/`PUT /api/scheduler/content-pool`
 ile okuyup değiştirebilirsiniz (`PUT` body: `{ "text": "konu 1\nkonu 2\n..." }`).
 
 Worker, kendi API'sine sıradan bir istemci gibi HTTP ile istek atar
@@ -518,6 +526,7 @@ Yeni Supabase projesinde SQL Editor'da sırayla:
 11. `migrations/011_card_sessions.sql`
 12. `migrations/012_chat_source.sql`
 13. `migrations/013_content_scheduler.sql`
+14. `migrations/014_combo_scheduler.sql`
 
 çalıştırılmalıdır. Alternatif: `SUPABASE_DB_URL` tanımlayıp
 `npm run supabase:schema`.
