@@ -69,6 +69,7 @@ const worker = createRenderWorker(async (task, queueJob) => {
     rendered = await renderWorkerManimVideo({
       code: input.code.code,
       audioUrl: audio.signedUrl,
+      targetDurationSeconds: Number(input.tts.duration_seconds) || null,
       onLog: (message, meta) => log(message, { ...meta, segmentId: task.segmentId })
     });
     const storagePath = storagePathFor({

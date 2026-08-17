@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { sanitizeManimForLocalRender } from './manimSanitizer.js';
+import { fitManimTimingToDuration } from './manimProgressiveCode.js';
 import {
   VIDEO_FPS,
   VIDEO_HEIGHT,
@@ -93,12 +94,28 @@ async function probeVideo(filePath) {
   };
 }
 
-export async function renderWorkerManimVideo({ code, audioUrl, quality = resolveManimQuality(), onLog = () => {} }) {
+export async function renderWorkerManimVideo({
+  code,
+  audioUrl,
+  targetDurationSeconds = null,
+  quality = resolveManimQuality(),
+  onLog = () => {}
+}) {
   const renderId = `kara-render-worker-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), `${renderId}-`));
   try {
     const manimQuality = resolveManimQuality(quality);
-    const source = sanitizeManimForLocalRender(String(code || ''));
+    let source = sanitizeManimForLocalRender(String(code || ''));
+    // Without this, the worker renders the LLM's code at its own (usually
+    // much shorter) pace and just clones the scene's last frame to fill the
+    // rest of the narration -- and since scenes often end with a cleanup
+    // FadeOut, that last frame is frequently blank, producing long dead-air
+    // holds instead of paced animation. Pacing the code to the real TTS
+    // duration up front keeps the gap small enough that any remaining
+    // clone-padding is barely noticeable.
+    if (targetDurationSeconds > 0) {
+      source = fitManimTimingToDuration(source, targetDurationSeconds);
+    }
     const className = sceneClassName(source);
     const sourcePath = path.join(workDir, `${className}.py`);
     const mediaDir = path.join(workDir, 'media');
