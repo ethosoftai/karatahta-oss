@@ -87,14 +87,14 @@ async function runCardsCarousel(idea) {
   return { sessionId, cardCount, instagram: publishData };
 }
 
-// Kept short on purpose: the default topic-mode length (8 segments / 10 min)
-// overloads the single trial-plan render-worker replica badly enough to
-// fail outright (segments taking 5-6x their normal render time, final
-// concat OOM-killed) -- caught live when the scheduler's first real run
-// failed twice in a row. 3 short segments is comfortably inside what's
-// actually been verified to work reliably.
-const SCHEDULED_VIDEO_SEGMENT_COUNT = Math.max(1, Number(process.env.SCHEDULER_VIDEO_SEGMENT_COUNT) || 3);
-const SCHEDULED_VIDEO_MINUTES = Math.max(1, Number(process.env.SCHEDULER_VIDEO_MINUTES) || 3.5);
+// Was temporarily shortened (3 segments / 3.5 min) to dodge a final-concat
+// OOM under the single trial-plan render-worker replica -- concatVideos()
+// now uses the concat demuxer (buildConcatArgs) instead of a filter_complex
+// graph that held every segment's decoder open at once, which was the
+// actual source of the memory blowup. Restored to the normal topic-mode
+// default now that the root cause is fixed.
+const SCHEDULED_VIDEO_SEGMENT_COUNT = Math.max(1, Number(process.env.SCHEDULER_VIDEO_SEGMENT_COUNT) || 8);
+const SCHEDULED_VIDEO_MINUTES = Math.max(1, Number(process.env.SCHEDULER_VIDEO_MINUTES) || 10);
 
 async function runLessonVideo(idea) {
   const genResponse = await internalFetch('/api/generate-lesson', {

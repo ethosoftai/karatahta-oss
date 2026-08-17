@@ -64,7 +64,6 @@ import {
 import {
   buildBurnSubtitleArgs,
   buildConcatArgs,
-  buildFilterConcatArgs,
   buildMuxArgs,
   buildProgressiveAudioArgs,
   buildProgressivePartialArgs,
@@ -1700,11 +1699,22 @@ async function concatVideos(videoRelativePaths) {
   const concatId = `${Date.now()}-${randomUUID().slice(0, 8)}-full-video`;
   const workDir = path.join(rendersDir, concatId);
   const outputPath = path.join(workDir, 'full-video.mp4');
+  const listPath = path.join(workDir, 'concat-list.txt');
   await fs.mkdir(workDir, { recursive: true });
+
+  // Segments are already normalized to a standard resolution/fps at render
+  // time (assertStandardVideoProbe), so the concat demuxer can re-encode
+  // them one at a time instead of opening every input simultaneously in a
+  // single filter_complex graph. That previous approach's peak memory grew
+  // with segment count and OOM'd on longer lessons (8 segments).
+  const listContent = inputPaths
+    .map((inputPath) => `file '${inputPath.replaceAll("'", "'\\''")}'`)
+    .join('\n');
+  await fs.writeFile(listPath, listContent, 'utf8');
 
   const result = await runCommand(
     'ffmpeg',
-    buildFilterConcatArgs({ inputPaths, outputPath }),
+    buildConcatArgs({ listPath, outputPath, hasAudio: true }),
     { timeoutMs: 180000 }
   );
 
