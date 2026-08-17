@@ -833,11 +833,14 @@ function parseLlmJson(text, label) {
 
 function stripCodeFence(text) {
   let code = text.trim();
-  const fenceMatch = code.match(/^```(?:python|py)?\s*([\s\S]*?)\s*```$/i);
-  if (fenceMatch) {
-    code = fenceMatch[1].trim();
-  }
-  return code;
+  // Strip the leading fence even when there's no matching closing fence --
+  // a response that got cut off mid-generation (e.g. the model stalled in
+  // a repetition loop and hit its token limit) never emits a closing ```,
+  // so requiring both ends to match left the stray ```python prefix in the
+  // file and guaranteed a Python syntax error at render time.
+  code = code.replace(/^```(?:python|py)?\s*/i, '');
+  code = code.replace(/\s*```$/, '');
+  return code.trim();
 }
 
 function normalizeImagePayload(image) {
