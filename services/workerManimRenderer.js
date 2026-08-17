@@ -127,7 +127,12 @@ export async function renderWorkerManimVideo({
     if (!audioResponse.ok) throw new Error(`Worker ses indirilemedi: HTTP ${audioResponse.status}`);
     await fs.writeFile(audioPath, Buffer.from(await audioResponse.arrayBuffer()));
     onLog('Manim basladi', { className });
-    const manim = await run('python', ['-m', 'manim', manimQuality, '--resolution', `${VIDEO_WIDTH},${VIDEO_HEIGHT}`, '--fps', String(VIDEO_FPS), sourcePath, className, '--media_dir', mediaDir], { cwd: workDir });
+    // Pacing the scene to the real narration duration (above) means Manim
+    // now renders several times more frames than the old, unfitted, usually
+    // much-shorter animation -- the old 180s default was calibrated for
+    // that shorter case and started SIGTERM-killing otherwise-fine renders
+    // once scenes were properly paced to ~60-90s of real content.
+    const manim = await run('python', ['-m', 'manim', manimQuality, '--resolution', `${VIDEO_WIDTH},${VIDEO_HEIGHT}`, '--fps', String(VIDEO_FPS), sourcePath, className, '--media_dir', mediaDir], { cwd: workDir, timeoutMs: 420000 });
     if (manim.code !== 0) {
       const error = new Error(manim.signal ? `Manim ${manim.signal} ile sonlandi.` : 'Manim render basarisiz oldu.');
       Object.assign(error, { manim });
