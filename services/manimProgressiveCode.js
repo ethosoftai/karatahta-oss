@@ -44,12 +44,42 @@ function findCallEnd(source, openParenIndex) {
   return -1;
 }
 
+// A self.wait()/self.play() written inside a for/while loop runs once per
+// iteration at runtime but only appears once in the source text -- there's
+// no way to know its real total duration from static text, so scaling it
+// risks compounding an already-repeated call into something far longer
+// than intended. Detected by walking backwards from the call through
+// shrinking indentation levels until a loop header (or the enclosing
+// def/class) is found.
+function isInsideLoop(source, matchIndex) {
+  const currentLineStart = source.lastIndexOf('\n', matchIndex - 1) + 1;
+  const currentLineEnd = source.indexOf('\n', matchIndex);
+  const currentLine = source.slice(
+    currentLineStart,
+    currentLineEnd === -1 ? source.length : currentLineEnd
+  );
+  let boundaryIndent = (currentLine.match(/^\s*/)?.[0] || '').length;
+  const precedingLines = source.slice(0, currentLineStart).split('\n');
+  for (let i = precedingLines.length - 1; i >= 0 && boundaryIndent > 0; i -= 1) {
+    const candidate = precedingLines[i];
+    const trimmed = candidate.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const indent = (candidate.match(/^\s*/)?.[0] || '').length;
+    if (indent < boundaryIndent) {
+      if (/^(for|while)\b/.test(trimmed)) return true;
+      boundaryIndent = indent;
+    }
+  }
+  return false;
+}
+
 export function fitManimTimingToDuration(code, targetDurationSeconds, {
   defaultPlaySeconds = 1,
   defaultWaitSeconds = 1,
   minimumFactor = 0.5,
   maximumFactor = 4,
-  maxWaitSeconds = 3
+  maxWaitSeconds = 3,
+  maxPlaySeconds = 6
 } = {}) {
   const source = String(code || '');
   const target = Number(targetDurationSeconds);
@@ -63,6 +93,10 @@ export function fitManimTimingToDuration(code, targetDurationSeconds, {
     const openParenIndex = source.indexOf('(', match.index);
     const callEnd = findCallEnd(source, openParenIndex);
     if (callEnd === -1) continue;
+    if (isInsideLoop(source, match.index)) {
+      callPattern.lastIndex = callEnd;
+      continue;
+    }
     const call = source.slice(match.index, callEnd);
     const explicit = match[1] === 'play'
       ? /\brun_time\s*=\s*(\d+(?:\.\d+)?)/.exec(call)
@@ -87,35 +121,20 @@ export function fitManimTimingToDuration(code, targetDurationSeconds, {
   const factor = Math.max(minimumFactor, Math.min(maximumFactor, target / estimatedDuration));
   if (Math.abs(factor - 1) < 0.03) return source;
 
-  // Scaling every self.wait() by the same factor as self.play() turns short
-  // pauses into long dead-air stretches -- nothing on screen while the
-  // narration keeps playing over a static/blank frame. Cap how much any
-  // single wait can grow (never below its own original length) and push the
-  // time it would have gained into play() calls instead, so extra duration
-  // buys more motion, not more silence.
-  let scaledDurations = calls.map((call) => call.duration * factor);
-  if (factor > 1) {
-    let leftover = 0;
-    const playIndexes = [];
-    scaledDurations = calls.map((call, index) => {
-      const scaled = call.duration * factor;
-      if (call.type === 'wait') {
-        const cap = Math.max(maxWaitSeconds, call.duration);
-        const capped = Math.min(scaled, cap);
-        leftover += scaled - capped;
-        return capped;
-      }
-      playIndexes.push(index);
-      return scaled;
-    });
-    if (leftover > 0 && playIndexes.length) {
-      const playTotal = playIndexes.reduce((sum, index) => sum + scaledDurations[index], 0);
-      for (const index of playIndexes) {
-        const share = playTotal > 0 ? scaledDurations[index] / playTotal : 1 / playIndexes.length;
-        scaledDurations[index] += leftover * share;
-      }
-    }
-  }
+  // Scaling every call by the same raw factor can turn a short wait, or an
+  // already-finished play() (e.g. a FadeOut with nothing after it), into a
+  // long stretch where nothing meaningful happens on screen while the
+  // narration keeps playing. Cap how much any single call can grow --
+  // never below its own original length -- instead of applying the factor
+  // unbounded. This trades a possibly-shorter final video (the leftover
+  // gets absorbed later by holding the last real frame, not a black one)
+  // for the guarantee that no individual call balloons into dead air.
+  const scaledDurations = calls.map((call) => {
+    const scaled = call.duration * factor;
+    if (factor <= 1) return scaled;
+    const cap = Math.max(call.type === 'wait' ? maxWaitSeconds : maxPlaySeconds, call.duration);
+    return Math.min(scaled, cap);
+  });
 
   const edits = [];
   calls.forEach((call, index) => {

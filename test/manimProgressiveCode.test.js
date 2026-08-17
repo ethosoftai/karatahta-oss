@@ -16,7 +16,7 @@ test('LLM Manim zamanlamasini gercek ses suresine orantilar', () => {
   assert.match(fitted, /self\.wait\(2\)/);
 });
 
-test('sahneler arasi wait cagrisini olcek faktoruyle sisirmez, fazla sureyi play a aktarir', () => {
+test('sahneler arasi wait cagrisini olcek faktoruyle sisirmez', () => {
   const code = `        self.play(FadeIn(title))
         self.wait(2)
         self.play(FadeOut(title))
@@ -28,9 +28,25 @@ test('sahneler arasi wait cagrisini olcek faktoruyle sisirmez, fazla sureyi play
   // 8s pause instead of ballooning into a multi-minute blank hold.
   assert.ok(waitMatches.every((seconds) => seconds <= 8));
   const playMatches = [...fitted.matchAll(/run_time=(\d+(?:\.\d+)?)/g)].map((m) => Number(m[1]));
-  // The time the waits didn't get was redistributed into the play() calls
-  // instead, so segments stay visually active rather than sitting idle.
-  assert.ok(playMatches.every((seconds) => seconds > 4));
+  // play() calls may grow too, but only up to a cap -- never into an
+  // unbounded slow fade that ends up looking just as empty as a long wait.
+  assert.ok(playMatches.every((seconds) => seconds >= 1 && seconds <= 6));
+});
+
+test('donguye gomulu wait/play cagrilarina dokunmaz (gercek calisma zamani suresi bilinmiyor)', () => {
+  const code = `class Demo(Scene):
+    def construct(self):
+        for i in range(5):
+            self.play(Create(box))
+            self.wait(1)
+        self.play(FadeOut(box))`;
+  const fitted = fitManimTimingToDuration(code, 60);
+  // Loop body untouched -- no run_time added, wait(1) unchanged -- because
+  // the real total (looped N times at runtime) can't be inferred from the
+  // source text and scaling it would compound an already-repeated wait.
+  assert.match(fitted, /self\.play\(Create\(box\)\)\n {12}self\.wait\(1\)/);
+  // The one call outside the loop is still scaled normally.
+  assert.match(fitted, /self\.play\(FadeOut\(box\), run_time=/);
 });
 
 test('uzun play suresini kuculturken toplam sureyi wait parcalariyla korur', () => {
