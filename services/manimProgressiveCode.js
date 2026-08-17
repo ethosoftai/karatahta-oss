@@ -48,7 +48,8 @@ export function fitManimTimingToDuration(code, targetDurationSeconds, {
   defaultPlaySeconds = 1,
   defaultWaitSeconds = 1,
   minimumFactor = 0.5,
-  maximumFactor = 4
+  maximumFactor = 4,
+  maxWaitSeconds = 3
 } = {}) {
   const source = String(code || '');
   const target = Number(targetDurationSeconds);
@@ -85,9 +86,40 @@ export function fitManimTimingToDuration(code, targetDurationSeconds, {
   if (!(estimatedDuration > 0)) return source;
   const factor = Math.max(minimumFactor, Math.min(maximumFactor, target / estimatedDuration));
   if (Math.abs(factor - 1) < 0.03) return source;
+
+  // Scaling every self.wait() by the same factor as self.play() turns short
+  // pauses into long dead-air stretches -- nothing on screen while the
+  // narration keeps playing over a static/blank frame. Cap how much any
+  // single wait can grow (never below its own original length) and push the
+  // time it would have gained into play() calls instead, so extra duration
+  // buys more motion, not more silence.
+  let scaledDurations = calls.map((call) => call.duration * factor);
+  if (factor > 1) {
+    let leftover = 0;
+    const playIndexes = [];
+    scaledDurations = calls.map((call, index) => {
+      const scaled = call.duration * factor;
+      if (call.type === 'wait') {
+        const cap = Math.max(maxWaitSeconds, call.duration);
+        const capped = Math.min(scaled, cap);
+        leftover += scaled - capped;
+        return capped;
+      }
+      playIndexes.push(index);
+      return scaled;
+    });
+    if (leftover > 0 && playIndexes.length) {
+      const playTotal = playIndexes.reduce((sum, index) => sum + scaledDurations[index], 0);
+      for (const index of playIndexes) {
+        const share = playTotal > 0 ? scaledDurations[index] / playTotal : 1 / playIndexes.length;
+        scaledDurations[index] += leftover * share;
+      }
+    }
+  }
+
   const edits = [];
-  for (const call of calls) {
-    const scaled = numberText(call.duration * factor);
+  calls.forEach((call, index) => {
+    const scaled = numberText(scaledDurations[index]);
     if (call.explicit?.[1]) {
       const relativeStart = call.explicit.index
         + call.explicit[0].lastIndexOf(call.explicit[1]);
@@ -110,7 +142,7 @@ export function fitManimTimingToDuration(code, targetDurationSeconds, {
         replacement: scaled
       });
     }
-  }
+  });
   return edits
     .sort((left, right) => right.start - left.start || right.end - left.end)
     .reduce((output, edit) => (

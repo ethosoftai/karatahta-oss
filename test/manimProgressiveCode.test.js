@@ -16,6 +16,23 @@ test('LLM Manim zamanlamasini gercek ses suresine orantilar', () => {
   assert.match(fitted, /self\.wait\(2\)/);
 });
 
+test('sahneler arasi wait cagrisini olcek faktoruyle sisirmez, fazla sureyi play a aktarir', () => {
+  const code = `        self.play(FadeIn(title))
+        self.wait(2)
+        self.play(FadeOut(title))
+        self.wait(8)
+        self.play(FadeIn(clock))`;
+  const fitted = fitManimTimingToDuration(code, 75);
+  const waitMatches = [...fitted.matchAll(/self\.wait\((\d+(?:\.\d+)?)\)/g)].map((m) => Number(m[1]));
+  // Neither wait grew past its own original length -- the 8s pause stays an
+  // 8s pause instead of ballooning into a multi-minute blank hold.
+  assert.ok(waitMatches.every((seconds) => seconds <= 8));
+  const playMatches = [...fitted.matchAll(/run_time=(\d+(?:\.\d+)?)/g)].map((m) => Number(m[1]));
+  // The time the waits didn't get was redistributed into the play() calls
+  // instead, so segments stay visually active rather than sitting idle.
+  assert.ok(playMatches.every((seconds) => seconds > 4));
+});
+
 test('uzun play suresini kuculturken toplam sureyi wait parcalariyla korur', () => {
   const code = `class Demo(Scene):
     def construct(self):
