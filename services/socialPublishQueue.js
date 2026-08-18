@@ -68,7 +68,7 @@ export async function claimNextSocialPublishJob() {
   return claimed || null;
 }
 
-export async function finishSocialPublishJob({ jobId, instagramResult, youtubeResult }) {
+export async function finishSocialPublishJob({ jobId, instagramResult, youtubeResult, tiktokResult }) {
   const client = requireQueue();
   const { error } = await client
     .from('social_publish_jobs')
@@ -76,6 +76,7 @@ export async function finishSocialPublishJob({ jobId, instagramResult, youtubeRe
       status: 'done',
       instagram_result: instagramResult,
       youtube_result: youtubeResult,
+      tiktok_result: tiktokResult,
       completed_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     })
@@ -83,7 +84,7 @@ export async function finishSocialPublishJob({ jobId, instagramResult, youtubeRe
   if (error) throw error;
 }
 
-export async function failSocialPublishJob({ jobId, instagramResult, youtubeResult, error }) {
+export async function failSocialPublishJob({ jobId, instagramResult, youtubeResult, tiktokResult, error }) {
   const client = requireQueue();
   const { error: updateError } = await client
     .from('social_publish_jobs')
@@ -91,6 +92,7 @@ export async function failSocialPublishJob({ jobId, instagramResult, youtubeResu
       status: 'failed',
       instagram_result: instagramResult,
       youtube_result: youtubeResult,
+      tiktok_result: tiktokResult,
       error: String(error || 'Sosyal medya yayinlama basarisiz.'),
       completed_at: new Date().toISOString(),
       updated_at: new Date().toISOString()

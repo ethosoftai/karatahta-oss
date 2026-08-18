@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { createStorageSignedUrl } from '../services/mediaStore.js';
 import { publishReelToInstagram } from '../services/instagramPublish.js';
 import { publishVideoToYoutube } from '../services/youtubePublish.js';
+import { publishVideoToTiktok } from '../services/tiktokPublish.js';
 import {
   claimNextSocialPublishJob,
   failSocialPublishJob,
@@ -43,6 +44,7 @@ async function processOne() {
   log('Yayin isi alindi', { jobId: job.id, videoId: job.video_id });
   let instagramResult = null;
   let youtubeResult = null;
+  let tiktokResult = null;
   try {
     const target = await getLessonVideoByIdForUser({ videoId: job.video_id, userId: job.user_id });
     if (!target?.video?.video_storage_path) {
@@ -79,21 +81,35 @@ async function processOne() {
         youtubeResult = { status: 'failed', error: error.message || 'YouTube yayinlanamadi.' };
       }
     }
-    const failures = [instagramResult, youtubeResult].filter((result) => result?.status === 'failed');
+    if (platform === 'tiktok') {
+      try {
+        // TikTok apps that haven't cleared app review can only post
+        // SELF_ONLY regardless of what's requested; see tiktokPublish.js.
+        const privacyLevel = { public: 'PUBLIC_TO_EVERYONE', private: 'SELF_ONLY', unlisted: 'SELF_ONLY' }[job.privacy_status] || 'SELF_ONLY';
+        tiktokResult = {
+          status: 'published',
+          ...(await publishVideoToTiktok({ videoUrl, title: metadata.title, privacyLevel }))
+        };
+      } catch (error) {
+        tiktokResult = { status: 'failed', error: error.message || 'TikTok yayinlanamadi.' };
+      }
+    }
+    const failures = [instagramResult, youtubeResult, tiktokResult].filter((result) => result?.status === 'failed');
     if (failures.length) {
       await failSocialPublishJob({
         jobId: job.id,
         instagramResult,
         youtubeResult,
+        tiktokResult,
         error: failures.map((result) => result.error).join(' | ')
       });
-      log('Yayin isi hata ile bitti', { jobId: job.id, instagramResult, youtubeResult });
+      log('Yayin isi hata ile bitti', { jobId: job.id, instagramResult, youtubeResult, tiktokResult });
     } else {
-      await finishSocialPublishJob({ jobId: job.id, instagramResult, youtubeResult });
-      log('Yayin isi tamamlandi', { jobId: job.id, instagramResult, youtubeResult });
+      await finishSocialPublishJob({ jobId: job.id, instagramResult, youtubeResult, tiktokResult });
+      log('Yayin isi tamamlandi', { jobId: job.id, instagramResult, youtubeResult, tiktokResult });
     }
   } catch (error) {
-    await failSocialPublishJob({ jobId: job.id, instagramResult, youtubeResult, error: error.message });
+    await failSocialPublishJob({ jobId: job.id, instagramResult, youtubeResult, tiktokResult, error: error.message });
     log('Yayin isi islenemedi', { jobId: job.id, error: error.message });
   }
   return true;

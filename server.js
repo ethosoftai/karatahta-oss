@@ -6,7 +6,7 @@ import OpenAI from 'openai';
 import { Agent, setGlobalDispatcher } from 'undici';
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -3266,6 +3266,101 @@ async function findNewestMp4(dir) {
   return findNewestFileByExtension(dir, '.mp4');
 }
 
+function legalPageHtml(title, bodyHtml) {
+  return `<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${title} — Kara Tahta</title>
+<style>
+body { font-family: system-ui, -apple-system, sans-serif; max-width: 760px; margin: 0 auto; padding: 40px 20px; line-height: 1.6; color: #1a1a1a; }
+h1 { font-size: 1.8rem; margin-bottom: 0.2em; }
+h2 { font-size: 1.2rem; margin-top: 1.8em; }
+p, li { color: #333; }
+.updated { color: #777; font-size: 0.9rem; margin-bottom: 2em; }
+</style>
+</head>
+<body>
+${bodyHtml}
+</body>
+</html>`;
+}
+
+// Publicly hosted so they can be linked from third-party developer portals
+// (e.g. TikTok's app review form requires a live Terms of Service and
+// Privacy Policy URL before a Content Posting API integration can be
+// submitted for review).
+app.get('/terms', (_req, res) => {
+  res.type('html').send(legalPageHtml('Kullanim Sartlari', `
+<h1>Kara Tahta Kullanim Sartlari</h1>
+<p class="updated">Son guncelleme: 18 Agustos 2026</p>
+<p>Kara Tahta ("Hizmet"), yapay zeka ile bir konu basligindan egitim amacli
+animasyonlu video ve gorsel icerik ureten bir platformdur. Bu Hizmeti
+kullanarak asagidaki sartlari kabul etmis olursunuz.</p>
+<h2>1. Hizmetin Kapsami</h2>
+<p>Kara Tahta, kullanicinin girdigi bir konudan otomatik olarak ders plani,
+seslendirme ve animasyon iceren bir video uretir. Uretilen icerik yapay
+zeka tarafindan olusturulur; dogruluk, eksiksizlik veya belirli bir amaca
+uygunluk garanti edilmez.</p>
+<h2>2. Hesap ve Sorumluluklar</h2>
+<p>Hesabinizin guvenliginden siz sorumlusunuz. Hizmeti yasa disi icerik
+uretmek, baskalarinin haklarini ihlal etmek veya spam/istismar amaciyla
+kullanamazsiniz.</p>
+<h2>3. Ic Uretilen Icerik</h2>
+<p>Kendi hesabinizla urettiginiz videolar uzerinde kullanim hakkina
+sahipsiniz. Baglantili sosyal medya hesaplarina (YouTube, Instagram,
+TikTok vb.) yayinlama ozelligini kullandiginizda, ilgili platformun kendi
+kullanim sartlari da gecerli olur.</p>
+<h2>4. Ucuncu Taraf Entegrasyonlari</h2>
+<p>Hizmet, sizin acik talimatinizla video icerigini ucuncu taraf sosyal
+medya platformlarina (YouTube, Instagram, TikTok) yayinlayabilir. Bu
+platformlara yayinlama, yalnizca siz veya sizin adiniza yapilandirilmis bir
+otomasyon tarafindan acikca tetiklendiginde gerceklesir.</p>
+<h2>5. Sorumluluk Sinirlamasi</h2>
+<p>Hizmet "oldugu gibi" sunulur. Uretilen icerigin egitimsel dogrulugundan
+veya kesintisiz calismasindan kaynaklanan dogrudan/dolayli zararlardan
+Kara Tahta sorumlu tutulamaz.</p>
+<h2>6. Iletisim</h2>
+<p>Sorulariniz icin: destek@karatahta.app</p>
+`));
+});
+
+app.get('/privacy', (_req, res) => {
+  res.type('html').send(legalPageHtml('Gizlilik Politikasi', `
+<h1>Kara Tahta Gizlilik Politikasi</h1>
+<p class="updated">Son guncelleme: 18 Agustos 2026</p>
+<h2>1. Topladigimiz Veriler</h2>
+<p>Hesap olusturdugunuzda e-posta adresinizi ve kimlik dogrulama bilgilerinizi
+(Supabase Auth uzerinden) saklariz. Urettiginiz ders iceriklerini (konu,
+plan, video, sohbet gecmisi) hesabinizla iliskilendirilmis olarak
+depolariz.</p>
+<h2>2. Verilerin Kullanimi</h2>
+<p>Verileriniz yalnizca Hizmeti size sunmak (video uretimi, gecmis
+derslerinizi gosterme, sohbet ozelligi) icin kullanilir. Verileriniz
+reklam amaciyla ucuncu taraflara satilmaz.</p>
+<h2>3. Ucuncu Taraf Servisler</h2>
+<p>Video/ses uretimi icin DeepSeek ve Google (Gemini, Text-to-Speech) gibi
+yapay zeka saglayicilarina; medya depolama icin Railway Bucket'a istek
+gonderilir. Siz acikca talep ettiginizde, video iceriginiz YouTube,
+Instagram veya TikTok gibi platformlara yayinlanmak uzere bu platformlarin
+API'lerine gonderilir -- bu paylasim yalnizca sizin baslattiginiz bir
+yayinlama islemiyle gerceklesir.</p>
+<h2>4. TikTok Entegrasyonu</h2>
+<p>TikTok hesabiniza icerik yayinlama ozelligini kullandiginizda, yalnizca
+yayinlamayi talep ettiginiz video dosyasi ve baslik/aciklama bilgisi
+TikTok'un Content Posting API'sine gonderilir. Bu izin yalnizca video
+yayinlamak icindir; TikTok hesabinizdaki baska hicbir veriye erisilmez
+veya baska bir veri TikTok'a gonderilmez.</p>
+<h2>5. Veri Saklama ve Silme</h2>
+<p>Hesabinizi sildiginizde, hesabinizla iliskili ders ve video verileri
+makul bir sure icinde silinir. Silme talebi icin destek@karatahta.app
+adresinden bize ulasabilirsiniz.</p>
+<h2>6. Iletisim</h2>
+<p>Gizlilikle ilgili sorulariniz icin: destek@karatahta.app</p>
+`));
+});
+
 app.get('/api/config', async (_req, res, next) => {
   try {
     res.json({
@@ -3405,6 +3500,98 @@ app.post('/api/auth/google-drive-token', async (req, res, next) => {
       scope: googleDriveScope
     });
     res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// One-time admin bootstrap flow to obtain TIKTOK_REFRESH_TOKEN (TikTok's
+// Content Posting API publishes as a single business account, same shape as
+// YOUTUBE_REFRESH_TOKEN -- not a per-user Supabase-linked OAuth connection).
+// Requires TIKTOK_CLIENT_KEY/SECRET and TIKTOK_OAUTH_SETUP_TOKEN to already
+// be set; visit /api/oauth/tiktok/start?setup_token=... in a browser logged
+// into the TikTok business account, approve, then copy the refresh_token the
+// callback prints into Railway's TIKTOK_REFRESH_TOKEN and redeploy.
+const tiktokOAuthStates = new Map();
+const tiktokOAuthStateTtlMs = 10 * 60 * 1000;
+
+function base64UrlEncode(buffer) {
+  return buffer.toString('base64').replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
+
+function tiktokRedirectUri(req) {
+  return process.env.TIKTOK_REDIRECT_URI
+    || `${(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')}/api/oauth/tiktok/callback`;
+}
+
+app.get('/api/oauth/tiktok/start', (req, res) => {
+  const setupToken = String(process.env.TIKTOK_OAUTH_SETUP_TOKEN || '').trim();
+  if (!setupToken || String(req.query.setup_token || '') !== setupToken) {
+    return res.status(403).json({ error: 'Gecersiz veya eksik setup_token.' });
+  }
+  const clientKey = process.env.TIKTOK_CLIENT_KEY;
+  if (!clientKey) {
+    return res.status(503).json({ error: 'TIKTOK_CLIENT_KEY tanimli degil.' });
+  }
+  const verifier = base64UrlEncode(randomBytes(32));
+  const challenge = base64UrlEncode(createHash('sha256').update(verifier).digest());
+  const state = base64UrlEncode(randomBytes(16));
+  tiktokOAuthStates.set(state, { verifier, createdAt: Date.now() });
+
+  const url = new URL('https://www.tiktok.com/v2/auth/authorize/');
+  url.searchParams.set('client_key', clientKey);
+  url.searchParams.set('scope', 'video.publish,video.upload');
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('redirect_uri', tiktokRedirectUri(req));
+  url.searchParams.set('state', state);
+  url.searchParams.set('code_challenge', challenge);
+  url.searchParams.set('code_challenge_method', 'S256');
+  res.redirect(url.toString());
+});
+
+app.get('/api/oauth/tiktok/callback', async (req, res, next) => {
+  try {
+    if (req.query.error) {
+      return res.status(400).json({ error: `TikTok yetkilendirme reddedildi: ${req.query.error}` });
+    }
+    const state = String(req.query.state || '');
+    const entry = state ? tiktokOAuthStates.get(state) : null;
+    if (!entry) {
+      return res.status(400).json({ error: 'Gecersiz veya suresi dolmus state; /api/oauth/tiktok/start akisini tekrar baslat.' });
+    }
+    tiktokOAuthStates.delete(state);
+    if (Date.now() - entry.createdAt > tiktokOAuthStateTtlMs) {
+      return res.status(400).json({ error: 'state suresi dolmus; /api/oauth/tiktok/start akisini tekrar baslat.' });
+    }
+    const clientKey = process.env.TIKTOK_CLIENT_KEY;
+    const clientSecret = process.env.TIKTOK_CLIENT_SECRET;
+    if (!clientKey || !clientSecret) {
+      return res.status(503).json({ error: 'TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET tanimli degil.' });
+    }
+    const tokenResponse = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cache-Control': 'no-cache' },
+      body: new URLSearchParams({
+        client_key: clientKey,
+        client_secret: clientSecret,
+        code: String(req.query.code || ''),
+        grant_type: 'authorization_code',
+        redirect_uri: tiktokRedirectUri(req),
+        code_verifier: entry.verifier
+      })
+    });
+    const tokenData = await tokenResponse.json();
+    if (!tokenResponse.ok || !tokenData.refresh_token) {
+      return res.status(502).json({ error: 'TikTok token exchange basarisiz.', detail: tokenData });
+    }
+    res.json({
+      ok: true,
+      message: 'Bu refresh_token degerini TIKTOK_REFRESH_TOKEN olarak Railway ortam degiskenlerine kaydet ve yeniden deploy et.',
+      refresh_token: tokenData.refresh_token,
+      access_token_expires_in: tokenData.expires_in,
+      scope: tokenData.scope,
+      open_id: tokenData.open_id
+    });
   } catch (error) {
     next(error);
   }
@@ -3801,6 +3988,10 @@ app.post('/api/publish-instagram', async (req, res, next) => {
 
 app.post('/api/publish-youtube', async (req, res, next) => {
   await queuePlatformPublish(req, res, next, 'youtube');
+});
+
+app.post('/api/publish-tiktok', async (req, res, next) => {
+  await queuePlatformPublish(req, res, next, 'tiktok');
 });
 
 // API gate for the separate social-media workflow. The client provides only a
