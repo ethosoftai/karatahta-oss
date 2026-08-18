@@ -59,7 +59,9 @@ import {
   VIDEO_HEIGHT,
   VIDEO_WIDTH,
   resolveManimFont,
-  resolveManimQuality
+  resolveManimQuality,
+  resolveVideoDimensions,
+  resolveVideoOrientation
 } from './services/renderQuality.js';
 import {
   buildBurnSubtitleArgs,
@@ -1479,8 +1481,8 @@ async function probeVideo(filePath) {
   };
 }
 
-function validateRenderedVideo(probe, context) {
-  return assertStandardVideoProbe(probe, context);
+function validateRenderedVideo(probe, context, dimensions = null) {
+  return assertStandardVideoProbe(probe, context, dimensions || undefined);
 }
 
 function avcCodecString(probe) {
@@ -1690,7 +1692,7 @@ async function muxAudio(videoPath, audioPath, outputPath, speechText = '', ttsOp
   };
 }
 
-async function concatVideos(videoRelativePaths) {
+async function concatVideos(videoRelativePaths, dimensions = null) {
   logInfo('Final video birlestirme basladi', { count: videoRelativePaths.length });
   const inputPaths = videoRelativePaths.map(resolveRenderRelative);
   if (!inputPaths.length) {
@@ -1730,7 +1732,7 @@ async function concatVideos(videoRelativePaths) {
     error.timedOut = result.timedOut;
     throw error;
   }
-  validateRenderedVideo(await probeVideo(outputPath), 'final concat video');
+  validateRenderedVideo(await probeVideo(outputPath), 'final concat video', dimensions);
 
   const payload = {
     videoUrl: createLocalMediaUrl(path.relative(rendersDir, outputPath)),
@@ -1953,13 +1955,24 @@ async function synthesizeSpeech(text, segmentId, ttsOptions = null) {
   return result;
 }
 
-async function createManimCode({ animation, durationSeconds, speech, segmentId, continuityContext = null }) {
+async function createManimCode({ animation, durationSeconds, speech, segmentId, orientation = 'horizontal', continuityContext = null }) {
   logInfo(`${segmentId}: Manim kodu LLM ile uretiliyor`, {
     seconds: durationSeconds,
     previousCodeChars: String(continuityContext?.previous_manim_code || '').length
   });
   const { coder } = await loadPrompts();
   const manimGuide = await loadManimGuide();
+  const resolvedOrientation = resolveVideoOrientation(orientation);
+  const { width: frameWidthPx, height: frameHeightPx } = resolveVideoDimensions(resolvedOrientation);
+  // Manim locks config.frame_height at 8 units and derives frame_width from
+  // the pixel aspect ratio, so a 9:16 render has a much narrower coordinate
+  // system than 16:9 -- the layout_safety.md numbers (FRAME_W~=14.22) are
+  // wrong for this case and would make the LLM think it has far more
+  // horizontal room than it actually does.
+  const frameWidthUnits = (8 * frameWidthPx / frameHeightPx).toFixed(2);
+  const orientationGuidance = resolvedOrientation === 'vertical'
+    ? `\n\nDIKEY VIDEO MODU (YouTube Shorts / TikTok / Instagram Reels): Bu sahne 9:16 dikey formatta render edilecek. config.frame_height sabit 8 birim ama config.frame_width sadece ~${frameWidthUnits} birim -- yatay 16:9 sahnelerin aksine YANLARDA NEREDEYSE HIC BOSLUK YOK. Yan yana iki mobject veya genis bir denklem koyma; her seyi TEK SUTUN halinde dikeyde ust uste diz (VGroup(...).arrange(DOWN, buff=...)). Font boyutlarini kucult (baslik icin max 36, govde icin max 26). Genis bir sey (tablo, uzun formul, yan yana karsilastirma) kesinlikle kullanma; bunun yerine adim adim tek sutunda goster.`
+    : '';
   const input = {
     animation,
     duration_seconds: Number(durationSeconds || 45),
@@ -1978,7 +1991,7 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId, 
     label: 'DeepSeek',
     model: codeModel,
     systemInstruction: buildManimSystemInstruction(coder, manimGuide),
-    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun teknik render parcasidir; bagimsiz bir mini video veya yeni bolum degildir. continuity alanindaki onceki sahne durumunu ilk self.play() cagrisindan ONCE, animasyonsuz olarak yeniden kur. Boylece ilk kare onceki segmentin son karesiyle ayni kompozisyonu tasir. Segment basligi, giris karti, logo veya yeniden tanitim gosterme. Onceki nesneleri uygun Transform/ReplacementTransform ile gelistir; ekrani sifirlayip baska bir kompozisyona atlama. continuity.forbid_full_clear true ise tum nesneleri FadeOut ile temizleme ve siyah bos kareyle bitirme. Yalniz continuity.role closing ise dogal bir final kapanisi yapabilirsin. Tum segmentlerde continuity.visual_style renklerini, fontunu ve yerlesimini aynen koru.\n\ncontinuity.previous_manim_code bos degilse bu kod onceki segmentin GERCEK Manim kaynak kodudur. Onun son gorunen sahnesindeki mobject constructorlarini, degisken adlarini, renkleri, scale degerlerini ve koordinatlari incele. Yeni construct basinda bu son durumu ayni kodla yeniden kur ve self.add(...) ile animasyonsuz yerlestir. Ilk self.play, bu tasinan nesneleri yeni fikre Transform/ReplacementTransform ile donustursun. Onceki animasyonlari tekrar oynatma, yeni bir baslik karti olusturma ve farkli koordinatlarla benzerini tahmin etme.\n\nSegment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nPROGRESSIVE RENDER KURALLARI: Ilk self.play() 2-3 saniyeyi gecmesin. Sonraki gorsel akis anlamli 2-5 saniyelik self.play()/self.wait() bloklarindan olussun. Tek bir run_time=10/15 gibi dev animasyon kullanma. Ilk blokta binlerce obje, agir 3D veya gereksiz always_redraw kullanma; sonraki bloklarda gorsel zenginligi ve pedagojik kaliteyi koru. Kod satir satir calistirilmayacak; partial sinirlari yalnizca normal self.play()/self.wait() cagrilaridir.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.`,
+    userText: `${JSON.stringify(input, null, 2)}\n\nYalnizca calisabilir Python/Manim kodu dondur. Markdown aciklamasi yazma.\n\nBu sahne uzun egitim videosunun teknik render parcasidir; bagimsiz bir mini video veya yeni bolum degildir. continuity alanindaki onceki sahne durumunu ilk self.play() cagrisindan ONCE, animasyonsuz olarak yeniden kur. Boylece ilk kare onceki segmentin son karesiyle ayni kompozisyonu tasir. Segment basligi, giris karti, logo veya yeniden tanitim gosterme. Onceki nesneleri uygun Transform/ReplacementTransform ile gelistir; ekrani sifirlayip baska bir kompozisyona atlama. continuity.forbid_full_clear true ise tum nesneleri FadeOut ile temizleme ve siyah bos kareyle bitirme. Yalniz continuity.role closing ise dogal bir final kapanisi yapabilirsin. Tum segmentlerde continuity.visual_style renklerini, fontunu ve yerlesimini aynen koru.\n\ncontinuity.previous_manim_code bos degilse bu kod onceki segmentin GERCEK Manim kaynak kodudur. Onun son gorunen sahnesindeki mobject constructorlarini, degisken adlarini, renkleri, scale degerlerini ve koordinatlari incele. Yeni construct basinda bu son durumu ayni kodla yeniden kur ve self.add(...) ile animasyonsuz yerlestir. Ilk self.play, bu tasinan nesneleri yeni fikre Transform/ReplacementTransform ile donustursun. Onceki animasyonlari tekrar oynatma, yeni bir baslik karti olusturma ve farkli koordinatlarla benzerini tahmin etme.\n\nSegment boyunca fikri tasiyan, adim adim gelisen bir gorsel anlatim kur. Eger segment ornek cozumu ise problem, verilenler, adimlar ve sonuc ekranda sirayla belirsin. Eger kavram anlatimi ise sezgisel modelden teknik gosterime dogru ilerle.\n\nPROGRESSIVE RENDER KURALLARI: Ilk self.play() 2-3 saniyeyi gecmesin. Sonraki gorsel akis anlamli 2-5 saniyelik self.play()/self.wait() bloklarindan olussun. Tek bir run_time=10/15 gibi dev animasyon kullanma. Ilk blokta binlerce obje, agir 3D veya gereksiz always_redraw kullanma; sonraki bloklarda gorsel zenginligi ve pedagojik kaliteyi koru. Kod satir satir calistirilmayacak; partial sinirlari yalnizca normal self.play()/self.wait() cagrilaridir.\n\nEger speech varsa animasyonun toplam suresi speech.duration_seconds degerine yakin olsun ve speech.cue_plan icindeki gorsel aksiyonlar konusma akisiyla sirali eslessin. Son sahnede gereksiz uzun bekleme koyma; toplam sure ses suresinden en fazla 1 saniye uzun olsun. Konusma metnini ekrana tam metin olarak basma; yalnizca gerekli kisa anahtar kelimeleri, denklemleri ve adimlari goster.\n\nKamera zoom veya self.camera.frame kullanacaksan class Seg_x(MovingCameraScene) yaz; normal Scene icinde self.camera.frame kullanma. Manim v0.20.1 uyumlulugu icin expo_out kullanma; bunun yerine rate_functions.ease_out_expo kullan.\n\n${mathTexAvailable ? `LaTeX hazir. Matematiksel formul, kok, limit, integral, kesir, us/alt simge ve semboller icin MathTex(r"...") kullan; aciklama metinleri icin Text(..., font=${JSON.stringify(manimFont)}) kullan.` : `Yerel sistemde LaTeX kurulu degil. MathTex, Tex ve DecimalNumber gerektiren include_numbers=True kullanma. Formul, eksen etiketi ve sayilar icin Text(..., font=${JSON.stringify(manimFont)}) kullan.`} Axes ve NumberLine icinde include_numbers=False ayarla.${orientationGuidance}`,
     temperature: 0.35,
     // A detailed scene (many objects/steps) can run past 6000 tokens and
     // get cut off mid-statement -- guaranteed invalid Python, confirmed
@@ -2226,7 +2239,9 @@ async function renderManimVideo({
   audioRelativePath,
   speechText = '',
   progressiveContext = null,
-  ttsOptions = null
+  ttsOptions = null,
+  videoWidth = VIDEO_WIDTH,
+  videoHeight = VIDEO_HEIGHT
 }) {
   logInfo(`${segmentId}: Manim render hazirlaniyor`, { quality: manimQuality });
   let currentCode = sanitizeManimForLocalRender(stripCodeFence(String(code || '')));
@@ -2369,7 +2384,7 @@ async function renderManimVideo({
     }
   const manimArgs = ['-m', 'manim', manimQuality, '-c', manimTexCacheConfigPath];
   if (progressiveContext?.job?.progressive?.enabled) {
-    manimArgs.push('--resolution', `${VIDEO_WIDTH},${VIDEO_HEIGHT}`, '--fps', String(VIDEO_FPS));
+    manimArgs.push('--resolution', `${videoWidth},${videoHeight}`, '--fps', String(VIDEO_FPS));
   }
     manimArgs.push(filePath, className, '--media_dir', mediaDir);
     result = await runCommand('python', manimArgs, { timeoutMs: 180000 });
@@ -2563,7 +2578,7 @@ async function renderManimVideo({
   }
 
   const relativeVideo = path.relative(rendersDir, finalVideoPath).replaceAll(path.sep, '/');
-  validateRenderedVideo(await probeVideo(finalVideoPath), `${safeSegmentId} final video`);
+  validateRenderedVideo(await probeVideo(finalVideoPath), `${safeSegmentId} final video`, { width: videoWidth, height: videoHeight });
   const durationSeconds = await getMediaDurationSeconds(finalVideoPath).catch(() => null);
 
   const resultPayload = {
@@ -2600,6 +2615,7 @@ function publicJob(job) {
     plan: job.plan,
     segments: job.segments,
     lessonId: job.lessonId,
+    orientation: job.orientation,
     progressive: publicProgressiveState(job.progressive),
     timings: job.timings || null
   };
@@ -2839,6 +2855,7 @@ async function runFullVideoJob(job) {
                   cue_plan: speech.cue_plan || []
                 },
                 segmentId: segment.id,
+                orientation: job.orientation,
                 continuityContext: buildSegmentGenerationContext({
                   plan: job.plan,
                   segment,
@@ -2924,6 +2941,8 @@ async function runFullVideoJob(job) {
               segmentIndex: index,
               workerJobId: workerRecord?.id || null,
               audioStoragePath: uploadedAudio?.storagePath || null,
+              videoWidth: job.videoWidth,
+              videoHeight: job.videoHeight,
               metadata: {
                 mode: renderWorkerShadowMode ? 'shadow' : 'execute',
                 manimCodeId: manimCode?.id || null,
@@ -3052,7 +3071,9 @@ async function runFullVideoJob(job) {
             progressiveContext: !renderWorkerExecuteEnabled && job.progressive.enabled && job.progressive.status !== 'failed'
               ? { job, segmentIndex: index }
               : null,
-            ttsOptions: job.ttsOptions
+            ttsOptions: job.ttsOptions,
+            videoWidth: job.videoWidth,
+            videoHeight: job.videoHeight
           });
           });
         }
@@ -3147,7 +3168,7 @@ async function runFullVideoJob(job) {
       message: 'Final video hazirlaniyor.'
     });
 
-    const concat = await concatVideos(videoPaths);
+    const concat = await concatVideos(videoPaths, { width: job.videoWidth, height: job.videoHeight });
     job._artifactPaths.add(path.dirname(resolveRenderRelative(concat.videoRelativePath)));
     concat.source = !renderWorkerExecuteEnabled && job.progressive.enabled && job.progressive.status !== 'failed'
       ? 'progressive_partials'
@@ -4046,16 +4067,32 @@ async function buildTraditionalPlannerRequest(body) {
     studentLevel
   });
   const durationTouched = Boolean(body.duration_touched);
+  const orientation = resolveVideoOrientation(body.orientation);
+  // YouTube only classifies an upload as a Short if it's under its duration
+  // cap (as well as vertical/square) -- there's no separate "post as Short"
+  // API call, so a vertical render that ran to the normal ~10 minute default
+  // would just upload as a regular long-form video. Cap well under that cap
+  // and keep segments to a Shorts-appropriate pace (~20-25s each) rather
+  // than reusing the long-form ~75s/segment budget.
+  const maxVerticalMinutes = 3;
+  const requestedMinutes = durationTouched
+    ? Number(body.target_video_minutes || targetVideoMinutes)
+    : preprocessed.target_duration_minutes;
+  const targetVideoMinutesResolved = orientation === 'vertical'
+    ? Math.min(requestedMinutes, maxVerticalMinutes)
+    : requestedMinutes;
+  const requestedSegmentCount = durationTouched
+    ? Number(body.target_segment_count || targetSegmentCount)
+    : preprocessed.target_segment_count;
+  const targetSegmentCountResolved = orientation === 'vertical'
+    ? Math.max(1, Math.min(requestedSegmentCount, Math.round(targetVideoMinutesResolved * 60 / 22)))
+    : requestedSegmentCount;
 
   const input = {
     topic: preprocessed.clean_prompt || topic,
     student_level: studentLevel,
-    target_video_minutes: durationTouched
-      ? Number(body.target_video_minutes || targetVideoMinutes)
-      : preprocessed.target_duration_minutes,
-    target_segment_count: durationTouched
-      ? Number(body.target_segment_count || targetSegmentCount)
-      : preprocessed.target_segment_count,
+    target_video_minutes: targetVideoMinutesResolved,
+    target_segment_count: targetSegmentCountResolved,
     lesson_style: 'full_explainer_with_examples',
     prior_knowledge: Array.isArray(body.prior_knowledge)
       ? body.prior_knowledge
@@ -4111,6 +4148,7 @@ ZORUNLU:
     input,
     targetMinutes,
     segmentCount,
+    orientation,
     fullLessonPlanner
   };
 }
@@ -4122,6 +4160,7 @@ async function createTraditionalLessonPlan(body, userContext) {
     input,
     targetMinutes,
     segmentCount,
+    orientation,
     fullLessonPlanner
   } = await buildTraditionalPlannerRequest(body);
 
@@ -4148,6 +4187,7 @@ async function createTraditionalLessonPlan(body, userContext) {
       studentLevel: input.student_level,
       targetMinutes,
       targetSegmentCount: segmentCount,
+      orientation,
       sourceType: 'topic'
     });
     await savePlan({
@@ -4164,7 +4204,7 @@ async function createTraditionalLessonPlan(body, userContext) {
   if (lesson?.id) {
     plan._lesson_id = lesson.id;
   }
-  return { plan, lessonId: lesson?.id || null };
+  return { plan, lessonId: lesson?.id || null, orientation };
 }
 
 function createDeferredPromise() {
@@ -4292,7 +4332,8 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     title,
     input,
     targetMinutes,
-    segmentCount
+    segmentCount,
+    orientation
   } = await buildTraditionalPlannerRequest(body);
   const durationBudget = segmentDurationBudget(targetMinutes, segmentCount);
   const narrationWordTarget = Math.max(20, Math.round(durationBudget.averageSeconds * 2.05));
@@ -4308,6 +4349,7 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     studentLevel: input.student_level,
     targetMinutes,
     targetSegmentCount: segmentCount,
+    orientation,
     sourceType: 'topic'
   }));
   const lessonId = lesson?.id || null;
@@ -4433,6 +4475,7 @@ async function startStreamingTraditionalLessonPlan(body, userContext) {
     )),
     planControl,
     lessonId,
+    orientation,
     expectedSegmentCount: segmentCount,
     firstSegmentReadyAt: firstReady.readyAt
   };
@@ -4709,6 +4752,7 @@ async function queueTraditionalVideoJob({
   segmentPromises = null,
   planControl = null,
   expectedSegmentCount = null,
+  orientation = 'horizontal',
   appJobId = null,
   existingDbJobId = null
 }) {
@@ -4724,6 +4768,8 @@ async function queueTraditionalVideoJob({
     plan.segments.length,
     Number(expectedSegmentCount || plan.segments.length)
   );
+  const resolvedOrientation = resolveVideoOrientation(orientation);
+  const videoDimensions = resolveVideoDimensions(resolvedOrientation);
   const job = {
     id: appJobId || `${Date.now()}-${randomUUID().slice(0, 8)}`,
     lessonId,
@@ -4734,6 +4780,9 @@ async function queueTraditionalVideoJob({
     total: expectedTotal,
     current: 'Siraya alindi.',
     message: 'Tam ders uretimi bekliyor.',
+    orientation: resolvedOrientation,
+    videoWidth: videoDimensions.width,
+    videoHeight: videoDimensions.height,
     plan,
     segments: plan.segments.map((segment) => ({
       id: segment.id,
@@ -4816,6 +4865,7 @@ app.post('/api/generate-lesson', async (req, res, next) => {
         segmentPromises: streamingPlan.segmentPromises,
         planControl: streamingPlan.planControl,
         expectedSegmentCount: streamingPlan.expectedSegmentCount,
+        orientation: streamingPlan.orientation,
         requestTimings: {
           promptReceivedAt,
           planReadyAt: streamingPlan.firstSegmentReadyAt
@@ -4827,13 +4877,14 @@ app.post('/api/generate-lesson', async (req, res, next) => {
       });
     }
 
-    const { plan, lessonId } = await createTraditionalLessonPlan(req.body, userContext);
+    const { plan, lessonId, orientation } = await createTraditionalLessonPlan(req.body, userContext);
     const planReadyAt = new Date().toISOString();
     const job = await queueTraditionalVideoJob({
       plan,
       lessonId,
       userContext,
       ttsOptions: parseTtsOptions(req.body),
+      orientation,
       requestTimings: { promptReceivedAt, planReadyAt }
     });
     res.status(202).json({

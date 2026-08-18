@@ -375,7 +375,7 @@ export function userId() {
   return devUserId;
 }
 
-export async function createLesson({ userId = devUserId, title, topic, studentLevel, targetMinutes, targetSegmentCount, sourceType }) {
+export async function createLesson({ userId = devUserId, title, topic, studentLevel, targetMinutes, targetSegmentCount, orientation, sourceType }) {
   if (userId === devUserId) {
     await ensureDevProfile();
   }
@@ -388,6 +388,7 @@ export async function createLesson({ userId = devUserId, title, topic, studentLe
     // persisted lesson plan retains the precise duration (e.g. 1.5 minutes).
     target_minutes: Number.isFinite(Number(targetMinutes)) ? Math.ceil(Number(targetMinutes)) : null,
     target_segment_count: targetSegmentCount || null,
+    orientation: orientation === 'vertical' ? 'vertical' : 'horizontal',
     status: 'planned',
     source_type: sourceType || 'topic'
   });

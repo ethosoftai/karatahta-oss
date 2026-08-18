@@ -70,6 +70,8 @@ const worker = createRenderWorker(async (task, queueJob) => {
       code: input.code.code,
       audioUrl: audio.signedUrl,
       targetDurationSeconds: Number(input.tts.duration_seconds) || null,
+      videoWidth: Number(task.videoWidth) || undefined,
+      videoHeight: Number(task.videoHeight) || undefined,
       onLog: (message, meta) => log(message, { ...meta, segmentId: task.segmentId })
     });
     const storagePath = storagePathFor({

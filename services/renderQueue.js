@@ -46,6 +46,10 @@ export function normalizeRenderTask(task = {}) {
     // Worker payloads may only refer to durable Bucket data, never /renders.
     manimCodeStoragePath: task.manimCodeStoragePath || null,
     audioStoragePath: task.audioStoragePath || null,
+    // Defaults to the horizontal (16:9) resolution for backward compatibility
+    // with any task shape that predates vertical/Shorts render support.
+    videoWidth: Number(task.videoWidth) || 1280,
+    videoHeight: Number(task.videoHeight) || 720,
     metadata: task.metadata || null
   };
 }

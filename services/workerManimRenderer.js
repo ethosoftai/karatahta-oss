@@ -98,6 +98,8 @@ export async function renderWorkerManimVideo({
   code,
   audioUrl,
   targetDurationSeconds = null,
+  videoWidth = VIDEO_WIDTH,
+  videoHeight = VIDEO_HEIGHT,
   quality = resolveManimQuality(),
   onLog = () => {}
 }) {
@@ -132,7 +134,7 @@ export async function renderWorkerManimVideo({
     // much-shorter animation -- the old 180s default was calibrated for
     // that shorter case and started SIGTERM-killing otherwise-fine renders
     // once scenes were properly paced to ~60-90s of real content.
-    const manim = await run('python', ['-m', 'manim', manimQuality, '--resolution', `${VIDEO_WIDTH},${VIDEO_HEIGHT}`, '--fps', String(VIDEO_FPS), sourcePath, className, '--media_dir', mediaDir], { cwd: workDir, timeoutMs: 420000 });
+    const manim = await run('python', ['-m', 'manim', manimQuality, '--resolution', `${videoWidth},${videoHeight}`, '--fps', String(VIDEO_FPS), sourcePath, className, '--media_dir', mediaDir], { cwd: workDir, timeoutMs: 420000 });
     if (manim.code !== 0) {
       const error = new Error(manim.signal ? `Manim ${manim.signal} ile sonlandi.` : 'Manim render basarisiz oldu.');
       Object.assign(error, { manim });
@@ -147,7 +149,10 @@ export async function renderWorkerManimVideo({
       Object.assign(error, { mux });
       throw error;
     }
-    const probe = assertStandardVideoProbe(await probeVideo(outputPath), 'worker final video');
+    const probe = assertStandardVideoProbe(await probeVideo(outputPath), 'worker final video', {
+      width: videoWidth,
+      height: videoHeight
+    });
     return { workDir, outputPath, durationSeconds: await durationSeconds(outputPath), probe, manim, mux };
   } catch (error) {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});

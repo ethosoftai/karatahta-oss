@@ -21,7 +21,13 @@ function log(message, meta = null) {
 
 function contentMetadata(detail, job) {
   const topic = String(detail.lesson?.topic || detail.lesson?.title || 'Kara Tahta dersi').trim();
-  const title = String(job.title || detail.lesson?.title || topic).trim().slice(0, 100);
+  // YouTube has no separate "post as Short" call -- it classifies an upload
+  // as a Short from the file's own aspect ratio/duration, but #Shorts in the
+  // title/description is YouTube's own documented signal to make that
+  // classification reliable rather than relying on inference alone.
+  const isVertical = detail.lesson?.orientation === 'vertical';
+  const rawTitle = String(job.title || detail.lesson?.title || topic).trim();
+  const title = (isVertical && !/#shorts/i.test(rawTitle) ? `${rawTitle} #Shorts` : rawTitle).slice(0, 100);
   const segmentTitles = (detail.segments || [])
     .map((segment) => String(segment.title || '').trim())
     .filter(Boolean)
@@ -29,7 +35,8 @@ function contentMetadata(detail, job) {
   const defaultDescription = [
     `Bu derste ${topic} konusu adim adim anlatiliyor.`,
     segmentTitles.length ? `Bolumler:\n${segmentTitles.map((segment) => `• ${segment}`).join('\n')}` : '',
-    'Kara Tahta ile hazirlandi.'
+    'Kara Tahta ile hazirlandi.',
+    isVertical ? '#Shorts' : ''
   ].filter(Boolean).join('\n\n');
   return {
     title,

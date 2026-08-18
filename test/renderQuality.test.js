@@ -6,7 +6,9 @@ import {
   DEFAULT_MANIM_FONT,
   DEFAULT_MANIM_QUALITY,
   resolveManimFont,
-  resolveManimQuality
+  resolveManimQuality,
+  resolveVideoDimensions,
+  resolveVideoOrientation
 } from '../services/renderQuality.js';
 
 test('gecersiz manim kalitesi varsayilan kaliteye duser', () => {
@@ -32,4 +34,31 @@ test("standart video probu beklenen cozunurlugu ve fps'i ister", () => {
     fps: 30,
     codec: 'h264'
   }, 'test video'));
+});
+
+test('gecersiz orientation yataya duser', () => {
+  assert.equal(resolveVideoOrientation('vertical'), 'vertical');
+  assert.equal(resolveVideoOrientation('horizontal'), 'horizontal');
+  assert.equal(resolveVideoOrientation('wat'), 'horizontal');
+  assert.equal(resolveVideoOrientation(undefined), 'horizontal');
+});
+
+test('dikey boyutlar 9:16, yatay boyutlar 16:9 olur', () => {
+  assert.deepEqual(resolveVideoDimensions('vertical'), { width: 720, height: 1280 });
+  assert.deepEqual(resolveVideoDimensions('horizontal'), { width: 1280, height: 720 });
+});
+
+test('video probu ozel beklenen boyuta gore dogrulanabilir (dikey Shorts)', () => {
+  assert.doesNotThrow(() => assertStandardVideoProbe({
+    width: 720,
+    height: 1280,
+    fps: 30,
+    codec: 'h264'
+  }, 'shorts test video', { width: 720, height: 1280 }));
+  assert.throws(() => assertStandardVideoProbe({
+    width: 1280,
+    height: 720,
+    fps: 30,
+    codec: 'h264'
+  }, 'shorts test video', { width: 720, height: 1280 }));
 });
