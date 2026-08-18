@@ -243,6 +243,53 @@ içindeki anchor mobject sahnenin sonuna kadar ekranda kalabilir.
 
 ---
 
+## Döngü İçinde Aynı Konuma Deger/Etiket Güncelleme
+
+Gerçek render'larda en sık görülen çakışma hatası budur: bir döngü her
+adımda **aynı konuma** yeni bir `Text`/`MathTex` yerleştirir ama öncekini
+kaldırmaz. Sonuç: 5 sayı, 5 ay ismi veya 5 yığın elemanı üst üste binip
+okunamaz hale gelir (`"1! 2! 3! 4!"` gibi harfler birbirine karışır).
+
+```python
+# ✗ YANLIŞ — her iterasyonda ayni konuma yeni Text eklenir, eskisi durur
+deger_etiketi = None
+for i, sayi in enumerate(sayilar):
+    yeni_etiket = Text(str(sayi), font_size=32)
+    yeni_etiket.move_to(kutu.get_center())
+    self.play(Write(yeni_etiket), run_time=0.4)
+    # deger_etiketi kaldirilmadi -> bir sonraki dongude ustune biner
+
+# ✓ DOĞRU — ReplacementTransform ile eskisi otomatik kaldirilir
+deger_etiketi = Text(str(sayilar[0]), font_size=32).move_to(kutu.get_center())
+self.play(Write(deger_etiketi), run_time=0.4)
+for sayi in sayilar[1:]:
+    yeni_etiket = Text(str(sayi), font_size=32).move_to(kutu.get_center())
+    self.play(ReplacementTransform(deger_etiketi, yeni_etiket), run_time=0.4)
+    deger_etiketi = yeni_etiket
+
+# ✓ DOĞRU ALTERNATIF — onceki etiketi acikca kaldirip sonra yenisini ekle
+deger_etiketi = None
+for sayi in sayilar:
+    if deger_etiketi is not None:
+        self.play(FadeOut(deger_etiketi), run_time=0.2)
+    deger_etiketi = Text(str(sayi), font_size=32).move_to(kutu.get_center())
+    self.play(Write(deger_etiketi), run_time=0.4)
+```
+
+Aynı hata iki bağımsız etiket aynı satıra/konuma yerleştirildiğinde de
+görülür (ör. bir "Dakika: 0" sayacı ile altındaki açıklama metni aynı
+y-koordinatına denk gelmesi). Bir mobject'in konumunu **her zaman** bir
+öncekine göre (`next_to(...)`) belirle, iki ayrı mobject'i aynı sabit
+koordinata (`move_to(ORIGIN)`, `move_to(kutu.get_center())` gibi) bağımsız
+olarak yerleştirme.
+
+**Kural:** Bir döngüde veya tekrarlı bir güncellemede aynı konuma yeni
+metin/mobject koyacaksan, ya `ReplacementTransform(eski, yeni)` kullan ya
+da eskisini `FadeOut`/`self.remove()` ile kaldırdıktan sonra yenisini ekle.
+Asla ikisini aynı anda ekranda bırakma.
+
+---
+
 ## Sık Yapılan Hatalar ve Düzeltmeleri
 
 | Hata | Sebep | Düzeltme |
@@ -254,6 +301,7 @@ içindeki anchor mobject sahnenin sonuna kadar ekranda kalabilir.
 | `to_corner()` sonrası üst üste | Köşedeki mobject yeni eklenenle çakışıyor | Köşedeki mobject'i `FadeOut` yap veya konumları manuel kontrol et |
 | Yazı çok büyük | `Text(font_size=72)` varsayılan | Başlık için max 48, gövde için max 34 kullan |
 | Eski adım yeni adımla çakışıyor | İşi biten mobject `FadeOut`/`remove()` ile kaldırılmadan yenisi eklendi | Her mobject'i görevi bitince kaldır; yalnızca continuity anchor'ı sahnede tut |
+| Döngüdeki sayılar/etiketler üst üste biniyor | Her iterasyonda aynı konuma yeni `Text` eklenip öncekisi kaldırılmadı | `ReplacementTransform(eski, yeni)` kullan veya öncekini `FadeOut` yaptıktan sonra yenisini ekle |
 
 ---
 
