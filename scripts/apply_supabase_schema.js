@@ -46,7 +46,8 @@ async function main() {
     '013_content_scheduler.sql',
     '014_combo_scheduler.sql',
     '015_tiktok_publish.sql',
-    '016_video_orientation.sql'
+    '016_video_orientation.sql',
+    '017_card_sessions_catalog.sql'
   ];
   const client = new Client({
     connectionString: getConnectionString(),

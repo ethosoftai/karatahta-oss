@@ -140,7 +140,8 @@ cardsRouter.get('/api/cards/sessions/:id', async (req, res, next) => {
       createdAt: session.created_at,
       updatedAt: session.updated_at,
       cards,
-      messages: session.messages || []
+      messages: session.messages || [],
+      isPublic: Boolean(session.is_public)
     });
   } catch (error) {
     next(error);
