@@ -47,6 +47,7 @@ import {
   normalizeLessonContinuity,
   normalizeLessonSegmentContinuity
 } from './services/lessonContinuity.js';
+import { detectLessonSubject } from './services/lessonSubject.js';
 import { safeJsonParse } from './services/llmJson.js';
 import { buildMandatoryManimContract } from './services/manimPromptContract.js';
 import {
@@ -579,7 +580,7 @@ async function readOptionalMarkdown(relativePath) {
   }
 }
 
-async function loadManimGuide() {
+async function loadManimGuide(subject = null) {
   const sections = [];
   const loadedPaths = [];
   const mandatoryPaths = [
@@ -587,6 +588,15 @@ async function loadManimGuide() {
     path.join('skill', 'rules', 'math_rendering.md'),
     path.join('skill', 'rules', 'layout_safety.md')
   ];
+
+  if (subject) {
+    const subjectPath = path.join('skill', 'subjects', `${subject}.md`);
+    const subjectGuide = await readOptionalMarkdown(subjectPath);
+    if (subjectGuide) {
+      loadedPaths.push(subjectPath.replaceAll(path.sep, '/'));
+      sections.push(`## BRANSA OZEL ZORUNLU KAYNAK (${subject}): ${subjectPath.replaceAll(path.sep, '/')}\n\n${subjectGuide}`);
+    }
+  }
 
   for (const relativePath of mandatoryPaths) {
     const guide = await readOptionalMarkdown(relativePath);
@@ -634,7 +644,8 @@ async function loadManimGuide() {
   logInfo('Manim skill rehberleri modele yuklendi', {
     sections: sections.length,
     chars: guide.length,
-    sources: loadedPaths
+    sources: loadedPaths,
+    subject: subject || null
   });
   return guide;
 }
@@ -706,7 +717,7 @@ async function generateLlmText({
   json = false,
   temperature = 0.4,
   maxCompletionTokens = null,
-  thinkingEnabled = true
+  thinkingEnabled = false
 }) {
   const started = Date.now();
   const { client, provider } = resolveLlmClient(model);
@@ -743,7 +754,7 @@ async function generateDeepSeekTextStream({
   temperature = 0.4,
   timeoutMs = deepseekRequestTimeoutMs,
   onText,
-  thinkingEnabled = true
+  thinkingEnabled = false
 }) {
   const { client, provider } = resolveLlmClient(model);
   const started = Date.now();
@@ -1033,7 +1044,8 @@ Soru metni: ${cleanQuestionText}`;
     label: 'DeepSeek soru cozumu',
     model: planModel,
     userText: prompt,
-    json: true
+    json: true,
+    thinkingEnabled: false
   });
 
   const plan = parseLlmJson(responseText, 'Soru metni plani');
@@ -1165,7 +1177,8 @@ async function answerKaraQuestion({
   const answer = String(await generateLlmText({
     label: 'DeepSeek Kara metin fallback',
     model: planModel,
-    userText: buildKaraPrompt({ ...promptContext, frameAvailable: false })
+    userText: buildKaraPrompt({ ...promptContext, frameAvailable: false }),
+    thinkingEnabled: false
   })).trim();
   logInfo('Kara metin fallback yaniti geldi', {
     ms: Date.now() - started,
@@ -1955,13 +1968,14 @@ async function synthesizeSpeech(text, segmentId, ttsOptions = null) {
   return result;
 }
 
-async function createManimCode({ animation, durationSeconds, speech, segmentId, orientation = 'horizontal', continuityContext = null }) {
+async function createManimCode({ animation, durationSeconds, speech, segmentId, orientation = 'horizontal', continuityContext = null, subject = null }) {
   logInfo(`${segmentId}: Manim kodu LLM ile uretiliyor`, {
     seconds: durationSeconds,
-    previousCodeChars: String(continuityContext?.previous_manim_code || '').length
+    previousCodeChars: String(continuityContext?.previous_manim_code || '').length,
+    subject: subject || null
   });
   const { coder } = await loadPrompts();
-  const manimGuide = await loadManimGuide();
+  const manimGuide = await loadManimGuide(subject);
   const resolvedOrientation = resolveVideoOrientation(orientation);
   const { width: frameWidthPx, height: frameHeightPx } = resolveVideoDimensions(resolvedOrientation);
   // Manim locks config.frame_height at 8 units and derives frame_width from
@@ -2684,6 +2698,7 @@ async function runFullVideoJob(job) {
       if (!fullPlan || !Array.isArray(fullPlan.segments) || !fullPlan.segments.length) {
         throw new Error('Streaming tam ders plani gecersiz.');
       }
+      fullPlan.subject = job.plan.subject || detectLessonSubject(fullPlan);
 
       const previousStates = new Map(
         job.segments.filter(Boolean).map((segment) => [segment.id, segment])
@@ -2856,6 +2871,7 @@ async function runFullVideoJob(job) {
                 },
                 segmentId: segment.id,
                 orientation: job.orientation,
+                subject: job.plan.subject || null,
                 continuityContext: buildSegmentGenerationContext({
                   plan: job.plan,
                   segment,
@@ -4709,7 +4725,8 @@ app.post('/api/manim-code', async (req, res, next) => {
       animation: req.body.animation,
       durationSeconds: req.body.duration_seconds,
       speech: req.body.speech,
-      segmentId: req.body.segment_id
+      segmentId: req.body.segment_id,
+      subject: req.body.subject || detectLessonSubject({ topic: req.body.topic || req.body.animation?.description || '' })
     });
     res.json({ code });
   } catch (error) {
@@ -4762,6 +4779,10 @@ async function queueTraditionalVideoJob({
     throw error;
   }
   plan = normalizeLessonContinuity(plan);
+  if (!plan.subject) {
+    plan.subject = detectLessonSubject(plan);
+    logInfo('Ders brans tespiti tamamlandi', { topic: plan.topic || null, subject: plan.subject || null });
+  }
   await requireOwnedLesson(lessonId, userContext);
 
   const expectedTotal = Math.max(
