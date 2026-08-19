@@ -2011,7 +2011,7 @@ async function createManimCode({ animation, durationSeconds, speech, segmentId, 
     // get cut off mid-statement -- guaranteed invalid Python, confirmed
     // live (a 23-play/wait hash-table scene was truncated mid-assignment).
     // Raised to give normal-length scenes real headroom before hitting it.
-    maxCompletionTokens: 8000,
+    maxCompletionTokens: 16000,
     thinkingEnabled: deepseekPipelineThinkingEnabled
   });
 
@@ -2054,7 +2054,7 @@ async function createKaraManimStillCode({ toolArgs, question, lessonTitle }) {
     systemInstruction: buildManimSystemInstruction('', manimGuide),
     userText: JSON.stringify(prompt, null, 2),
     temperature: 0.2,
-    maxCompletionTokens: 5000,
+    maxCompletionTokens: 8000,
     thinkingEnabled: false
   });
   const code = sanitizeManimForLocalRender(stripCodeFence(responseText || ''));
@@ -4311,7 +4311,7 @@ Beklenen sekil:
       ].join('\n'),
       json: true,
       temperature: Math.max(0.2, 0.6 - attempt * 0.1),
-      maxCompletionTokens: 3500,
+      maxCompletionTokens: 6000,
       thinkingEnabled: false
     });
     try {
