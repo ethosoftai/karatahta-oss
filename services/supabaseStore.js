@@ -1122,6 +1122,40 @@ export async function getCardSessionForUser({ sessionId, userId }) {
   return data;
 }
 
+export async function listPublicCardSessions({ limit = 60 } = {}) {
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('card_sessions')
+    .select('id, title, created_at, updated_at, cards')
+    .eq('is_public', true)
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data || [];
+}
+
+export async function listCardSessionsForUserWithVisibility({ userId, limit = 60 }) {
+  if (!userId) return [];
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('card_sessions')
+    .select('id, title, created_at, updated_at, cards, is_public')
+    .eq('user_id', userId)
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data || [];
+}
+
+export async function setCardSessionPublic({ sessionId, userId, isPublic }) {
+  if (!sessionId || !userId) return null;
+  const rows = await updateRows('card_sessions', { id: sessionId, user_id: userId }, {
+    is_public: Boolean(isPublic),
+    updated_at: new Date().toISOString()
+  });
+  return rows?.[0] || null;
+}
+
 export async function getSchedulerJob(jobType) {
   const client = requireSupabase();
   const { data, error } = await client

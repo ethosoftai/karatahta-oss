@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     texlive-fonts-recommended \
     texlive-science \
     dvisvgm \
+    fonts-dejavu-core \
   && rm -rf /var/lib/apt/lists/*
 
 RUN python -m venv /opt/venv \
@@ -29,6 +30,7 @@ RUN python -m venv /opt/venv \
 
 COPY package*.json ./
 RUN npm ci --omit=dev
+RUN npx playwright install --with-deps chromium
 
 COPY . ./
 

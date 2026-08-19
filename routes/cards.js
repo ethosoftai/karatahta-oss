@@ -9,7 +9,10 @@ import {
   createCardSession,
   appendCardSessionMessages,
   listCardSessionsForUser,
-  getCardSessionForUser
+  getCardSessionForUser,
+  listPublicCardSessions,
+  listCardSessionsForUserWithVisibility,
+  setCardSessionPublic
 } from '../services/supabaseStore.js';
 
 export const cardsRouter = Router();
@@ -142,6 +145,71 @@ cardsRouter.get('/api/cards/sessions/:id', async (req, res, next) => {
     next(error);
   }
 });
+
+async function firstCardPosterUrl(cards) {
+  const first = (Array.isArray(cards) ? cards : []).find((card) => card.imageStoragePath);
+  if (!first) return null;
+  const signed = await createStorageSignedUrl({ bucket: 'attachments', storagePath: first.imageStoragePath, expiresInSeconds: 3600 }).catch(() => null);
+  return signed?.signedUrl || null;
+}
+
+// Public "Kartlar" catalog feed -- mirrors /api/catalog for video lessons but
+// kept as a separate list (kartlar has no video duration/orientation and the
+// two content types are shown in separate sections on the frontend).
+cardsRouter.get('/api/catalog/cards', async (req, res, next) => {
+  try {
+    const sessions = await listPublicCardSessions({});
+    const entries = await Promise.all(sessions.map(async (session) => ({
+      id: session.id,
+      title: session.title,
+      createdAt: session.created_at,
+      updatedAt: session.updated_at,
+      cardCount: Array.isArray(session.cards) ? session.cards.length : 0,
+      posterUrl: await firstCardPosterUrl(session.cards)
+    })));
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.json({ sessions: entries });
+  } catch (error) {
+    next(error);
+  }
+});
+
+cardsRouter.get('/api/catalog/cards/mine', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const sessions = await listCardSessionsForUserWithVisibility({ userId: userContext.profileId });
+    const entries = await Promise.all(sessions.map(async (session) => ({
+      id: session.id,
+      title: session.title,
+      createdAt: session.created_at,
+      updatedAt: session.updated_at,
+      cardCount: Array.isArray(session.cards) ? session.cards.length : 0,
+      isPublic: Boolean(session.is_public),
+      posterUrl: await firstCardPosterUrl(session.cards)
+    })));
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.json({ sessions: entries });
+  } catch (error) {
+    next(error);
+  }
+});
+
+async function setSessionVisibility(req, res, next, isPublic) {
+  try {
+    const userContext = await resolveRequestUser(req);
+    const session = await getCardSessionForUser({ sessionId: req.params.id, userId: userContext.profileId });
+    if (!session) {
+      return res.status(404).json({ error: 'Kart oturumu bulunamadi.' });
+    }
+    const updated = await setCardSessionPublic({ sessionId: session.id, userId: userContext.profileId, isPublic });
+    res.json({ id: updated?.id || session.id, isPublic });
+  } catch (error) {
+    next(error);
+  }
+}
+
+cardsRouter.post('/api/cards/sessions/:id/publish', (req, res, next) => setSessionVisibility(req, res, next, true));
+cardsRouter.post('/api/cards/sessions/:id/unpublish', (req, res, next) => setSessionVisibility(req, res, next, false));
 
 // "Slide show" post: publishes a card session's stills as a single
 // Instagram carousel (2-10 slides). Stills are stored as PNG but Instagram's

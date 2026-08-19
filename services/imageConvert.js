@@ -36,9 +36,8 @@ function runFfmpeg(args, { timeoutMs = 20000 } = {}) {
 }
 
 // Instagram's Content Publishing API only accepts JPEG for image_url (single
-// or carousel posts); card stills are rendered as PNG by Manim
-// (manimStillRenderer.js), so carousel publishing needs this conversion
-// step first.
+// or carousel posts); card stills are rendered as PNG (cardRenderer.js), so
+// carousel publishing needs this conversion step first.
 export async function convertPngBufferToJpeg(pngBuffer) {
   const dir = os.tmpdir();
   const inputPath = path.join(dir, `card-${randomUUID()}.png`);

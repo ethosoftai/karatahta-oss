@@ -5,8 +5,7 @@
 // in a normal chat flow (answerCardsQuestion), the same shape as ask-kara but
 // without lesson/video/frame context since cards have none of that.
 import { askDeepSeek } from './deepseekClient.js';
-import { renderCardStill } from './manimStillRenderer.js';
-import { resolveManimFont } from './renderQuality.js';
+import { renderCardImage } from './cardRenderer.js';
 import { generateKaraVisionAnswerWithFallback, parseKaraVisionModels } from './karaVision.js';
 import { buildQuestionImageTranscriptionPrompt } from './lessonPreprocessor.js';
 
@@ -29,18 +28,20 @@ Yanıtın YALNIZCA şu şemaya uyan geçerli JSON olmalı:
 {
   "title": "Kartın kısa başlığı",
   "explanation": "Bu kartta ne gösterildiğini anlatan 2-4 cümlelik doğal Türkçe anlatım.",
-  "manim_code": "from manim import *\\nclass Card(Scene):\\n    def construct(self):\\n        ...",
+  "scene": { "steps": [ { "type": "text", "x": 0.5, "y": 0.3, "text": "...", "size": 28, "color": "#f8fafc", "align": "center" } ] },
   "is_last": false
 }
 
-MANIM KURALLARI:
-- Tek sınıf: class Card(Scene):
-- İlk satır: self.camera.background_color = BLACK
-- Koordinatlar x in [-6.5,6.5], y in [-3.5,3.5]
-- Sade renkler: BLUE, GREEN, RED, YELLOW, WHITE, GOLD_A, TEAL, ORANGE
-- Text("...", font="${resolveManimFont()}") kullan, en fazla 6 kelime/satır
-- Basit şekil/diyagram/ok/eksen içersin, yalnız yazı olmasın
-- Kod render edilip DURACAK bir still görüntü olacağı için self.wait(0.3) ile bitir, uzun animasyon yapma
+SCENE/STEPS KURALLARI:
+- "steps" dizisi en fazla 8 öğe içerir, sırayla üstten çizilir.
+- "x" ve "y" 0 ile 1 arasında normalize koordinat (0,0 sol-üst, 1,1 sağ-alt).
+- type "text": düz kısa yazı, en fazla 6 kelime. Alanlar: x, y, text, size (12-48), color (hex, örn "#f8fafc"), align ("left"|"center"|"right").
+- type "math": LaTeX matematik ifadesi. Alanlar: x, y, latex (örn "x^2 + y^2 = r^2"), size, color. Yalnızca gerçekten matematik/formül olan yerlerde kullan, düz yazı için "text" kullan.
+- type "circle": Alanlar: x, y (merkez), r (0-1 arası yarıçap), color, fill (true/false).
+- type "rect": Alanlar: x, y (merkez), w, h (0-1 arası), color, fill.
+- type "line" / "arrow": Alanlar: x1, y1, x2, y2 (0-1 arası uç noktalar), color. "arrow" ucu ok işaretiyle biter.
+- Sade renkler kullan: "#60a5fa" (mavi), "#4ade80" (yeşil), "#f87171" (kırmızı), "#facc15" (sarı), "#f8fafc" (beyaz), "#fb923c" (turuncu).
+- En az bir şekil/diyagram/ok adımı içersin, yalnız yazı/matematik olmasın.
 - "is_last": bu konunun anlatımı için yeterli kart üretildiyse true, değilse false
 - Sadece geçerli JSON döndür, başka hiçbir şey yazma.`;
 
@@ -60,14 +61,14 @@ function clampNumber(value, fallback = 0) {
   return Math.min(1, Math.max(0, num));
 }
 
-const ALLOWED_STEP_TYPES = new Set(['text', 'circle', 'rect', 'arrow', 'line']);
+const ALLOWED_STEP_TYPES = new Set(['text', 'math', 'circle', 'rect', 'arrow', 'line']);
 
 function sanitizeScene(scene) {
   const steps = Array.isArray(scene?.steps) ? scene.steps : [];
   return {
     steps: steps
       .filter((step) => step && ALLOWED_STEP_TYPES.has(step.type))
-      .slice(0, 12)
+      .slice(0, 8)
       .map((step) => ({
         type: step.type,
         x: clampNumber(step.x, 0.5),
@@ -80,6 +81,7 @@ function sanitizeScene(scene) {
         h: clampNumber(step.h, 0.15),
         r: clampNumber(step.r, 0.08),
         text: typeof step.text === 'string' ? step.text.slice(0, 60) : '',
+        latex: typeof step.latex === 'string' ? step.latex.slice(0, 120) : '',
         size: Number.isFinite(Number(step.size)) ? Math.min(48, Math.max(12, Number(step.size))) : 24,
         color: typeof step.color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(step.color) ? step.color : '#f8fafc',
         fill: Boolean(step.fill),
@@ -88,9 +90,9 @@ function sanitizeScene(scene) {
   };
 }
 
-function fallbackCardCode(title) {
-  const safeTitle = String(title || 'Kart').slice(0, 30).replace(/["\\]/g, '');
-  return `from manim import *\nclass Card(Scene):\n    def construct(self):\n        self.camera.background_color = BLACK\n        t = Text("${safeTitle}", font="${resolveManimFont()}", font_size=36, color=WHITE)\n        self.play(Write(t))\n        self.wait(0.3)\n`;
+function fallbackScene(title) {
+  const safeTitle = String(title || 'Kart').slice(0, 30);
+  return { steps: [{ type: 'text', x: 0.5, y: 0.5, text: safeTitle, size: 36, color: '#f8fafc', align: 'center' }] };
 }
 
 // `topic` is the general subject ("Pisagor teoremi"); `question` is the
@@ -158,17 +160,17 @@ export async function* generateCardsStream({ prompt, topic, question }) {
     try {
       parsed = await askDeepSeek({ systemInstruction: CARD_SYSTEM_INSTRUCTION, userText, json: true, temperature: 0.5 });
     } catch (error) {
-      parsed = { title: `Kart ${index + 1}`, explanation: 'Bu kart için içerik üretilemedi.', manim_code: null, is_last: true };
+      parsed = { title: `Kart ${index + 1}`, explanation: 'Bu kart için içerik üretilemedi.', scene: null, is_last: true };
     }
 
     const title = typeof parsed.title === 'string' ? parsed.title.slice(0, 60) : `Kart ${index + 1}`;
     const explanation = typeof parsed.explanation === 'string' ? parsed.explanation : '';
     let imageDataUrl;
     try {
-      imageDataUrl = await renderCardStill({ code: parsed.manim_code, cardKey: `c${index + 1}` });
+      imageDataUrl = await renderCardImage({ title, scene: parsed.scene ? sanitizeScene(parsed.scene) : fallbackScene(title), cardKey: `c${index + 1}` });
     } catch {
-      // Guaranteed-valid fallback scene so the demo never hard-fails on a bad LLM code gen.
-      imageDataUrl = await renderCardStill({ code: fallbackCardCode(title), cardKey: `c${index + 1}-fallback` });
+      // Guaranteed-valid fallback scene so the demo never hard-fails on a bad LLM scene.
+      imageDataUrl = await renderCardImage({ title, scene: fallbackScene(title), cardKey: `c${index + 1}-fallback` });
     }
 
     const card = { index: index + 1, title, explanation, imageDataUrl };
