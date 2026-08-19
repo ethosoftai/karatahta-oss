@@ -12,7 +12,8 @@ import {
   getCardSessionForUser,
   listPublicCardSessions,
   listCardSessionsForUserWithVisibility,
-  setCardSessionPublic
+  setCardSessionPublic,
+  getPublicCardSession
 } from '../services/supabaseStore.js';
 
 export const cardsRouter = Router();
@@ -174,6 +175,8 @@ cardsRouter.get('/api/catalog/cards', async (req, res, next) => {
   }
 });
 
+// NOTE: registered before the /:id route below so "mine" isn't captured as
+// a session id by Express's param matching.
 cardsRouter.get('/api/catalog/cards/mine', async (req, res, next) => {
   try {
     const userContext = await resolveRequestUser(req);
@@ -189,6 +192,27 @@ cardsRouter.get('/api/catalog/cards/mine', async (req, res, next) => {
     })));
     res.setHeader('Cache-Control', 'private, no-store');
     res.json({ sessions: entries });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Public read of one card session's full content (all cards + signed image
+// URLs) -- no auth, no ownership check, only sessions marked is_public. Lets
+// the catalog grid open a card session the same way it opens a lesson.
+cardsRouter.get('/api/catalog/cards/:id', async (req, res, next) => {
+  try {
+    const session = await getPublicCardSession({ sessionId: req.params.id });
+    if (!session) {
+      return res.status(404).json({ error: 'Kart oturumu bulunamadi.' });
+    }
+    const cards = await Promise.all((session.cards || []).map(async (card) => {
+      if (!card.imageStoragePath) return { ...card, imageUrl: null };
+      const signed = await createStorageSignedUrl({ bucket: 'attachments', storagePath: card.imageStoragePath, expiresInSeconds: 3600 }).catch(() => null);
+      return { ...card, imageUrl: signed?.signedUrl || null };
+    }));
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.json({ id: session.id, title: session.title, createdAt: session.created_at, updatedAt: session.updated_at, cards });
   } catch (error) {
     next(error);
   }

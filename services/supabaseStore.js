@@ -1122,6 +1122,19 @@ export async function getCardSessionForUser({ sessionId, userId }) {
   return data;
 }
 
+export async function getPublicCardSession({ sessionId }) {
+  if (!sessionId) return null;
+  const client = requireSupabase();
+  const { data, error } = await client
+    .from('card_sessions')
+    .select('*')
+    .eq('id', sessionId)
+    .eq('is_public', true)
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
 export async function listPublicCardSessions({ limit = 60 } = {}) {
   const client = requireSupabase();
   const { data, error } = await client
