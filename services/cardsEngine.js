@@ -27,19 +27,34 @@ basit görsel kartlarla anlatıyorsun. Her kart tek bir fikri gösterir.
 Yanıtın YALNIZCA şu şemaya uyan geçerli JSON olmalı:
 {
   "title": "Kartın kısa başlığı",
-  "explanation": "Bu kartta ne gösterildiğini anlatan 2-4 cümlelik doğal Türkçe anlatım.",
+  "explanation": "Bu kartta ne gösterildiğini anlatan, öğretmen gibi konuşan 3-5 cümlelik doğal ve DETAYLI Türkçe anlatım.",
   "scene": { "steps": [ { "type": "text", "x": 0.5, "y": 0.3, "text": "...", "size": 28, "color": "#f8fafc", "align": "center" } ] },
   "is_last": false
 }
 
+BU ÜÇ ALAN EKRANDA FARKLI YERLERDE GÖRÜNÜR -- HANGİSİ NEREYE GİDİYOR KARIŞTIRMA:
+- "title" -> Kartın GÖRSELİNİN en üstüne otomatik olarak, sistem tarafından yazılır. Bunu ayrıca
+  "scene.steps" içine bir "text" adımı olarak TEKRAR EKLEME; ekrarsan başlık iki kez görünür.
+- "explanation" -> Görselin İÇİNDE HİÇ GÖRÜNMEZ. Öğrenciye sohbet ekranında, kartın görselinin
+  HEMEN ALTINDA ayrı bir metin kutusu olarak gösterilir; sesli anlatan bir öğretmen gibi düşün.
+  Burası uzun ve açıklayıcı olabilir/olmalı (konuyu gerçekten öğretecek kadar detaylı yaz, tek
+  cümlelik yüzeysel özet yazma).
+- "scene.steps" -> Görselin İÇİNDE, verdiğin x/y koordinatına göre çizilen her şey; öğrenci bunu
+  resmin üzerinde bir etiket/denklem/şekil olarak görür. Burası paragraf yazmak için DEĞİL, kısa
+  etiketler ve denklemler için (uzunluk kuralı aşağıda).
+
 SCENE/STEPS KURALLARI:
 - "steps" dizisi en fazla 8 öğe içerir, sırayla üstten çizilir.
 - "x" ve "y" 0 ile 1 arasında normalize koordinat (0,0 sol-üst, 1,1 sağ-alt).
-- type "text": düz kısa yazı, en fazla 6 kelime. Alanlar: x, y, text, size (12-48), color (hex, örn "#f8fafc"), align ("left"|"center"|"right").
+- type "text": görsel üzerindeki etiket veya kısa cümle, en fazla 12-14 kelime (~90 karakter);
+  gerekirse otomatik iki satıra sarar, o yüzden tek satıra sığdırmaya çalışıp kısaltma. Alanlar:
+  x, y, text, size (12-48), color (hex, örn "#f8fafc"), align ("left"|"center"|"right").
 - type "math": LaTeX matematik ifadesi. Alanlar: x, y, latex (örn "x^2 + y^2 = r^2"), size, color. Yalnızca gerçekten matematik/formül olan yerlerde kullan, düz yazı için "text" kullan.
 - type "circle": Alanlar: x, y (merkez), r (0-1 arası yarıçap), color, fill (true/false).
 - type "rect": Alanlar: x, y (merkez), w, h (0-1 arası), color, fill.
 - type "line" / "arrow": Alanlar: x1, y1, x2, y2 (0-1 arası uç noktalar), color. "arrow" ucu ok işaretiyle biter.
+- Aynı kartta birden fazla "text"/"math" adımı varsa üst üste binmesinler diye aralarında en az
+  0.12 birim "y" farkı bırak (uzun metin iki satıra sarınca daha da fazla yer kaplar, ona göre pay bırak).
 - Sade renkler kullan: "#60a5fa" (mavi), "#4ade80" (yeşil), "#f87171" (kırmızı), "#facc15" (sarı), "#f8fafc" (beyaz), "#fb923c" (turuncu).
 - En az bir şekil/diyagram/ok adımı içersin, yalnız yazı/matematik olmasın.
 - "is_last": bu konunun anlatımı için yeterli kart üretildiyse true, değilse false
@@ -80,7 +95,7 @@ function sanitizeScene(scene) {
         w: clampNumber(step.w, 0.15),
         h: clampNumber(step.h, 0.15),
         r: clampNumber(step.r, 0.08),
-        text: typeof step.text === 'string' ? step.text.slice(0, 60) : '',
+        text: typeof step.text === 'string' ? step.text.slice(0, 140) : '',
         latex: typeof step.latex === 'string' ? step.latex.slice(0, 120) : '',
         size: Number.isFinite(Number(step.size)) ? Math.min(48, Math.max(12, Number(step.size))) : 24,
         color: typeof step.color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(step.color) ? step.color : '#f8fafc',
