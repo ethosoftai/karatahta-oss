@@ -13,6 +13,7 @@
     "kara-live:test": "node scripts/test_kara_live.js",
     "render-worker": "node workers/renderWorker.js",
     "social-publisher": "node workers/socialPublisher.js",
+    "scheduler": "node workers/scheduler.js",
     "catalog:import": "node scripts/import_catalog_video.js",
     "vps:sync-env": "bash scripts/sync_vps_env.sh"
   },

@@ -155,8 +155,12 @@ her görsel önce indirilip `services/imageConvert.js` (ffmpeg) ile JPEG'e
 
 `services/scheduler.js` Kara Tahta'ya özel opsiyonel bir otomasyondur. Genel
 `karatahta-social-publisher` worker'ı (`workers/socialPublisher.js`) yalnızca
-hazır `publish_jobs` kayıtlarını yayınlar. Scheduler kullanılacaksa ayrı bir
-Kara Tahta servisi olarak çalıştırılmalıdır. Etkinleştirildiğinde, kendi aralığında
+hazır `publish_jobs` kayıtlarını yayınlar; scheduler döngüsünü artık
+**başlatmaz**. Scheduler `workers/scheduler.js` (`npm run scheduler`) ile ayrı
+bir process/Railway servisi olarak çalıştırılmalıdır — `BACKEND_INTERNAL_URL`
+ve `SCHEDULER_INTERNAL_TOKEN` bu serviste de tanımlı olmalıdır, aksi halde
+`/api/scheduler/start` çağrısı `scheduler_jobs.enabled`'ı `true` yapar ama
+hiçbir process bunu okumadığı için içerik hiç üretilmez. Etkinleştirildiğinde, kendi aralığında
 (`interval_minutes`) `scheduler_jobs` tablosundaki (`migrations/013_content_scheduler.sql`,
 `migrations/014_combo_scheduler.sql`) iş türlerinden hangisi zamanı gelmişse
 tetikler:
@@ -329,6 +333,7 @@ scripts/
 migrations/                       Supabase SQL şeması
 workers/renderWorker.js           ayrı render worker giriş noktası
 workers/socialPublisher.js        Genel publish_jobs tüketicisi (YouTube/Instagram/TikTok)
+workers/scheduler.js              Kara Tahta'ya özel scheduler döngüsü giriş noktası (opsiyonel, ayrı servis)
 test/                             Node testleri
 Dockerfile                        Node + Python + Manim + FFmpeg image
 railway.json                      Amsterdam ve replica ayarı

@@ -2,8 +2,9 @@
 // the content pool (services/contentPool.js), generates cards/a lesson via
 // this same API, then publishes it -- all as plain HTTP calls to the
 // backend's own /api endpoints (auth'd via the shared X-Scheduler-Token,
-// see services/requestAuth.js), same as any other client would. Runs inside
-// workers/socialPublisher.js so publishing stays on one process.
+// see services/requestAuth.js), same as any other client would. Started by
+// workers/scheduler.js, its own process/service -- separate from the
+// generic publish_jobs worker in workers/socialPublisher.js.
 import { pickNextContentPoolItem } from './contentPool.js';
 import { getSchedulerJob, updateSchedulerJob } from './supabaseStore.js';
 
