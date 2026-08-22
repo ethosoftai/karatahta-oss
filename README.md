@@ -153,14 +153,15 @@ her görsel önce indirilip `services/imageConvert.js` (ffmpeg) ile JPEG'e
 
 ## Zamanlanmış içerik üretimi (scheduler)
 
-`services/scheduler.js` Kara Tahta'ya özel opsiyonel bir otomasyondur. Genel
-`karatahta-social-publisher` worker'ı (`workers/socialPublisher.js`) yalnızca
-hazır `publish_jobs` kayıtlarını yayınlar; scheduler döngüsünü artık
-**başlatmaz**. Scheduler `workers/scheduler.js` (`npm run scheduler`) ile ayrı
-bir process/Railway servisi olarak çalıştırılmalıdır — `BACKEND_INTERNAL_URL`
-ve `SCHEDULER_INTERNAL_TOKEN` bu serviste de tanımlı olmalıdır, aksi halde
-`/api/scheduler/start` çağrısı `scheduler_jobs.enabled`'ı `true` yapar ama
-hiçbir process bunu okumadığı için içerik hiç üretilmez. Etkinleştirildiğinde, kendi aralığında
+`services/scheduler.js` Kara Tahta'ya özel opsiyonel bir otomasyondur,
+`karatahta-social-publisher` worker'ı (`workers/socialPublisher.js`) içinde
+ayrı bir döngü olarak çalışır -- worker hem genel `publish_jobs` kuyruğunu
+tüketir hem de bu döngüyü başlatır. (Ayrı bir `karatahta-scheduler` servisi
+değerlendirildi ama Railway trial planının servis sağlama limiti 5. servise
+izin vermedi; social-publisher hiçbir zaman birden fazla replikaya
+çıkarılmadığı sürece embedded kalması güvenlidir -- ölçeklenirse
+`setInterval` tick'i her replikada ayrı çalışıp aynı işi birden fazla kez
+tetikleyebilir.) Etkinleştirildiğinde, kendi aralığında
 (`interval_minutes`) `scheduler_jobs` tablosundaki (`migrations/013_content_scheduler.sql`,
 `migrations/014_combo_scheduler.sql`) iş türlerinden hangisi zamanı gelmişse
 tetikler:
@@ -332,8 +333,7 @@ scripts/
 └── migrate_supabase_media_to_railway.js
 migrations/                       Supabase SQL şeması
 workers/renderWorker.js           ayrı render worker giriş noktası
-workers/socialPublisher.js        Genel publish_jobs tüketicisi (YouTube/Instagram/TikTok)
-workers/scheduler.js              Kara Tahta'ya özel scheduler döngüsü giriş noktası (opsiyonel, ayrı servis)
+workers/socialPublisher.js        Genel publish_jobs tüketicisi (YouTube/Instagram/TikTok) + scheduler döngüsü
 test/                             Node testleri
 Dockerfile                        Node + Python + Manim + FFmpeg image
 railway.json                      Amsterdam ve replica ayarı

@@ -5,6 +5,7 @@ import { claimNextJob, failJob, finishJob } from '../services/jobQueue.js';
 import { publishCarouselToInstagram, publishReelToInstagram } from '../services/instagramPublish.js';
 import { publishVideoToTiktok } from '../services/tiktokPublish.js';
 import { publishVideoToYoutube } from '../services/youtubePublish.js';
+import { startSchedulerLoop } from '../services/scheduler.js';
 
 const pollMs = Math.max(1000, Number(process.env.SOCIAL_PUBLISH_POLL_MS || 5000));
 const allowedHosts = String(process.env.ALLOWED_VIDEO_HOSTS || '').split(',').map((item) => item.trim()).filter(Boolean);
@@ -105,3 +106,4 @@ async function tick() {
 log('Worker started', { pollMs });
 await tick();
 setInterval(() => { void tick(); }, pollMs);
+startSchedulerLoop();

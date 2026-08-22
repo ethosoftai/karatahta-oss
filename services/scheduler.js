@@ -2,9 +2,12 @@
 // the content pool (services/contentPool.js), generates cards/a lesson via
 // this same API, then publishes it -- all as plain HTTP calls to the
 // backend's own /api endpoints (auth'd via the shared X-Scheduler-Token,
-// see services/requestAuth.js), same as any other client would. Started by
-// workers/scheduler.js, its own process/service -- separate from the
-// generic publish_jobs worker in workers/socialPublisher.js.
+// see services/requestAuth.js), same as any other client would. Runs inside
+// workers/socialPublisher.js so publishing stays on one process. A separate
+// karatahta-scheduler service was evaluated but the Railway plan's resource
+// provision limit blocked creating a 5th service, so this stays embedded;
+// revisit if social-publisher is ever scaled beyond one replica (its
+// setInterval tick would then run once per replica).
 import { pickNextContentPoolItem } from './contentPool.js';
 import { getSchedulerJob, updateSchedulerJob } from './supabaseStore.js';
 
