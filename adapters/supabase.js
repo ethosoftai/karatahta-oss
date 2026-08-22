@@ -15,7 +15,10 @@ const supabase = createClient(url, key, {
 export async function claimNextJob() {
   const { data, error } = await supabase.rpc('claim_publish_job');
   if (error) throw error;
-  return data || null;
+  // When no row is queued, the RPC's RETURNS publish_jobs still yields one
+  // row with every column null rather than a JS-falsy result -- checking id
+  // is what actually distinguishes "claimed a job" from "queue is empty".
+  return data?.id ? data : null;
 }
 
 export async function finishJob({ jobId, results }) {
