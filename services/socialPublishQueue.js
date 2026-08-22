@@ -7,96 +7,69 @@ function requireQueue() {
   return supabase;
 }
 
-export async function createSocialPublishJob({ lessonId, videoId, userId, targetPlatform, caption, title, description, privacyStatus }) {
+function platformsForTarget(targetPlatform) {
+  if (targetPlatform === 'both') return ['instagram', 'youtube'];
+  if (['instagram', 'youtube', 'tiktok'].includes(targetPlatform)) return [targetPlatform];
+  throw new Error('Gecerli bir yayin platformu gerekli.');
+}
+
+function withLegacyFields(job) {
+  if (!job) return job;
+  const payload = job.payload || {};
+  const results = job.results || {};
+  return {
+    ...job,
+    target_platform: payload.platforms?.length === 1 ? payload.platforms[0] : 'both',
+    caption: payload.caption || null,
+    title: payload.title || null,
+    description: payload.description || null,
+    privacy_status: payload.privacyStatus || 'private',
+    instagram_result: results.instagram || null,
+    youtube_result: results.youtube || null,
+    tiktok_result: results.tiktok || null
+  };
+}
+
+export async function createSocialPublishJob({
+  userId, targetPlatform, videoUrl, imageUrls, caption, title, description,
+  privacyStatus, action = 'video.publish'
+}) {
   const client = requireQueue();
+  const isInstagramCarousel = action === 'instagram.carousel';
+  if (!['video.publish', 'instagram.carousel'].includes(action)) {
+    throw new Error('Desteklenmeyen sosyal yayin isi.');
+  }
+  if (isInstagramCarousel && targetPlatform !== 'instagram') {
+    throw new Error('Instagram carousel yalnizca Instagram platformunda yayinlanabilir.');
+  }
   const { data, error } = await client
-    .from('social_publish_jobs')
+    .from('publish_jobs')
     .insert({
-      lesson_id: lessonId,
-      video_id: videoId,
-      user_id: userId,
-      target_platform: targetPlatform,
-      caption: caption || null,
-      title: title || null,
-      description: description || null,
-      privacy_status: privacyStatus || 'private'
+      owner_ref: String(userId),
+      payload: {
+        action,
+        ...(isInstagramCarousel ? { imageUrls: Array.isArray(imageUrls) ? imageUrls : [] } : { videoUrl }),
+        title: title || '',
+        description: description || '',
+        caption: caption || '',
+        platforms: isInstagramCarousel ? ['instagram'] : platformsForTarget(targetPlatform),
+        privacyStatus: privacyStatus || 'private'
+      }
     })
     .select('*')
     .single();
   if (error) throw error;
-  return data;
+  return withLegacyFields(data);
 }
 
 export async function getSocialPublishJobForUser({ jobId, userId }) {
   const client = requireQueue();
   const { data, error } = await client
-    .from('social_publish_jobs')
+    .from('publish_jobs')
     .select('*')
     .eq('id', jobId)
-    .eq('user_id', userId)
+    .eq('owner_ref', String(userId))
     .maybeSingle();
   if (error) throw error;
-  return data;
-}
-
-export async function claimNextSocialPublishJob() {
-  const client = requireQueue();
-  const { data: queued, error: readError } = await client
-    .from('social_publish_jobs')
-    .select('*')
-    .eq('status', 'queued')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
-  if (readError) throw readError;
-  if (!queued) return null;
-
-  const { data: claimed, error: claimError } = await client
-    .from('social_publish_jobs')
-    .update({
-      status: 'processing',
-      attempts: Number(queued.attempts || 0) + 1,
-      started_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      error: null
-    })
-    .eq('id', queued.id)
-    .eq('status', 'queued')
-    .select('*')
-    .maybeSingle();
-  if (claimError) throw claimError;
-  return claimed || null;
-}
-
-export async function finishSocialPublishJob({ jobId, instagramResult, youtubeResult, tiktokResult }) {
-  const client = requireQueue();
-  const { error } = await client
-    .from('social_publish_jobs')
-    .update({
-      status: 'done',
-      instagram_result: instagramResult,
-      youtube_result: youtubeResult,
-      tiktok_result: tiktokResult,
-      completed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', jobId);
-  if (error) throw error;
-}
-
-export async function failSocialPublishJob({ jobId, instagramResult, youtubeResult, tiktokResult, error }) {
-  const client = requireQueue();
-  const { error: updateError } = await client
-    .from('social_publish_jobs')
-    .update({
-      status: 'failed',
-      instagram_result: instagramResult,
-      youtube_result: youtubeResult,
-      tiktok_result: tiktokResult,
-      error: String(error || 'Sosyal medya yayinlama basarisiz.'),
-      completed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', jobId);
-  if (updateError) throw updateError;
+  return withLegacyFields(data);
 }

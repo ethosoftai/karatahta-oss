@@ -200,6 +200,7 @@ const googleDriveScope = 'https://www.googleapis.com/auth/drive.file';
 const googleDriveFolderName = 'Kara Tahta Dersleri';
 const googleDriveEnabled = Boolean(googleOAuthEnabled && googleOAuthClientId && googleOAuthClientSecret);
 const signedVideoUrlTtlSeconds = process.env.SUPABASE_SIGNED_URL_TTL_SECONDS || 3600;
+const socialPublishVideoUrlTtlSeconds = Math.min(86400, Math.max(60, Number(process.env.SOCIAL_PUBLISH_VIDEO_URL_TTL_SECONDS || 86400)));
 const corsOrigins = String(process.env.CORS_ORIGIN || process.env.CORS_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
   .map((origin) => origin.trim())
@@ -503,6 +504,24 @@ async function createVideoAccessPayload(video) {
     videoUrlExpiresInSeconds: signed.expiresInSeconds,
     videoUrlExpiresAt: signed.expiresAt
   };
+}
+
+// A queued publisher may pick the job up after the normal player URL has
+// expired. Give its read-only URL a separate (max 24h) lifetime. The generic
+// worker receives only this URL, never Kara Tahta storage credentials.
+async function createSocialPublishVideoUrl(video) {
+  if (video?.video_storage_path) {
+    const signed = await createStorageSignedUrl({
+      bucket: 'videos',
+      storagePath: video.video_storage_path,
+      expiresInSeconds: socialPublishVideoUrlTtlSeconds
+    });
+    return signed.signedUrl;
+  }
+  if (video?.local_video_path) {
+    return createLocalMediaUrl(video.local_video_path, socialPublishVideoUrlTtlSeconds);
+  }
+  throw new Error('Yayinlanacak video URLsi olusturulamadi.');
 }
 
 async function resolveFrameVideoSource(video) {
@@ -3970,11 +3989,10 @@ async function resolvePublishVideo(req) {
     error.statusCode = 400;
     throw error;
   }
-  const videoAccess = await createVideoAccessPayload(result.video);
   return {
     lesson: result.lesson,
     video: result.video,
-    videoUrl: absoluteMediaUrl(req, videoAccess.videoUrl)
+    videoUrl: absoluteMediaUrl(req, await createSocialPublishVideoUrl(result.video))
   };
 }
 
@@ -3992,14 +4010,18 @@ async function queuePlatformPublish(req, res, next, targetPlatform) {
       throw error;
     }
     const userContext = await resolveRequestUser(req);
+    const topic = String(target.lesson?.topic || target.lesson?.title || '').trim();
+    const defaultTitle = String(target.lesson?.title || topic || 'Kara Tahta dersi').trim();
+    const resolvedTitle = String(title || defaultTitle).trim().slice(0, 100);
+    const resolvedDescription = String(description || (topic ? `Bu derste ${topic} konusu adim adim anlatiliyor.` : '')).trim();
+    const resolvedCaption = String(caption || `Kara Tahta | ${resolvedTitle}${topic ? `\n\n${topic}` : ''}`).trim();
     const job = await createSocialPublishJob({
-      lessonId: target.lesson.id,
-      videoId: target.video.id,
       userId: userContext.profileId,
       targetPlatform,
-      caption: String(caption || '').trim(),
-      title: String(title || '').trim().slice(0, 100),
-      description: String(description),
+      videoUrl: target.videoUrl,
+      caption: resolvedCaption,
+      title: resolvedTitle,
+      description: resolvedDescription,
       privacyStatus: normalizedPrivacyStatus
     });
     logInfo(`${targetPlatform} yayin isi kuyruga eklendi`, {

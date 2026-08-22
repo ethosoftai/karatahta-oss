@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { generateCardsStream, answerCardsQuestion, transcribeCardsQuestionImage } from '../services/cardsEngine.js';
 import { resolveRequestUser } from '../services/requestAuth.js';
 import { uploadDataUrl, createStorageSignedUrl } from '../services/mediaStore.js';
-import { publishCarouselToInstagram } from '../services/instagramPublish.js';
+import { createSocialPublishJob } from '../services/socialPublishQueue.js';
 import { convertPngBufferToJpeg } from '../services/imageConvert.js';
 import {
   createCardSession,
@@ -236,10 +236,8 @@ async function setSessionVisibility(req, res, next, isPublic) {
 cardsRouter.post('/api/cards/sessions/:id/publish', (req, res, next) => setSessionVisibility(req, res, next, true));
 cardsRouter.post('/api/cards/sessions/:id/unpublish', (req, res, next) => setSessionVisibility(req, res, next, false));
 
-// "Slide show" post: publishes a card session's stills as a single
-// Instagram carousel (2-10 slides). Stills are stored as PNG but Instagram's
-// Content Publishing API only accepts JPEG, so each one is downloaded,
-// converted, and re-uploaded under its own path before publishing.
+// Converts a card session's stills to Instagram-compatible JPEGs, then queues
+// the actual network publish for the separate social-publisher worker.
 cardsRouter.post('/api/cards/sessions/:id/publish-instagram', async (req, res, next) => {
   try {
     const userContext = await resolveRequestUser(req);
@@ -255,6 +253,7 @@ cardsRouter.post('/api/cards/sessions/:id/publish-instagram', async (req, res, n
       return res.status(400).json({ error: 'Instagram carousel en fazla 10 gorsel destekler; bu oturumda daha fazlasi var.' });
     }
 
+    const imageUrlTtl = Math.min(86400, Math.max(60, Number(process.env.SOCIAL_PUBLISH_IMAGE_URL_TTL_SECONDS || 86400)));
     const imageUrls = await Promise.all(cardsWithImages.map(async (card, index) => {
       const original = await createStorageSignedUrl({ bucket: 'attachments', storagePath: card.imageStoragePath, expiresInSeconds: 300 });
       const response = await fetch(original.signedUrl);
@@ -269,13 +268,19 @@ cardsRouter.post('/api/cards/sessions/:id/publish-instagram', async (req, res, n
         dataUrl: `data:image/jpeg;base64,${jpegBuffer.toString('base64')}`,
         contentType: 'image/jpeg'
       });
-      const jpegSigned = await createStorageSignedUrl({ bucket: 'attachments', storagePath: uploadedJpeg.storagePath, expiresInSeconds: 600 });
+      const jpegSigned = await createStorageSignedUrl({ bucket: 'attachments', storagePath: uploadedJpeg.storagePath, expiresInSeconds: imageUrlTtl });
       return jpegSigned.signedUrl;
     }));
 
     const caption = String(req.body?.caption || `Kara Tahta | ${session.title || 'Kartlar'}`).trim();
-    const result = await publishCarouselToInstagram({ imageUrls, caption });
-    res.json(result);
+    const job = await createSocialPublishJob({
+      userId: userContext.profileId,
+      targetPlatform: 'instagram',
+      action: 'instagram.carousel',
+      imageUrls,
+      caption
+    });
+    res.status(202).json({ publishJobId: job.id, sessionId: session.id, platform: 'instagram', status: job.status });
   } catch (error) {
     next(error);
   }

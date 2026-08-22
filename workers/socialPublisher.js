@@ -1,123 +1,97 @@
 import 'dotenv/config';
 
-import { createStorageSignedUrl } from '../services/mediaStore.js';
-import { publishReelToInstagram } from '../services/instagramPublish.js';
-import { publishVideoToYoutube } from '../services/youtubePublish.js';
+import { credentialsForJob } from '../services/credentials.js';
+import { claimNextJob, failJob, finishJob } from '../services/jobQueue.js';
+import { publishCarouselToInstagram, publishReelToInstagram } from '../services/instagramPublish.js';
 import { publishVideoToTiktok } from '../services/tiktokPublish.js';
-import {
-  claimNextSocialPublishJob,
-  failSocialPublishJob,
-  finishSocialPublishJob
-} from '../services/socialPublishQueue.js';
-import { getLessonDetailForUser, getLessonVideoByIdForUser } from '../services/supabaseStore.js';
-import { startSchedulerLoop } from '../services/scheduler.js';
+import { publishVideoToYoutube } from '../services/youtubePublish.js';
 
 const pollMs = Math.max(1000, Number(process.env.SOCIAL_PUBLISH_POLL_MS || 5000));
+const allowedHosts = String(process.env.ALLOWED_VIDEO_HOSTS || '').split(',').map((item) => item.trim()).filter(Boolean);
 let running = false;
 
 function log(message, meta = null) {
   console.log(`[social-publisher] ${message}${meta ? ` ${JSON.stringify(meta)}` : ''}`);
 }
 
-function contentMetadata(detail, job) {
-  const topic = String(detail.lesson?.topic || detail.lesson?.title || 'Kara Tahta dersi').trim();
-  // YouTube has no separate "post as Short" call -- it classifies an upload
-  // as a Short from the file's own aspect ratio/duration, but #Shorts in the
-  // title/description is YouTube's own documented signal to make that
-  // classification reliable rather than relying on inference alone.
-  const isVertical = detail.lesson?.orientation === 'vertical';
-  const rawTitle = String(job.title || detail.lesson?.title || topic).trim();
-  const title = (isVertical && !/#shorts/i.test(rawTitle) ? `${rawTitle} #Shorts` : rawTitle).slice(0, 100);
-  const segmentTitles = (detail.segments || [])
-    .map((segment) => String(segment.title || '').trim())
-    .filter(Boolean)
-    .slice(0, 8);
-  const defaultDescription = [
-    `Bu derste ${topic} konusu adim adim anlatiliyor.`,
-    segmentTitles.length ? `Bolumler:\n${segmentTitles.map((segment) => `• ${segment}`).join('\n')}` : '',
-    'Kara Tahta ile hazirlandi.',
-    isVertical ? '#Shorts' : ''
-  ].filter(Boolean).join('\n\n');
+function validateHttpsUrl(value, label) {
+  const url = new URL(String(value || ''));
+  if (url.protocol !== 'https:') throw new Error(`${label} must use HTTPS.`);
+  if (allowedHosts.length && !allowedHosts.includes(url.hostname)) {
+    throw new Error(`${label} host is not allowed: ${url.hostname}`);
+  }
+  return url.href;
+}
+
+function validatePayload(payload) {
+  if (!payload || typeof payload !== 'object') throw new Error('Job payload must be an object.');
+  const action = String(payload.action || 'video.publish');
+  const caption = String(payload.caption || payload.description || '').trim();
+  if (action === 'instagram.carousel') {
+    const imageUrls = Array.isArray(payload.imageUrls) ? payload.imageUrls : [];
+    if (imageUrls.length < 2 || imageUrls.length > 10) {
+      throw new Error('instagram.carousel requires 2 to 10 imageUrls.');
+    }
+    return {
+      action,
+      imageUrls: imageUrls.map((url, index) => validateHttpsUrl(url, `imageUrls[${index}]`)),
+      platforms: ['instagram'],
+      caption
+    };
+  }
+  if (action !== 'video.publish') throw new Error(`Unsupported publish action: ${action}`);
+  const videoUrl = validateHttpsUrl(payload.videoUrl, 'videoUrl');
+  const platforms = [...new Set(Array.isArray(payload.platforms) ? payload.platforms : [])];
+  if (!platforms.length || platforms.some((platform) => !['instagram', 'youtube', 'tiktok'].includes(platform))) {
+    throw new Error('platforms must contain one or more of instagram, youtube, tiktok.');
+  }
   return {
-    title,
-    description: String(job.description || defaultDescription).trim(),
-    caption: String(job.caption || `Kara Tahta | ${title}\n\n${topic}`).trim()
+    action,
+    videoUrl,
+    platforms,
+    title: String(payload.title || '').trim(),
+    description: String(payload.description || '').trim(),
+    caption,
+    privacyStatus: ['private', 'unlisted', 'public'].includes(payload.privacyStatus) ? payload.privacyStatus : 'private'
   };
 }
 
+async function publish(platform, payload, credentials) {
+  if (payload.action === 'instagram.carousel') {
+    return publishCarouselToInstagram({ imageUrls: payload.imageUrls, caption: payload.caption, credentials: credentials.instagram });
+  }
+  if (platform === 'instagram') return publishReelToInstagram({ videoUrl: payload.videoUrl, caption: payload.caption, credentials: credentials.instagram });
+  if (platform === 'youtube') return publishVideoToYoutube({ ...payload, credentials: credentials.youtube });
+  const privacyLevel = { public: 'PUBLIC_TO_EVERYONE', private: 'SELF_ONLY', unlisted: 'SELF_ONLY' }[payload.privacyStatus];
+  return publishVideoToTiktok({ videoUrl: payload.videoUrl, title: payload.title, privacyLevel, credentials: credentials.tiktok });
+}
+
 async function processOne() {
-  const job = await claimNextSocialPublishJob();
+  const job = await claimNextJob();
   if (!job) return false;
-  log('Yayin isi alindi', { jobId: job.id, videoId: job.video_id });
-  let instagramResult = null;
-  let youtubeResult = null;
-  let tiktokResult = null;
+  const results = {};
   try {
-    const target = await getLessonVideoByIdForUser({ videoId: job.video_id, userId: job.user_id });
-    if (!target?.video?.video_storage_path) {
-      throw new Error('Railway Bucket videosu bulunamadi.');
-    }
-    const access = await createStorageSignedUrl({
-      bucket: 'videos',
-      storagePath: target.video.video_storage_path,
-      expiresInSeconds: 3600
-    });
-    const videoUrl = access.signedUrl;
-    const detail = await getLessonDetailForUser({ lessonId: target.lesson.id, userId: job.user_id, messageLimit: 1 });
-    const metadata = contentMetadata(detail || { lesson: target.lesson, segments: [] }, job);
-    const platform = job.target_platform || 'both';
-    if (platform === 'instagram' || platform === 'both') {
+    const payload = validatePayload(job.payload);
+    const credentials = await credentialsForJob(job, payload.platforms);
+    for (const platform of payload.platforms) {
       try {
-        instagramResult = { status: 'published', ...(await publishReelToInstagram({ videoUrl, caption: metadata.caption })) };
+        // Sequential publishing avoids rate-limit bursts and duplicate uploads.
+        results[platform] = { status: 'published', ...(await publish(platform, payload, credentials)) };
       } catch (error) {
-        instagramResult = { status: 'failed', error: error.message || 'Instagram yayinlanamadi.' };
+        results[platform] = { status: 'failed', error: error.message || 'Publishing failed.' };
       }
     }
-    if (platform === 'youtube' || platform === 'both') {
-      try {
-        youtubeResult = {
-          status: 'published',
-          ...(await publishVideoToYoutube({
-            videoUrl,
-            title: metadata.title,
-            description: metadata.description,
-            privacyStatus: job.privacy_status || 'private'
-          }))
-        };
-      } catch (error) {
-        youtubeResult = { status: 'failed', error: error.message || 'YouTube yayinlanamadi.' };
-      }
-    }
-    if (platform === 'tiktok') {
-      try {
-        // TikTok apps that haven't cleared app review can only post
-        // SELF_ONLY regardless of what's requested; see tiktokPublish.js.
-        const privacyLevel = { public: 'PUBLIC_TO_EVERYONE', private: 'SELF_ONLY', unlisted: 'SELF_ONLY' }[job.privacy_status] || 'SELF_ONLY';
-        tiktokResult = {
-          status: 'published',
-          ...(await publishVideoToTiktok({ videoUrl, title: metadata.title, privacyLevel }))
-        };
-      } catch (error) {
-        tiktokResult = { status: 'failed', error: error.message || 'TikTok yayinlanamadi.' };
-      }
-    }
-    const failures = [instagramResult, youtubeResult, tiktokResult].filter((result) => result?.status === 'failed');
+    const failures = Object.values(results).filter((result) => result.status === 'failed');
     if (failures.length) {
-      await failSocialPublishJob({
-        jobId: job.id,
-        instagramResult,
-        youtubeResult,
-        tiktokResult,
-        error: failures.map((result) => result.error).join(' | ')
-      });
-      log('Yayin isi hata ile bitti', { jobId: job.id, instagramResult, youtubeResult, tiktokResult });
+      await failJob({ jobId: job.id, results, error: failures.map((result) => result.error).join(' | ') });
+      log('Job completed with errors', { jobId: job.id, results });
     } else {
-      await finishSocialPublishJob({ jobId: job.id, instagramResult, youtubeResult, tiktokResult });
-      log('Yayin isi tamamlandi', { jobId: job.id, instagramResult, youtubeResult, tiktokResult });
+      await finishJob({ jobId: job.id, results });
+      log('Job completed', { jobId: job.id, results });
     }
   } catch (error) {
-    await failSocialPublishJob({ jobId: job.id, instagramResult, youtubeResult, tiktokResult, error: error.message });
-    log('Yayin isi islenemedi', { jobId: job.id, error: error.message });
+    await failJob({ jobId: job.id, results, error: error.message });
+    log('Job failed', { jobId: job.id, error: error.message });
   }
   return true;
 }
@@ -125,18 +99,9 @@ async function processOne() {
 async function tick() {
   if (running) return;
   running = true;
-  try {
-    while (await processOne()) {
-      // Drain queued work serially: avoids duplicate requests and rate-limit bursts.
-    }
-  } catch (error) {
-    log('Kuyruk kontrol hatasi', { error: error.message });
-  } finally {
-    running = false;
-  }
+  try { while (await processOne()) {} } catch (error) { log('Queue polling failed', { error: error.message }); } finally { running = false; }
 }
 
-log('Worker basladi', { pollMs });
+log('Worker started', { pollMs });
 await tick();
 setInterval(() => { void tick(); }, pollMs);
-startSchedulerLoop();

@@ -1,10 +1,10 @@
 const UPLOAD_INIT_URL = 'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status';
 
-function requireYoutubeConfig() {
-  const clientId = process.env.YOUTUBE_CLIENT_ID;
-  const clientSecret = process.env.YOUTUBE_CLIENT_SECRET;
-  const refreshToken = process.env.YOUTUBE_REFRESH_TOKEN;
-  const tokenUri = process.env.YOUTUBE_TOKEN_URI || 'https://oauth2.googleapis.com/token';
+function requireYoutubeConfig(credentials = {}) {
+  const clientId = credentials.clientId || process.env.YOUTUBE_CLIENT_ID;
+  const clientSecret = credentials.clientSecret || process.env.YOUTUBE_CLIENT_SECRET;
+  const refreshToken = credentials.refreshToken || process.env.YOUTUBE_REFRESH_TOKEN;
+  const tokenUri = credentials.tokenUri || process.env.YOUTUBE_TOKEN_URI || 'https://oauth2.googleapis.com/token';
   const missing = [];
   if (!clientId) missing.push('YOUTUBE_CLIENT_ID');
   if (!clientSecret) missing.push('YOUTUBE_CLIENT_SECRET');
@@ -42,7 +42,8 @@ export async function publishVideoToYoutube({
   title,
   description = '',
   privacyStatus = 'private',
-  categoryId = '27'
+  categoryId = '27',
+  credentials
 }) {
   if (!videoUrl) {
     const error = new Error('videoUrl zorunlu.');
@@ -55,7 +56,7 @@ export async function publishVideoToYoutube({
     throw error;
   }
 
-  const config = requireYoutubeConfig();
+  const config = requireYoutubeConfig(credentials);
 
   const sourceResponse = await fetch(videoUrl);
   if (!sourceResponse.ok || !sourceResponse.body) {

@@ -1,14 +1,9 @@
-const GRAPH_API_VERSION = process.env.INSTAGRAM_GRAPH_API_VERSION || 'v21.0';
-// Instagram Login tokens (IGA...) are valid on graph.instagram.com. They are
-// intentionally not Facebook Login/Page tokens and graph.facebook.com rejects
-// them before a publish container can be created.
-const GRAPH_API_BASE = `https://graph.instagram.com/${GRAPH_API_VERSION}`;
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
-function requireInstagramConfig() {
-  const accessToken = process.env.INSTAGRAM_ACCESS_TOKEN;
-  const businessAccountId = process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID;
+function requireInstagramConfig(credentials = {}) {
+  const accessToken = credentials.accessToken || process.env.INSTAGRAM_ACCESS_TOKEN;
+  const businessAccountId = credentials.businessAccountId || process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID;
   const missing = [];
   if (!accessToken) missing.push('INSTAGRAM_ACCESS_TOKEN');
   if (!businessAccountId) missing.push('INSTAGRAM_BUSINESS_ACCOUNT_ID');
@@ -17,11 +12,11 @@ function requireInstagramConfig() {
     error.statusCode = 400;
     throw error;
   }
-  return { accessToken, businessAccountId };
+  return { accessToken, businessAccountId, graphApiVersion: credentials.graphApiVersion || process.env.INSTAGRAM_GRAPH_API_VERSION || 'v21.0' };
 }
 
-async function graphRequest(path, { method = 'GET', body = null } = {}) {
-  const response = await fetch(`${GRAPH_API_BASE}${path}`, {
+async function graphRequest(graphApiVersion, requestPath, { method = 'GET', body = null } = {}) {
+  const response = await fetch(`https://graph.instagram.com/${graphApiVersion}${requestPath}`, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined
@@ -39,10 +34,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForContainerReady(containerId, accessToken) {
+async function waitForContainerReady(containerId, accessToken, graphApiVersion) {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const status = await graphRequest(`/${containerId}?fields=status_code&access_token=${accessToken}`);
+    const status = await graphRequest(graphApiVersion, `/${containerId}?fields=status_code&access_token=${accessToken}`);
     if (status.status_code === 'FINISHED') return;
     if (status.status_code === 'ERROR') {
       const error = new Error('Instagram video isleme basarisiz oldu.');
@@ -56,29 +51,29 @@ async function waitForContainerReady(containerId, accessToken) {
   throw error;
 }
 
-export async function publishReelToInstagram({ videoUrl, caption = '' }) {
+export async function publishReelToInstagram({ videoUrl, caption = '', credentials }) {
   if (!videoUrl) {
     const error = new Error('videoUrl zorunlu.');
     error.statusCode = 400;
     throw error;
   }
-  const { accessToken, businessAccountId } = requireInstagramConfig();
+  const { accessToken, businessAccountId, graphApiVersion } = requireInstagramConfig(credentials);
 
-  const container = await graphRequest(`/${businessAccountId}/media`, {
+  const container = await graphRequest(graphApiVersion, `/${businessAccountId}/media`, {
     method: 'POST',
     body: { media_type: 'REELS', video_url: videoUrl, caption, access_token: accessToken }
   });
 
-  await waitForContainerReady(container.id, accessToken);
+  await waitForContainerReady(container.id, accessToken, graphApiVersion);
 
-  const published = await graphRequest(`/${businessAccountId}/media_publish`, {
+  const published = await graphRequest(graphApiVersion, `/${businessAccountId}/media_publish`, {
     method: 'POST',
     body: { creation_id: container.id, access_token: accessToken }
   });
 
   let permalink = null;
   try {
-    const permalinkData = await graphRequest(`/${published.id}?fields=permalink&access_token=${accessToken}`);
+    const permalinkData = await graphRequest(graphApiVersion, `/${published.id}?fields=permalink&access_token=${accessToken}`);
     permalink = permalinkData.permalink || null;
   } catch {
     // best-effort only
@@ -87,8 +82,8 @@ export async function publishReelToInstagram({ videoUrl, caption = '' }) {
   return { mediaId: published.id, permalink };
 }
 
-async function createCarouselItemContainer({ imageUrl, accessToken, businessAccountId }) {
-  const container = await graphRequest(`/${businessAccountId}/media`, {
+async function createCarouselItemContainer({ imageUrl, accessToken, businessAccountId, graphApiVersion }) {
+  const container = await graphRequest(graphApiVersion, `/${businessAccountId}/media`, {
     method: 'POST',
     body: { image_url: imageUrl, is_carousel_item: true, access_token: accessToken }
   });
@@ -99,7 +94,7 @@ async function createCarouselItemContainer({ imageUrl, accessToken, businessAcco
 // carousel (e.g. a "Kart" session's stills). Each image must already be
 // reachable at a public https URL -- convertPngBufferToJpeg + a signed
 // storage URL upstream, since Instagram only accepts JPEG here.
-export async function publishCarouselToInstagram({ imageUrls, caption = '' }) {
+export async function publishCarouselToInstagram({ imageUrls, caption = '', credentials }) {
   const urls = (Array.isArray(imageUrls) ? imageUrls : []).filter(Boolean);
   if (urls.length < 2) {
     const error = new Error('Carousel icin en az 2 gorsel gerekli.');
@@ -111,7 +106,7 @@ export async function publishCarouselToInstagram({ imageUrls, caption = '' }) {
     error.statusCode = 400;
     throw error;
   }
-  const { accessToken, businessAccountId } = requireInstagramConfig();
+  const { accessToken, businessAccountId, graphApiVersion } = requireInstagramConfig(credentials);
 
   const childIds = [];
   for (const imageUrl of urls) {
@@ -119,25 +114,25 @@ export async function publishCarouselToInstagram({ imageUrls, caption = '' }) {
     // parent carousel container references it, and this order becomes the
     // published slide order.
     // eslint-disable-next-line no-await-in-loop
-    const id = await createCarouselItemContainer({ imageUrl, accessToken, businessAccountId });
+    const id = await createCarouselItemContainer({ imageUrl, accessToken, businessAccountId, graphApiVersion });
     childIds.push(id);
   }
 
-  const container = await graphRequest(`/${businessAccountId}/media`, {
+  const container = await graphRequest(graphApiVersion, `/${businessAccountId}/media`, {
     method: 'POST',
     body: { media_type: 'CAROUSEL', children: childIds, caption, access_token: accessToken }
   });
 
-  await waitForContainerReady(container.id, accessToken);
+  await waitForContainerReady(container.id, accessToken, graphApiVersion);
 
-  const published = await graphRequest(`/${businessAccountId}/media_publish`, {
+  const published = await graphRequest(graphApiVersion, `/${businessAccountId}/media_publish`, {
     method: 'POST',
     body: { creation_id: container.id, access_token: accessToken }
   });
 
   let permalink = null;
   try {
-    const permalinkData = await graphRequest(`/${published.id}?fields=permalink&access_token=${accessToken}`);
+    const permalinkData = await graphRequest(graphApiVersion, `/${published.id}?fields=permalink&access_token=${accessToken}`);
     permalink = permalinkData.permalink || null;
   } catch {
     // best-effort only

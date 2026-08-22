@@ -3,15 +3,13 @@ const TOKEN_URL = 'https://open.tiktokapis.com/v2/oauth/token/';
 const POLL_INTERVAL_MS = 5000;
 const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 // TikTok's chunked upload requires 5-64MB per chunk (last chunk may be
-// smaller); Kara Tahta's low-bitrate renders are almost always under 64MB,
-// so a single chunk covers the common case and this constant is really just
-// the "still fits in one PUT" ceiling, not a real multi-chunk splitter.
+// smaller). This worker currently supports the common single-chunk case.
 const MAX_SINGLE_CHUNK_BYTES = 64 * 1024 * 1024;
 
-function requireTiktokConfig() {
-  const clientKey = process.env.TIKTOK_CLIENT_KEY;
-  const clientSecret = process.env.TIKTOK_CLIENT_SECRET;
-  const refreshToken = process.env.TIKTOK_REFRESH_TOKEN;
+function requireTiktokConfig(credentials = {}) {
+  const clientKey = credentials.clientKey || process.env.TIKTOK_CLIENT_KEY;
+  const clientSecret = credentials.clientSecret || process.env.TIKTOK_CLIENT_SECRET;
+  const refreshToken = credentials.refreshToken || process.env.TIKTOK_REFRESH_TOKEN;
   const missing = [];
   if (!clientKey) missing.push('TIKTOK_CLIENT_KEY');
   if (!clientSecret) missing.push('TIKTOK_CLIENT_SECRET');
@@ -107,14 +105,15 @@ export async function publishVideoToTiktok({
   privacyLevel = 'SELF_ONLY',
   disableComment = false,
   disableDuet = false,
-  disableStitch = false
+  disableStitch = false,
+  credentials
 }) {
   if (!videoUrl) {
     const error = new Error('videoUrl zorunlu.');
     error.statusCode = 400;
     throw error;
   }
-  const config = requireTiktokConfig();
+  const config = requireTiktokConfig(credentials);
 
   const sourceResponse = await fetch(videoUrl);
   if (!sourceResponse.ok || !sourceResponse.body) {

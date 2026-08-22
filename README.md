@@ -153,8 +153,10 @@ her görsel önce indirilip `services/imageConvert.js` (ffmpeg) ile JPEG'e
 
 ## Zamanlanmış içerik üretimi (scheduler)
 
-`services/scheduler.js`, `karatahta-social-publisher` worker'ı (`workers/socialPublisher.js`)
-içinde ayrı bir döngü olarak çalışır. Etkinleştirildiğinde, kendi aralığında
+`services/scheduler.js` Kara Tahta'ya özel opsiyonel bir otomasyondur. Genel
+`karatahta-social-publisher` worker'ı (`workers/socialPublisher.js`) yalnızca
+hazır `publish_jobs` kayıtlarını yayınlar. Scheduler kullanılacaksa ayrı bir
+Kara Tahta servisi olarak çalıştırılmalıdır. Etkinleştirildiğinde, kendi aralığında
 (`interval_minutes`) `scheduler_jobs` tablosundaki (`migrations/013_content_scheduler.sql`,
 `migrations/014_combo_scheduler.sql`) iş türlerinden hangisi zamanı gelmişse
 tetikler:
@@ -326,7 +328,7 @@ scripts/
 └── migrate_supabase_media_to_railway.js
 migrations/                       Supabase SQL şeması
 workers/renderWorker.js           ayrı render worker giriş noktası
-workers/socialPublisher.js        YouTube/Instagram publish worker + scheduler döngüsü
+workers/socialPublisher.js        Genel publish_jobs tüketicisi (YouTube/Instagram/TikTok)
 test/                             Node testleri
 Dockerfile                        Node + Python + Manim + FFmpeg image
 railway.json                      Amsterdam ve replica ayarı
@@ -532,6 +534,10 @@ Yeni Supabase projesinde SQL Editor'da sırayla:
 12. `migrations/012_chat_source.sql`
 13. `migrations/013_content_scheduler.sql`
 14. `migrations/014_combo_scheduler.sql`
+15. `migrations/015_tiktok_publish.sql`
+16. `migrations/016_video_orientation.sql`
+17. `migrations/017_card_sessions_catalog.sql`
+18. `migrations/018_generic_publish_jobs.sql`
 
 çalıştırılmalıdır. Alternatif: `SUPABASE_DB_URL` tanımlayıp
 `npm run supabase:schema`.
