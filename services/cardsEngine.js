@@ -48,16 +48,31 @@ const cardsVisionModels = parseKaraVisionModels(
 const cardsVisionTimeoutMs = Math.max(1000, Number(process.env.GEMINI_REQUEST_TIMEOUT_MS) || 45000);
 const cardsVisionEnabled = Boolean(cardsVisionApiKey && cardsVisionModels.length);
 
+// Card count/roles are decided upfront by planCardSequence() -- this
+// instruction renders ONE already-planned card at a time. It's told that
+// card's role/goal and (from card 2 on) the previous card's real scene JSON
+// in the user message each call; see generateCardsStream.
 const CARD_SYSTEM_INSTRUCTION = `Sen Kara Tahta'nın Kart Öğretmenisin. Bir soruyu veya konuyu, art arda gelen
-basit görsel kartlarla anlatıyorsun. Her kart tek bir fikri gösterir.
+basit görsel kartlarla anlatıyorsun. Her kart tek bir fikri gösterir. Kaç kart
+olacağı ve her kartın rolü ÖNCEDEN planlandı -- sana her istekte o anki kartın
+"role"/"goal" bilgisini ve (varsa) önceki kartın gerçek "scene" JSON'unu
+veriyorum. Planı sen değiştirmiyorsun, yalnızca o tek kartı üretiyorsun.
 
 Yanıtın YALNIZCA şu şemaya uyan geçerli JSON olmalı:
 {
   "title": "Kartın kısa başlığı",
   "explanation": "Bu kartta ne gösterildiğini anlatan, öğretmen gibi konuşan 3-5 cümlelik doğal ve DETAYLI Türkçe anlatım.",
-  "scene": { "steps": [ { "type": "text", "x": 0.5, "y": 0.3, "text": "...", "size": 28, "color": "#f8fafc", "align": "center" } ] },
-  "is_last": false
+  "scene": { "steps": [ { "type": "text", "x": 0.5, "y": 0.3, "text": "...", "size": 28, "color": "#f8fafc", "align": "center" } ] }
 }
+
+ROL "result" İSE ZORUNLU KURAL: Bu, planın SON kartı ve ertelenecek bir sonraki
+kart yok. Hem "explanation"da hem "scene"de somut, hesaplanmış nihai cevap
+AÇIKÇA yer almalı (örn "x = 4", "c = 5 cm"). "Bir sonraki adımda göreceğiz"
+gibi cevabı erteleyen bir ifadeyle bitirme -- cevabı burada hesapla ve göster.
+
+SÜREKLİLİK: Sana önceki kartın "scene" JSON'u verilirse, aynı nesnenin (şekil,
+eksen, vb.) aynı x/y konumunu koru -- öğrenci kartları sırayla gördüğünde aynı
+çizimin devam ettiğini hissetmeli; sıfırdan farklı bir kompozisyon kurma.
 
 BU ÜÇ ALAN EKRANDA FARKLI YERLERDE GÖRÜNÜR -- HANGİSİ NEREYE GİDİYOR KARIŞTIRMA:
 - "title" -> Kartın GÖRSELİNİN en üstüne otomatik olarak, sistem tarafından yazılır. Bunu ayrıca
@@ -84,7 +99,27 @@ SCENE/STEPS KURALLARI:
   0.12 birim "y" farkı bırak (uzun metin iki satıra sarınca daha da fazla yer kaplar, ona göre pay bırak).
 - Sade renkler kullan: "#60a5fa" (mavi), "#4ade80" (yeşil), "#f87171" (kırmızı), "#facc15" (sarı), "#f8fafc" (beyaz), "#fb923c" (turuncu).
 - En az bir şekil/diyagram/ok adımı içersin, yalnız yazı/matematik olmasın.
-- "is_last": bu konunun anlatımı için yeterli kart üretildiyse true, değilse false
+- Sadece geçerli JSON döndür, başka hiçbir şey yazma.`;
+
+// Runs once, before any card is rendered, to decide how many cards this
+// subject needs and what each one's job is -- fixes the failure mode where
+// per-card generation (no shared plan) let the model declare a question
+// "done" before it had actually computed/shown the answer. See
+// planCardSequence().
+const CARD_PLAN_SYSTEM_INSTRUCTION = `Sen Kara Tahta'nın Kart Öğretmenisin. Kartları üretmeye başlamadan ÖNCE tüm
+diziyi planlıyorsun -- kaç karta ihtiyaç var ve her biri ne işe yarayacak.
+
+Yanıtın YALNIZCA şu şemaya uyan geçerli JSON olmalı:
+{
+  "cards": [
+    { "role": "given" | "step" | "result" | "concept", "goal": "Bu kartta tam olarak ne gösterilecek (1-2 cümle)" }
+  ]
+}
+
+KURALLAR:
+- En az 1, en fazla ${MAX_CARDS} kart planla -- sığdırmak için iki fikri bir karta sıkıştırma, gerekirse daha fazla kart kullan.
+- Öğrencinin SORUSU varsa (soru çözümü): ilk kart(lar) "given" (soru nesnesi + verilenler), ortadaki(ler) "step" (hesaplama/çıkarım), plan MUTLAKA "result" rolünde bir kartla bitsin ve o kartın "goal"ında somut sayısal/nihai cevap açıkça yazsın. "result" ilk kart olamaz.
+- Yalnızca genel bir KONU varsa (soru yok): kartlar "concept" rolünde, konuyu farklı açılardan/adımlarla anlatan bağımsız fikirler olsun; "result" zorunlu değil.
 - Sadece geçerli JSON döndür, başka hiçbir şey yazma.`;
 
 const CARDS_CHAT_SYSTEM_INSTRUCTION = `Sen Kara Tahta'nın Kart Öğretmenisin. Öğrenciye az önce bir dizi kart ile bir
@@ -135,6 +170,69 @@ function sanitizeScene(scene) {
 function fallbackScene(title) {
   const safeTitle = String(title || 'Kart').slice(0, 30);
   return { steps: [{ type: 'text', x: 0.5, y: 0.5, text: safeTitle, size: 36, color: '#f8fafc', align: 'center' }] };
+}
+
+const CARD_ROLES = new Set(['given', 'step', 'result', 'concept']);
+
+// Decides card count/roles up front (one call), instead of letting each
+// per-card call decide in isolation whether to stop -- that per-card
+// approach let the model mark is_last:true before it had actually computed
+// the answer (observed live: a Pythagorean-theorem question stopped right
+// after substituting values, never showing c=5cm). The `isQuestion &&
+// last role !== 'result'` guard below is a hard, non-LLM backstop: even if
+// the model's plan doesn't end on a result card, we force it to.
+async function planCardSequence({ planSystemInstruction, subject, isQuestion }) {
+  const userText = `${subject}\n\nBu konu/soru icin kart planini uret.`;
+  let parsed;
+  try {
+    parsed = await askDeepSeek({ systemInstruction: planSystemInstruction, userText, json: true, temperature: 0.4 });
+  } catch {
+    parsed = null;
+  }
+  let cards = (Array.isArray(parsed?.cards) ? parsed.cards : [])
+    .filter((card) => card && typeof card === 'object')
+    .slice(0, MAX_CARDS)
+    .map((card) => ({
+      role: CARD_ROLES.has(card.role) ? card.role : (isQuestion ? 'step' : 'concept'),
+      goal: typeof card.goal === 'string' && card.goal.trim() ? card.goal.slice(0, 300) : 'Konuyu anlat.'
+    }));
+  if (!cards.length) {
+    cards = [{ role: isQuestion ? 'result' : 'concept', goal: subject.slice(0, 300) || 'Konuyu anlat.' }];
+  }
+  if (isQuestion && cards[cards.length - 1].role !== 'result') {
+    const resultCard = { role: 'result', goal: 'Sorunun nihai/sayisal sonucunu acikca goster.' };
+    if (cards.length >= MAX_CARDS) {
+      cards[cards.length - 1] = resultCard;
+    } else {
+      cards.push(resultCard);
+    }
+  }
+  return cards;
+}
+
+// One repair attempt when a card's scene fails to render (bad/missing
+// shape) -- mirrors server.js's repairManimCodeWithLlm for the video
+// pipeline. Only the scene is touched; title/explanation are kept as-is.
+async function repairCardScene({ systemInstruction, title, explanation, brokenScene, errorMessage }) {
+  const prompt = {
+    task: 'Bu kartin "scene" JSON\'u render edilemedi. Hatayi dikkate alarak SADECE scene JSON\'unu duzelt.',
+    title,
+    explanation,
+    broken_scene: brokenScene,
+    render_error: String(errorMessage || '').slice(0, 2000),
+    rules: [
+      'Yanit YALNIZCA {"steps": [...]} seklinde gecerli JSON olsun.',
+      'title/explanation degistirme, yalniz steps dizisini duzelt.',
+      'steps en fazla 8 oge, her birinin type alani text/math/circle/rect/line/arrow olmali.'
+    ]
+  };
+  const parsed = await askDeepSeek({
+    systemInstruction,
+    userText: JSON.stringify(prompt),
+    json: true,
+    temperature: 0.2
+  });
+  return sanitizeScene(Array.isArray(parsed?.steps) ? parsed : parsed?.scene);
 }
 
 // `topic` is the general subject ("Pisagor teoremi"); `question` is the
@@ -189,41 +287,70 @@ export async function* generateCardsStream({ prompt, topic, question }) {
   }
   const subject = buildSubjectText({ topic: resolvedTopic, question: resolvedQuestion });
   const questionGuide = resolvedQuestion ? await loadCardsQuestionGuide() : '';
-  const systemInstruction = questionGuide
+  const planSystemInstruction = questionGuide
+    ? `${CARD_PLAN_SYSTEM_INSTRUCTION}\n\n${questionGuide}`
+    : CARD_PLAN_SYSTEM_INSTRUCTION;
+  const cardSystemInstruction = questionGuide
     ? `${CARD_SYSTEM_INSTRUCTION}\n\n${questionGuide}`
     : CARD_SYSTEM_INSTRUCTION;
 
+  const plannedCards = await planCardSequence({
+    planSystemInstruction,
+    subject,
+    isQuestion: Boolean(resolvedQuestion)
+  });
+
   const priorCards = [];
-  for (let index = 0; index < MAX_CARDS; index += 1) {
+  let previousScene = null;
+  for (let index = 0; index < plannedCards.length; index += 1) {
+    const planned = plannedCards[index];
     const historyText = priorCards
       .map((card, i) => `Kart ${i + 1}: ${card.title} — ${card.explanation}`)
       .join('\n');
-    const userText = historyText
-      ? `${subject}\n\nŞimdiye kadarki kartlar:\n${historyText}\n\nBir sonraki kartı üret (kart ${index + 1}).`
-      : `${subject}\n\nİlk kartı üret.`;
+    const userText = [
+      subject,
+      historyText ? `Şimdiye kadarki kartlar:\n${historyText}` : '',
+      `Bu kart ${index + 1}/${plannedCards.length}. Rolü: ${planned.role}. Amacı: ${planned.goal}`,
+      previousScene ? `Önceki kartın gerçek scene JSON'u (aynı nesneleri aynı konumda koru):\n${JSON.stringify(previousScene)}` : '',
+      'Bu kartı üret.'
+    ].filter(Boolean).join('\n\n');
 
     let parsed;
     try {
-      parsed = await askDeepSeek({ systemInstruction, userText, json: true, temperature: 0.5 });
-    } catch (error) {
-      parsed = { title: `Kart ${index + 1}`, explanation: 'Bu kart için içerik üretilemedi.', scene: null, is_last: true };
+      parsed = await askDeepSeek({ systemInstruction: cardSystemInstruction, userText, json: true, temperature: 0.5 });
+    } catch {
+      parsed = { title: planned.goal.slice(0, 60) || `Kart ${index + 1}`, explanation: 'Bu kart için içerik üretilemedi.', scene: null };
     }
 
-    const title = typeof parsed.title === 'string' ? parsed.title.slice(0, 60) : `Kart ${index + 1}`;
+    const title = typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.slice(0, 60) : `Kart ${index + 1}`;
     const explanation = typeof parsed.explanation === 'string' ? parsed.explanation : '';
+    let scene = parsed.scene ? sanitizeScene(parsed.scene) : null;
     let imageDataUrl;
     try {
-      imageDataUrl = await renderCardImage({ title, scene: parsed.scene ? sanitizeScene(parsed.scene) : fallbackScene(title), cardKey: `c${index + 1}` });
-    } catch {
-      // Guaranteed-valid fallback scene so the demo never hard-fails on a bad LLM scene.
-      imageDataUrl = await renderCardImage({ title, scene: fallbackScene(title), cardKey: `c${index + 1}-fallback` });
+      if (!scene || !scene.steps.length) throw new Error('Scene bos veya gecersiz.');
+      imageDataUrl = await renderCardImage({ title, scene, cardKey: `c${index + 1}` });
+    } catch (renderError) {
+      try {
+        scene = await repairCardScene({
+          systemInstruction: cardSystemInstruction,
+          title,
+          explanation,
+          brokenScene: parsed.scene || null,
+          errorMessage: renderError.message
+        });
+        if (!scene.steps.length) throw new Error('Onarim da bos scene dondurdu.');
+        imageDataUrl = await renderCardImage({ title, scene, cardKey: `c${index + 1}-repaired` });
+      } catch {
+        // Guaranteed-valid fallback scene so the demo never hard-fails.
+        scene = fallbackScene(title);
+        imageDataUrl = await renderCardImage({ title, scene, cardKey: `c${index + 1}-fallback` });
+      }
     }
 
     const card = { index: index + 1, title, explanation, imageDataUrl };
     priorCards.push({ title, explanation });
+    previousScene = scene;
     yield card;
-
-    if (parsed.is_last) break;
   }
 }
 
