@@ -70,6 +70,7 @@ import {
   buildMuxArgs,
   buildProgressiveAudioArgs,
   buildProgressivePartialArgs,
+  buildSegmentEndTrimArgs,
   buildTimedSubtitleSrt
 } from './services/videoPostprocess.js';
 import {
@@ -236,6 +237,9 @@ const mathTexAvailable = (
 const musicVolume = Number(process.env.BACKGROUND_MUSIC_VOLUME || 0.1);
 const musicFadeSeconds = Number(process.env.BACKGROUND_MUSIC_FADE_SECONDS || 1);
 const speechVolume = Number(process.env.SPEECH_VOLUME || 1.25);
+// Mechanical (non-LLM) trim: every finished segment loses its last N seconds,
+// unconditionally, before it goes into the final concat. Set to 0 to disable.
+const segmentEndTrimSeconds = Math.max(0, Number(process.env.SEGMENT_END_TRIM_SECONDS ?? 2));
 const targetVideoMinutes = Number(process.env.TARGET_VIDEO_MINUTES || 10);
 const targetSegmentCount = Number(process.env.TARGET_SEGMENT_COUNT || 8);
 const deepseekApiKey = process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API;
@@ -599,7 +603,7 @@ async function readOptionalMarkdown(relativePath) {
   }
 }
 
-async function loadManimGuide(subject = null) {
+async function loadManimGuide(subject = null, { questionMode = false } = {}) {
   const sections = [];
   const loadedPaths = [];
   const mandatoryPaths = [
@@ -614,6 +618,23 @@ async function loadManimGuide(subject = null) {
     if (subjectGuide) {
       loadedPaths.push(subjectPath.replaceAll(path.sep, '/'));
       sections.push(`## BRANSA OZEL ZORUNLU KAYNAK (${subject}): ${subjectPath.replaceAll(path.sep, '/')}\n\n${subjectGuide}`);
+    }
+  }
+
+  // Only a "soru ekle" (question-photo/text solve) lesson loads these --
+  // topic-mode lessons never set plan.isQuestionSolution, so this stays out
+  // of their prompt budget entirely.
+  if (questionMode) {
+    const questionPaths = [
+      path.join('skill', 'question', 'question_solving.md'),
+      path.join('skill', 'question', 'latex_writing.md')
+    ];
+    for (const questionPath of questionPaths) {
+      const questionGuide = await readOptionalMarkdown(questionPath);
+      if (questionGuide) {
+        loadedPaths.push(questionPath.replaceAll(path.sep, '/'));
+        sections.push(`## SORU COZUMU ZORUNLU KAYNAK: ${questionPath.replaceAll(path.sep, '/')}\n\n${questionGuide}`);
+      }
     }
   }
 
@@ -1987,14 +2008,15 @@ async function synthesizeSpeech(text, segmentId, ttsOptions = null) {
   return result;
 }
 
-async function createManimCode({ animation, durationSeconds, speech, segmentId, orientation = 'horizontal', continuityContext = null, subject = null }) {
+async function createManimCode({ animation, durationSeconds, speech, segmentId, orientation = 'horizontal', continuityContext = null, subject = null, questionMode = false }) {
   logInfo(`${segmentId}: Manim kodu LLM ile uretiliyor`, {
     seconds: durationSeconds,
     previousCodeChars: String(continuityContext?.previous_manim_code || '').length,
-    subject: subject || null
+    subject: subject || null,
+    questionMode
   });
   const { coder } = await loadPrompts();
-  const manimGuide = await loadManimGuide(subject);
+  const manimGuide = await loadManimGuide(subject, { questionMode });
   const resolvedOrientation = resolveVideoOrientation(orientation);
   const { width: frameWidthPx, height: frameHeightPx } = resolveVideoDimensions(resolvedOrientation);
   // Manim locks config.frame_height at 8 units and derives frame_width from
@@ -2610,6 +2632,31 @@ async function renderManimVideo({
     }
   }
 
+  if (segmentEndTrimSeconds > 0) {
+    const preTrimDuration = await getMediaDurationSeconds(finalVideoPath);
+    const trimmedPath = `${finalVideoPath}.trimmed.mp4`;
+    const trimResult = await runCommand(
+      'ffmpeg',
+      buildSegmentEndTrimArgs({
+        inputPath: finalVideoPath,
+        outputPath: trimmedPath,
+        videoDuration: preTrimDuration,
+        trimSeconds: segmentEndTrimSeconds
+      }),
+      { timeoutMs: 120000 }
+    );
+    if (trimResult.code !== 0) {
+      const error = new Error('Segment sonu mekanik kirpma basarisiz.');
+      error.stdout = trimResult.stdout;
+      error.stderr = trimResult.stderr;
+      throw error;
+    }
+    logInfo(`${safeSegmentId}: segment sonu ${segmentEndTrimSeconds}sn kirpildi`, {
+      before: Number(preTrimDuration).toFixed(1)
+    });
+    finalVideoPath = trimmedPath;
+  }
+
   const relativeVideo = path.relative(rendersDir, finalVideoPath).replaceAll(path.sep, '/');
   validateRenderedVideo(await probeVideo(finalVideoPath), `${safeSegmentId} final video`, { width: videoWidth, height: videoHeight });
   const durationSeconds = await getMediaDurationSeconds(finalVideoPath).catch(() => null);
@@ -2891,6 +2938,7 @@ async function runFullVideoJob(job) {
                 segmentId: segment.id,
                 orientation: job.orientation,
                 subject: job.plan.subject || null,
+                questionMode: Boolean(job.plan.isQuestionSolution),
                 continuityContext: buildSegmentGenerationContext({
                   plan: job.plan,
                   segment,
@@ -4591,6 +4639,10 @@ app.post('/api/question-plan', async (req, res, next) => {
     if (lesson?.id) {
       plan._lesson_id = lesson.id;
     }
+    // Round-trips back through /api/full-video's client-supplied plan JSON
+    // (same pattern as _lesson_id above) so createManimCode knows to load
+    // skill/question/*.md for every segment of this lesson.
+    plan.isQuestionSolution = true;
     res.json({ plan, lessonId: lesson?.id || null, title: preprocessed.title });
   } catch (error) {
     next(error);

@@ -107,6 +107,24 @@ export function buildMuxArgs({ videoPath, audioPath, outputPath, videoDuration, 
   ];
 }
 
+// Mechanical, non-LLM trim applied to every finished segment (video+audio
+// already muxed) before final concatenation -- unconditionally drops the
+// last trimSeconds regardless of content, so callers are responsible for
+// deciding whether a given pipeline stage should use it. Clamped so a
+// segment shorter than trimSeconds+1 never collapses to zero/negative
+// duration.
+export function buildSegmentEndTrimArgs({ inputPath, outputPath, videoDuration, trimSeconds = 2 }) {
+  const targetDuration = ffmpegNumber(Math.max(1, Number(videoDuration || 0) - Math.max(0, Number(trimSeconds) || 0)));
+  return [
+    '-y', '-i', inputPath,
+    '-t', targetDuration,
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', String(VIDEO_FPS),
+    '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
+    '-movflags', '+faststart',
+    outputPath
+  ];
+}
+
 export function buildBurnSubtitleArgs({ inputPath, subtitlePath, outputPath }) {
   const style = 'FontName=Noto Sans,FontSize=19,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=28';
   return ['-y', '-i', inputPath, '-vf', `subtitles='${escapeSubtitlePath(subtitlePath)}':force_style='${style}'`, '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-c:a', 'copy', '-movflags', '+faststart', outputPath];

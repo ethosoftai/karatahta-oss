@@ -4,12 +4,39 @@
 // cards are done, the student can keep asking follow-up questions about them
 // in a normal chat flow (answerCardsQuestion), the same shape as ask-kara but
 // without lesson/video/frame context since cards have none of that.
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { askDeepSeek } from './deepseekClient.js';
 import { renderCardImage } from './cardRenderer.js';
 import { generateKaraVisionAnswerWithFallback, parseKaraVisionModels } from './karaVision.js';
 import { buildQuestionImageTranscriptionPrompt } from './lessonPreprocessor.js';
 
 const MAX_CARDS = 4;
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// Only loaded when the student supplied a question (not a bare topic) --
+// mirrors the video pipeline's skill/question/*.md split (server.js's
+// loadManimGuide), adapted to the cards' declarative step schema instead of
+// Manim/Python. See skill/cards/question_solving.md and latex_writing.md.
+async function loadCardsQuestionGuide() {
+  const relativePaths = [
+    path.join('skill', 'cards', 'question_solving.md'),
+    path.join('skill', 'cards', 'latex_writing.md')
+  ];
+  const sections = [];
+  for (const relativePath of relativePaths) {
+    try {
+      const content = (await readFile(path.join(projectRoot, relativePath), 'utf8')).trim();
+      if (content) {
+        sections.push(`## KART SORU COZUMU ZORUNLU KAYNAK: ${relativePath.replaceAll(path.sep, '/')}\n\n${content}`);
+      }
+    } catch {
+      // Optional -- a missing file just means this guidance is skipped.
+    }
+  }
+  return sections.join('\n\n---\n\n');
+}
 
 // Standalone Gemini vision setup for the cards "soru fotografi" upload path
 // -- deliberately not imported from server.js (see deepseekClient.js's note
@@ -161,6 +188,10 @@ export async function* generateCardsStream({ prompt, topic, question }) {
     throw error;
   }
   const subject = buildSubjectText({ topic: resolvedTopic, question: resolvedQuestion });
+  const questionGuide = resolvedQuestion ? await loadCardsQuestionGuide() : '';
+  const systemInstruction = questionGuide
+    ? `${CARD_SYSTEM_INSTRUCTION}\n\n${questionGuide}`
+    : CARD_SYSTEM_INSTRUCTION;
 
   const priorCards = [];
   for (let index = 0; index < MAX_CARDS; index += 1) {
@@ -173,7 +204,7 @@ export async function* generateCardsStream({ prompt, topic, question }) {
 
     let parsed;
     try {
-      parsed = await askDeepSeek({ systemInstruction: CARD_SYSTEM_INSTRUCTION, userText, json: true, temperature: 0.5 });
+      parsed = await askDeepSeek({ systemInstruction, userText, json: true, temperature: 0.5 });
     } catch (error) {
       parsed = { title: `Kart ${index + 1}`, explanation: 'Bu kart için içerik üretilemedi.', scene: null, is_last: true };
     }

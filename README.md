@@ -499,6 +499,7 @@ yer alır.
 | `LOCAL_MEDIA_SIGNING_SECRET` | Geçici lokal medya URL imza anahtarı |
 | `TARGET_VIDEO_MINUTES` | Varsayılan hedef ders süresi |
 | `TARGET_SEGMENT_COUNT` | Varsayılan plan segment sayısı |
+| `SEGMENT_END_TRIM_SECONDS=2` | Her segmentin (mux sonrası) sonundan mekanik olarak kırpılan süre; `0` ile kapatılır |
 | `SPEECH_VOLUME` | Final mux içindeki konuşma sesi seviyesi |
 | `BACKGROUND_MUSIC_VOLUME` | Arka plan müziği seviyesi |
 | `BACKGROUND_MUSIC_FADE_SECONDS` | Müzik giriş/çıkış fade süresi |

@@ -6,6 +6,7 @@ import {
   buildMuxArgs,
   buildProgressiveAudioArgs,
   buildProgressivePartialArgs,
+  buildSegmentEndTrimArgs,
   buildTimedSubtitleSrt,
   calculateVideoStretchFactor
 } from '../services/videoPostprocess.js';
@@ -39,6 +40,26 @@ test('konuşma metnini tüm ses süresine yayılan SRT bloklarına dönüştür�
 
 test('geçersiz süreleri reddeder', () => {
   assert.throws(() => calculateVideoStretchFactor(0, 10), /pozitif/);
+});
+
+test('segment sonu mekanik kirpma suresi 2 saniye dusurur', () => {
+  const args = buildSegmentEndTrimArgs({
+    inputPath: '/tmp/segment.mp4',
+    outputPath: '/tmp/segment.trimmed.mp4',
+    videoDuration: 62.4,
+    trimSeconds: 2
+  });
+  assert.equal(args[args.indexOf('-t') + 1], '60.400');
+});
+
+test('segment sonu kirpma kisa segmentlerde sureyi sifira/negatife dusurmez', () => {
+  const args = buildSegmentEndTrimArgs({
+    inputPath: '/tmp/segment.mp4',
+    outputPath: '/tmp/segment.trimmed.mp4',
+    videoDuration: 2.5,
+    trimSeconds: 2
+  });
+  assert.equal(args[args.indexOf('-t') + 1], '1.000');
 });
 
 test('final MP4 birleştirmesinde hızlı başlatma metadata bayrağını kullanır', () => {
