@@ -12,6 +12,14 @@ import {
   assertStandardVideoProbe,
   resolveManimQuality
 } from './renderQuality.js';
+import { buildSegmentEndTrimArgs } from './videoPostprocess.js';
+
+// Mirrors server.js's segmentEndTrimSeconds -- this worker has its own
+// independent mux/finalize pipeline (server.js's renderManimVideo is only
+// used in the non-distributed shadow-render fallback), so the mechanical
+// end-trim has to be applied here too or it silently never runs in the
+// execute-mode (RENDER_QUEUE_ENABLED=true) path that's actually live.
+const segmentEndTrimSeconds = Math.max(0, Number(process.env.SEGMENT_END_TRIM_SECONDS ?? 2));
 
 function run(command, args, { cwd, timeoutMs = 180000 } = {}) {
   return new Promise((resolve) => {
@@ -149,11 +157,30 @@ export async function renderWorkerManimVideo({
       Object.assign(error, { mux });
       throw error;
     }
-    const probe = assertStandardVideoProbe(await probeVideo(outputPath), 'worker final video', {
+    let finalOutputPath = outputPath;
+    if (segmentEndTrimSeconds > 0) {
+      const preTrimDuration = await durationSeconds(outputPath);
+      const trimmedPath = path.join(workDir, `${className}-trimmed.mp4`);
+      const trim = await run('ffmpeg', buildSegmentEndTrimArgs({
+        inputPath: outputPath,
+        outputPath: trimmedPath,
+        videoDuration: preTrimDuration,
+        trimSeconds: segmentEndTrimSeconds
+      }), { cwd: workDir });
+      if (trim.code !== 0) {
+        const error = new Error('Worker segment sonu mekanik kirpma basarisiz oldu.');
+        Object.assign(error, { trim });
+        throw error;
+      }
+      onLog('Segment sonu kirpildi', { trimSeconds: segmentEndTrimSeconds, before: preTrimDuration });
+      finalOutputPath = trimmedPath;
+    }
+
+    const probe = assertStandardVideoProbe(await probeVideo(finalOutputPath), 'worker final video', {
       width: videoWidth,
       height: videoHeight
     });
-    return { workDir, outputPath, durationSeconds: await durationSeconds(outputPath), probe, manim, mux };
+    return { workDir, outputPath: finalOutputPath, durationSeconds: await durationSeconds(finalOutputPath), probe, manim, mux };
   } catch (error) {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
     throw error;
