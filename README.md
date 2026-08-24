@@ -503,6 +503,7 @@ yer alır.
 | `MCP_ACCESS_TOKEN` | `POST /mcp` endpoint'ine erişim için zorunlu Bearer token; tanımsızsa endpoint tüm istekleri reddeder |
 | `MCP_USER_ID` | MCP tool çağrılarının hangi profile atfedileceği; boşsa `SCHEDULER_USER_ID` kullanılır |
 | `MCP_LESSON_WAIT_MS=240000` | `generate_lesson_video` tool'unun sonucu beklerken en fazla bloklanacağı süre; aşılırsa `jobId` ile erken döner |
+| `MCP_CARDS_WAIT_MS=120000` | `generate_cards` tool'u için aynısı; aşılırsa o ana kadar tamamlanan kartları `status:"partial"` ile döner (kartlar job'a bağlı değil, `jobId` yok) |
 | `SPEECH_VOLUME` | Final mux içindeki konuşma sesi seviyesi |
 | `BACKGROUND_MUSIC_VOLUME` | Arka plan müziği seviyesi |
 | `BACKGROUND_MUSIC_FADE_SECONDS` | Müzik giriş/çıkış fade süresi |

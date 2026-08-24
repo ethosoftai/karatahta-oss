@@ -253,6 +253,7 @@ const segmentEndTrimSeconds = Math.max(0, Number(process.env.SEGMENT_END_TRIM_SE
 const mcpAccessToken = String(process.env.MCP_ACCESS_TOKEN || '').trim();
 const mcpUserId = String(process.env.MCP_USER_ID || process.env.SCHEDULER_USER_ID || '').trim();
 const mcpLessonWaitMs = Math.max(5000, Number(process.env.MCP_LESSON_WAIT_MS) || 240000);
+const mcpCardsWaitMs = Math.max(5000, Number(process.env.MCP_CARDS_WAIT_MS) || 120000);
 const targetVideoMinutes = Number(process.env.TARGET_VIDEO_MINUTES || 10);
 const targetSegmentCount = Number(process.env.TARGET_SEGMENT_COUNT || 8);
 const deepseekApiKey = process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API;
@@ -5412,7 +5413,7 @@ function buildMcpServer() {
 
   server.registerTool('generate_cards', {
     title: 'Generate teaching cards',
-    description: 'Creates a short sequence (1-4) of teaching card images with explanations, for a general topic or a specific question. Fast (seconds); not job-based like lesson videos.',
+    description: `Creates a short sequence (1-4) of teaching card images with explanations, for a general topic or a specific question. Not job-based like lesson videos -- no jobId/status tool to resume with. Waits up to ~${Math.round(mcpCardsWaitMs / 1000)}s; if the underlying model is slow, returns whatever cards finished in time with status:"partial" rather than blocking indefinitely.`,
     inputSchema: {
       topic: z.string().min(1).optional().describe('General subject. Omit if using `question`.'),
       question: z.string().min(1).optional().describe('A specific question to solve card by card. Omit if using `topic`.'),
@@ -5422,23 +5423,36 @@ function buildMcpServer() {
     if (!topic && !question) {
       return mcpToolResult({ status: 'failed', error: 'topic veya question alanlarindan biri gerekli.' });
     }
+    const deadline = Date.now() + mcpCardsWaitMs;
+    const cards = [];
+    let timedOut = false;
     try {
-      const cards = [];
       for await (const card of generateCardsStream({ topic, question })) {
         cards.push(card);
+        if (Date.now() >= deadline) {
+          timedOut = true;
+          break;
+        }
       }
-      return mcpToolResult({
-        status: 'done',
-        cards: cards.map((card) => ({
-          index: card.index,
-          title: card.title,
-          explanation: card.explanation,
-          ...(includeImages ? { imageDataUrl: card.imageDataUrl } : {})
-        }))
-      });
     } catch (error) {
-      return mcpToolResult({ status: 'failed', error: error.message });
+      if (!cards.length) {
+        return mcpToolResult({ status: 'failed', error: error.message });
+      }
+      // Partial cards already exist -- surface them instead of discarding
+      // real, rendered output just because a later card failed.
+      timedOut = true;
     }
+    const formatted = cards.map((card) => ({
+      index: card.index,
+      title: card.title,
+      explanation: card.explanation,
+      ...(includeImages ? { imageDataUrl: card.imageDataUrl } : {})
+    }));
+    return mcpToolResult(
+      timedOut
+        ? { status: 'partial', cards: formatted, message: `Zaman asimina ugradi veya hata verdi, ${formatted.length} kart tamamlanmis haliyle donduruldu.` }
+        : { status: 'done', cards: formatted }
+    );
   });
 
   return server;
