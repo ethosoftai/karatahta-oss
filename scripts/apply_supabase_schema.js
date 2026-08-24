@@ -48,7 +48,8 @@ async function main() {
     '015_tiktok_publish.sql',
     '016_video_orientation.sql',
     '017_card_sessions_catalog.sql',
-    '018_generic_publish_jobs.sql'
+    '018_generic_publish_jobs.sql',
+    '019_user_plans.sql'
   ];
   const client = new Client({
     connectionString: getConnectionString(),

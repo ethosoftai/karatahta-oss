@@ -403,6 +403,32 @@ export async function updateLesson(lessonId, patch) {
   return rows?.[0] || null;
 }
 
+export async function getUserPlan(userId) {
+  const client = requireSupabase();
+  const { data, error } = await client.from('user_plans').select('*').eq('user_id', userId).maybeSingle();
+  if (error) throw error;
+  if (data) return data;
+  return insertRow('user_plans', { user_id: userId });
+}
+
+// Atomically checks + consumes one unit of `kind` ('video' or 'card') quota
+// via the `consume_user_plan_quota` Postgres function (migrations/019),
+// which row-locks the plan so concurrent requests can't both slip past the
+// limit. Returns { allowed, planId, video: {used, quota}, card: {used, quota} }.
+export async function consumeUserPlanQuota(userId, kind) {
+  const client = requireSupabase();
+  const { data, error } = await client.rpc('consume_user_plan_quota', { p_user_id: userId, p_kind: kind });
+  if (error) throw error;
+  const row = data?.[0];
+  if (!row) throw new Error('Kota kontrolu basarisiz oldu.');
+  return {
+    allowed: row.allowed,
+    planId: row.plan_id,
+    video: { used: row.videos_used, quota: row.video_quota },
+    card: { used: row.cards_used, quota: row.card_quota }
+  };
+}
+
 export async function getLessonForUser({ lessonId, userId }) {
   if (!lessonId || !userId) return null;
   const client = requireSupabase();

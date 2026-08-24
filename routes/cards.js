@@ -13,7 +13,8 @@ import {
   listPublicCardSessions,
   listCardSessionsForUserWithVisibility,
   setCardSessionPublic,
-  getPublicCardSession
+  getPublicCardSession,
+  consumeUserPlanQuota
 } from '../services/supabaseStore.js';
 
 export const cardsRouter = Router();
@@ -40,6 +41,12 @@ cardsRouter.post('/api/cards/generate', async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   try {
     const userContext = await resolveRequestUser(req);
+    const cardQuota = await consumeUserPlanQuota(userContext.profileId, 'card');
+    if (!cardQuota.allowed) {
+      res.write(`${JSON.stringify({ type: 'error', error: 'Ücretsiz deneme kart üretim hakkınız doldu.' })}\n`);
+      res.end();
+      return;
+    }
     let question = req.body?.question;
     if (req.body?.question_image) {
       question = await transcribeCardsQuestionImage(req.body.question_image);

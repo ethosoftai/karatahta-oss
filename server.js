@@ -34,6 +34,7 @@ import { runKaraTools } from './services/karaTools.js';
 import { searchWeb } from './services/webSearch.js';
 import { cardsRouter } from './routes/cards.js';
 import { schedulerRouter } from './routes/scheduler.js';
+import { plansRouter } from './routes/plans.js';
 import { resolveRequestUser, bearerTokenFromRequest } from './services/requestAuth.js';
 import { generateCardsStream } from './services/cardsEngine.js';
 // Canlı öğretmen bölümü devre dışı bırakıldı; routes/liveTeacher.js ve
@@ -121,7 +122,8 @@ import {
   updatePasswordWithAccessToken,
   updateGenerationJob,
   updateLesson,
-  updateSegment
+  updateSegment,
+  consumeUserPlanQuota
 } from './services/supabaseStore.js';
 import {
   createStorageSignedUrl,
@@ -371,6 +373,7 @@ app.use(express.static(publicDir));
 // için burada yalnız mount ediliyor. Canlı öğretmen bölümü devre dışı.
 app.use(cardsRouter);
 app.use(schedulerRouter);
+app.use(plansRouter);
 app.get('/media/*mediaPath', async (req, res, next) => {
   try {
     const objectKey = Array.isArray(req.params.mediaPath)
@@ -4878,6 +4881,12 @@ async function queueTraditionalVideoJob({
     error.statusCode = 400;
     throw error;
   }
+  const videoQuota = await consumeUserPlanQuota(userContext.profileId, 'video');
+  if (!videoQuota.allowed) {
+    const error = new Error('Ücretsiz deneme video üretim hakkınız doldu.');
+    error.statusCode = 402;
+    throw error;
+  }
   plan = normalizeLessonContinuity(plan);
   if (!plan.subject) {
     plan.subject = detectLessonSubject(plan);
@@ -5420,8 +5429,15 @@ function buildMcpServer() {
       include_images: z.boolean().optional().describe('Include each card\'s base64 PNG data URL. Defaults to false to keep the response small.')
     }
   }, async ({ topic, question, include_images: includeImages }) => {
+    if (!mcpUserId) {
+      return mcpToolResult({ status: 'failed', error: 'MCP_USER_ID / SCHEDULER_USER_ID tanimli degil.' });
+    }
     if (!topic && !question) {
       return mcpToolResult({ status: 'failed', error: 'topic veya question alanlarindan biri gerekli.' });
+    }
+    const cardQuota = await consumeUserPlanQuota(mcpUserId, 'card');
+    if (!cardQuota.allowed) {
+      return mcpToolResult({ status: 'failed', error: 'Ücretsiz deneme kart üretim hakkınız doldu.' });
     }
     const deadline = Date.now() + mcpCardsWaitMs;
     const cards = [];
