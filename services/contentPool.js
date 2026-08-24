@@ -1,8 +1,19 @@
 import { readRailwayObjectText, writeRailwayObjectText, railwayMediaConfigured } from './mediaStore.js';
-import { getSchedulerJob } from './supabaseStore.js';
 
 const POOL_BUCKET = 'system';
 const POOL_PATH = 'content_pool.txt';
+
+// Lines are marked done in-place with this prefix once their content has
+// actually been generated and published (by any job_type) -- they stay in
+// the file for visibility/history but are never picked again. This lives in
+// the pool text itself (not a per-job_type DB cursor) specifically so that
+// stopping/starting a scheduler job, or running a different job_type,
+// can never replay an idea that was already produced.
+const DONE_PREFIX = '✓ ';
+
+function isDoneLine(line) {
+  return line.startsWith(DONE_PREFIX);
+}
 
 function requireRailway() {
   if (!railwayMediaConfigured) {
@@ -12,6 +23,9 @@ function requireRailway() {
   }
 }
 
+// Raw lines as stored (done markers included) -- this is what the pool
+// editor (GET/PUT /api/scheduler/content-pool) reads and writes so a human
+// can see what's already been published.
 export async function readContentPool() {
   requireRailway();
   let text;
@@ -31,19 +45,31 @@ export async function writeContentPool(text) {
   await writeRailwayObjectText({ bucket: POOL_BUCKET, storagePath: POOL_PATH, text: String(text || '') });
 }
 
-// Sequential, wrap-around pick: each scheduled job_type tracks its own
-// cursor into the pool (scheduler_jobs.content_pool_cursor) so
-// cards_carousel and lesson_video progress through the same idea list
-// independently.
-export async function pickNextContentPoolItem(jobType) {
-  const items = await readContentPool();
-  if (!items.length) {
-    const error = new Error('content_pool.txt bos veya bulunamadi.');
+// First not-yet-done line, shared across every job_type: once an idea has
+// been generated+published as a video, a carousel, or a combo, none of the
+// other job_types should pick it again either.
+export async function pickNextContentPoolItem() {
+  const lines = await readContentPool();
+  const pendingIndex = lines.findIndex((line) => !isDoneLine(line));
+  if (pendingIndex === -1) {
+    const error = new Error(
+      lines.length
+        ? 'content_pool.txt icindeki tum fikirler zaten yayinlanmis.'
+        : 'content_pool.txt bos veya bulunamadi.'
+    );
     error.statusCode = 422;
     throw error;
   }
-  const job = await getSchedulerJob(jobType);
-  const cursor = Number(job?.content_pool_cursor) || 0;
-  const index = cursor % items.length;
-  return { idea: items[index], index, nextCursor: index + 1, poolSize: items.length };
+  return { idea: lines[pendingIndex], lineIndex: pendingIndex, poolSize: lines.length };
+}
+
+// Marks one line done by its position in the raw line list (as returned by
+// pickNextContentPoolItem) -- re-reads and rewrites the whole file so a
+// concurrent edit through the pool editor isn't blindly clobbered.
+export async function markContentPoolItemDone(lineIndex) {
+  const lines = await readContentPool();
+  if (lineIndex < 0 || lineIndex >= lines.length) return;
+  if (isDoneLine(lines[lineIndex])) return;
+  lines[lineIndex] = DONE_PREFIX + lines[lineIndex];
+  await writeContentPool(lines.join('\n'));
 }

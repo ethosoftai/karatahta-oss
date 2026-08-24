@@ -8,7 +8,7 @@
 // provision limit blocked creating a 5th service, so this stays embedded;
 // revisit if social-publisher is ever scaled beyond one replica (its
 // setInterval tick would then run once per replica).
-import { pickNextContentPoolItem } from './contentPool.js';
+import { pickNextContentPoolItem, markContentPoolItemDone } from './contentPool.js';
 import { getSchedulerJob, updateSchedulerJob } from './supabaseStore.js';
 
 const BACKEND_URL = String(process.env.BACKEND_INTERNAL_URL || '').replace(/\/+$/, '');
@@ -177,9 +177,13 @@ async function runJob(jobType) {
   if (runningLock.has(jobType)) return;
   runningLock.add(jobType);
   try {
-    const { idea, index, nextCursor, poolSize } = await pickNextContentPoolItem(jobType);
-    log('Zamanlanmis is basliyor', { jobType, idea, index, poolSize });
+    const { idea, lineIndex, poolSize } = await pickNextContentPoolItem();
+    log('Zamanlanmis is basliyor', { jobType, idea, poolSize });
     const result = await RUNNERS[jobType](idea);
+    // Marked only after the runner actually succeeds, and shared across every
+    // job_type, so a failed attempt retries the same idea next time and a
+    // published idea is never picked again by any job_type.
+    await markContentPoolItemDone(lineIndex);
     const job = await getSchedulerJob(jobType);
     const intervalMinutes = Math.max(1, Number(job?.interval_minutes) || 1440);
     await updateSchedulerJob(jobType, {
@@ -187,7 +191,6 @@ async function runJob(jobType) {
       last_status: 'success',
       last_error: null,
       last_result: { idea, ...result },
-      content_pool_cursor: nextCursor,
       next_run_at: new Date(Date.now() + intervalMinutes * 60000).toISOString()
     });
     log('Zamanlanmis is tamamlandi', { jobType, idea });

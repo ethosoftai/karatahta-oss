@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { resolveRequestUser } from '../services/requestAuth.js';
-import { getSchedulerJob, listSchedulerJobs, updateSchedulerJob } from '../services/supabaseStore.js';
+import { listSchedulerJobs, updateSchedulerJob } from '../services/supabaseStore.js';
 import { readContentPool, writeContentPool } from '../services/contentPool.js';
 
 export const schedulerRouter = Router();
@@ -68,24 +68,16 @@ schedulerRouter.post('/api/scheduler/stop', async (req, res, next) => {
   }
 });
 
+// Items keep their in-place "✓ " done-marker (services/contentPool.js) so
+// the caller can see, per line, whether an idea has already been generated
+// and published by any job_type -- there's no longer a per-job_type cursor,
+// so nextIndex is simply the first not-done line shared by every job_type.
 schedulerRouter.get('/api/scheduler/content-pool', async (req, res, next) => {
   try {
     await resolveRequestUser(req);
     const items = await readContentPool();
-    const [cardsJob, lessonJob, comboJob] = await Promise.all([
-      getSchedulerJob('cards_carousel'),
-      getSchedulerJob('lesson_video'),
-      getSchedulerJob('combo')
-    ]);
-    const cursorOf = (job) => (items.length ? Number(job?.content_pool_cursor || 0) % items.length : 0);
-    res.json({
-      items,
-      cursors: {
-        cards_carousel: cursorOf(cardsJob),
-        lesson_video: cursorOf(lessonJob),
-        combo: cursorOf(comboJob)
-      }
-    });
+    const nextIndex = items.findIndex((line) => !line.startsWith('✓ '));
+    res.json({ items, nextIndex });
   } catch (error) {
     next(error);
   }
