@@ -3,6 +3,9 @@ import 'dotenv/config';
 import textToSpeech from '@google-cloud/text-to-speech';
 import express from 'express';
 import OpenAI from 'openai';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { z } from 'zod';
 import { Agent, setGlobalDispatcher } from 'undici';
 import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
@@ -32,6 +35,7 @@ import { searchWeb } from './services/webSearch.js';
 import { cardsRouter } from './routes/cards.js';
 import { schedulerRouter } from './routes/scheduler.js';
 import { resolveRequestUser, bearerTokenFromRequest } from './services/requestAuth.js';
+import { generateCardsStream } from './services/cardsEngine.js';
 // Canlı öğretmen bölümü devre dışı bırakıldı; routes/liveTeacher.js ve
 // services/liveTeacherEngine.js silinmedi, yalnızca mount edilmiyor.
 // import { liveTeacherRouter } from './routes/liveTeacher.js';
@@ -240,6 +244,15 @@ const speechVolume = Number(process.env.SPEECH_VOLUME || 1.25);
 // Mechanical (non-LLM) trim: every finished segment loses its last N seconds,
 // unconditionally, before it goes into the final concat. Set to 0 to disable.
 const segmentEndTrimSeconds = Math.max(0, Number(process.env.SEGMENT_END_TRIM_SECONDS ?? 2));
+// MCP server (see the /mcp route near app.listen): lets an MCP client call
+// generate_lesson_video/check_lesson_status/generate_cards directly against
+// this same process, no separate worker needed. MCP_ACCESS_TOKEN gates who
+// can call it; MCP_USER_ID is whose identity generated content is billed/
+// attributed to (falls back to the scheduler's user so one profile covers
+// both automations if a dedicated one isn't set up).
+const mcpAccessToken = String(process.env.MCP_ACCESS_TOKEN || '').trim();
+const mcpUserId = String(process.env.MCP_USER_ID || process.env.SCHEDULER_USER_ID || '').trim();
+const mcpLessonWaitMs = Math.max(5000, Number(process.env.MCP_LESSON_WAIT_MS) || 240000);
 const targetVideoMinutes = Number(process.env.TARGET_VIDEO_MINUTES || 10);
 const targetSegmentCount = Number(process.env.TARGET_SEGMENT_COUNT || 8);
 const deepseekApiKey = process.env.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API;
@@ -4576,74 +4589,86 @@ app.post('/api/plan', async (req, res, next) => {
   }
 });
 
+// Shared by POST /api/question-plan and the generate_lesson_video MCP tool
+// (services/mcpTools.js) -- kept as a plain function (not inlined in the
+// route) so both callers get the exact same lesson-creation/attachment/
+// isQuestionSolution-tagging behavior instead of two versions drifting.
+async function createQuestionPlanForUser({ image = null, note = '', studentLevel = 'beginner' }, userContext) {
+  const preprocessed = await preprocessLessonRequest({
+    image,
+    rawText: note,
+    mode: 'question',
+    studentLevel
+  });
+  const plan = await createQuestionSolutionPlan({
+    studentLevel,
+    questionText: preprocessed.clean_prompt,
+    targetMinutes: preprocessed.target_duration_minutes,
+    segmentCount: preprocessed.target_segment_count
+  });
+  const lesson = await persistRequired('lesson/question-plan', async () => {
+    const createdLesson = await createLesson({
+      userId: userContext.profileId,
+      title: preprocessed.title || plan.topic || 'Soru cozum videosu',
+      topic: preprocessed.clean_prompt || note || plan.topic || 'Soru cozum videosu',
+      studentLevel,
+      targetMinutes: preprocessed.target_duration_minutes,
+      targetSegmentCount: preprocessed.target_segment_count,
+      sourceType: 'question_image'
+    });
+    await savePlan({
+      lessonId: createdLesson.id,
+      provider: llmProvider,
+      model: planModel,
+      prompt: 'question-image-solution-plan',
+      plan,
+      rawResponse: null
+    });
+    await saveSegments({ lessonId: createdLesson.id, segments: plan.segments || [] });
+    if (image?.data) {
+      const mimeType = image.mimeType || image.mime_type || 'image/jpeg';
+      const storagePath = storagePathFor({
+        userId: userContext.profileId,
+        lessonId: createdLesson.id,
+        kind: 'attachments',
+        fileName: `question-image${extensionFromContentType(mimeType) || '.jpg'}`
+      });
+      const upload = await uploadDataUrl({
+        bucket: 'attachments',
+        dataUrl: image.data,
+        storagePath,
+        contentType: mimeType
+      });
+      await saveAttachment({
+        userId: userContext.profileId,
+        lessonId: createdLesson.id,
+        type: 'question_image',
+        mimeType,
+        storagePath: upload.storagePath,
+        metadata: { note: note || null, image_transcript: preprocessed.imageTranscript || null }
+      });
+    }
+    return createdLesson;
+  });
+  if (lesson?.id) {
+    plan._lesson_id = lesson.id;
+  }
+  // Round-trips back through /api/full-video's client-supplied plan JSON
+  // (same pattern as _lesson_id above) so createManimCode knows to load
+  // skill/question/*.md for every segment of this lesson.
+  plan.isQuestionSolution = true;
+  return { plan, lessonId: lesson?.id || null, title: preprocessed.title };
+}
+
 app.post('/api/question-plan', async (req, res, next) => {
   try {
     const userContext = await resolveRequestUser(req);
-    const studentLevel = req.body.student_level || 'beginner';
-    const preprocessed = await preprocessLessonRequest({
+    const result = await createQuestionPlanForUser({
       image: req.body.image || null,
-      rawText: req.body.note || '',
-      mode: 'question',
-      studentLevel
-    });
-    const plan = await createQuestionSolutionPlan({
-      studentLevel,
-      questionText: preprocessed.clean_prompt,
-      targetMinutes: preprocessed.target_duration_minutes,
-      segmentCount: preprocessed.target_segment_count
-    });
-    const lesson = await persistRequired('lesson/question-plan', async () => {
-      const createdLesson = await createLesson({
-        userId: userContext.profileId,
-        title: preprocessed.title || plan.topic || 'Soru cozum videosu',
-        topic: preprocessed.clean_prompt || req.body.note || plan.topic || 'Soru cozum videosu',
-        studentLevel,
-        targetMinutes: preprocessed.target_duration_minutes,
-        targetSegmentCount: preprocessed.target_segment_count,
-        sourceType: 'question_image'
-      });
-      await savePlan({
-        lessonId: createdLesson.id,
-        provider: llmProvider,
-        model: planModel,
-        prompt: 'question-image-solution-plan',
-        plan,
-        rawResponse: null
-      });
-      await saveSegments({ lessonId: createdLesson.id, segments: plan.segments || [] });
-      if (req.body.image?.data) {
-        const mimeType = req.body.image.mimeType || req.body.image.mime_type || 'image/jpeg';
-        const storagePath = storagePathFor({
-          userId: userContext.profileId,
-          lessonId: createdLesson.id,
-          kind: 'attachments',
-          fileName: `question-image${extensionFromContentType(mimeType) || '.jpg'}`
-        });
-        const upload = await uploadDataUrl({
-          bucket: 'attachments',
-          dataUrl: req.body.image.data,
-          storagePath,
-          contentType: mimeType
-        });
-        await saveAttachment({
-          userId: userContext.profileId,
-          lessonId: createdLesson.id,
-          type: 'question_image',
-          mimeType,
-          storagePath: upload.storagePath,
-          metadata: { note: req.body.note || null, image_transcript: preprocessed.imageTranscript || null }
-        });
-      }
-      return createdLesson;
-    });
-    if (lesson?.id) {
-      plan._lesson_id = lesson.id;
-    }
-    // Round-trips back through /api/full-video's client-supplied plan JSON
-    // (same pattern as _lesson_id above) so createManimCode knows to load
-    // skill/question/*.md for every segment of this lesson.
-    plan.isQuestionSolution = true;
-    res.json({ plan, lessonId: lesson?.id || null, title: preprocessed.title });
+      note: req.body.note || '',
+      studentLevel: req.body.student_level || 'beginner'
+    }, userContext);
+    res.json(result);
   } catch (error) {
     next(error);
   }
@@ -5009,69 +5034,82 @@ app.post('/api/full-video', async (req, res, next) => {
   }
 });
 
-app.get('/api/jobs/:id', async (req, res, next) => {
-  try {
-    const userContext = await resolveRequestUser(req);
-    let job = fullVideoJobs.get(req.params.id);
-    if (!job) {
-      const durableJob = await persist('generation-job/recover', () => getGenerationJobForUser({
-        appJobId: req.params.id,
+// Shared by GET /api/jobs/:id and the check_lesson_status MCP tool
+// (services/mcpTools.js) -- the process-restart recovery path (re-queueing
+// from the durably-saved plan) is subtle enough that it must not exist in
+// two copies. Returns a plain JSON-serializable payload; throws with
+// .statusCode set for 403/404 the same way route handlers do.
+async function getJobStatusPayloadForUser(jobId, userContext) {
+  let job = fullVideoJobs.get(jobId);
+  if (!job) {
+    const durableJob = await persist('generation-job/recover', () => getGenerationJobForUser({
+      appJobId: jobId,
+      userId: userContext.profileId
+    }));
+    if (!durableJob) {
+      const error = new Error('Job bulunamadi.');
+      error.statusCode = 404;
+      throw error;
+    }
+    if (['queued', 'running', 'concat'].includes(durableJob.status) && durableJob.lesson_id) {
+      const detail = await getLessonDetailForUser({
+        lessonId: durableJob.lesson_id,
         userId: userContext.profileId
-      }));
-      if (!durableJob) {
-        return res.status(404).json({ error: 'Job bulunamadi.' });
+      });
+      if (detail?.plan?.segments?.length) {
+        job = await queueTraditionalVideoJob({
+          plan: detail.plan,
+          lessonId: durableJob.lesson_id,
+          userContext,
+          appJobId: jobId,
+          existingDbJobId: durableJob.id
+        });
+        logInfo(`Job ${job.id}: process restart sonrasi bastan guvenli bicimde yeniden kuyruklandi`);
       }
-      if (['queued', 'running', 'concat'].includes(durableJob.status) && durableJob.lesson_id) {
-        const detail = await getLessonDetailForUser({
+    }
+    if (!job) {
+      if (durableJob.status === 'done' && durableJob.lesson_id) {
+        const storedVideo = await getLessonVideoForUser({
           lessonId: durableJob.lesson_id,
           userId: userContext.profileId
         });
-        if (detail?.plan?.segments?.length) {
-          job = await queueTraditionalVideoJob({
-            plan: detail.plan,
-            lessonId: durableJob.lesson_id,
-            userContext,
-            appJobId: req.params.id,
-            existingDbJobId: durableJob.id
-          });
-          logInfo(`Job ${job.id}: process restart sonrasi bastan guvenli bicimde yeniden kuyruklandi`);
-        }
-      }
-      if (!job) {
-        if (durableJob.status === 'done' && durableJob.lesson_id) {
-          const storedVideo = await getLessonVideoForUser({
-            lessonId: durableJob.lesson_id,
-            userId: userContext.profileId
-          });
-          const access = await createVideoAccessPayload(storedVideo?.video);
-          return res.json({
-            id: durableJob.app_job_id,
-            lessonId: durableJob.lesson_id,
-            status: 'done',
-            progress: durableJob.progress,
-            total: durableJob.total,
-            current: durableJob.current,
-            message: durableJob.message,
-            completedAt: durableJob.completed_at,
-            result: access.videoUrl ? { videoUrl: access.videoUrl, source: 'durable_storage' } : null,
-            segments: [],
-            progressive: null
-          });
-        }
-        return res.json({
+        const access = await createVideoAccessPayload(storedVideo?.video);
+        return {
           id: durableJob.app_job_id,
           lessonId: durableJob.lesson_id,
-          status: 'failed',
+          status: 'done',
           progress: durableJob.progress,
           total: durableJob.total,
-          error: durableJob.error || 'Worker yeniden basladi ve job plani kurtarilamadi.'
-        });
+          current: durableJob.current,
+          message: durableJob.message,
+          completedAt: durableJob.completed_at,
+          result: access.videoUrl ? { videoUrl: access.videoUrl, source: 'durable_storage' } : null,
+          segments: [],
+          progressive: null
+        };
       }
+      return {
+        id: durableJob.app_job_id,
+        lessonId: durableJob.lesson_id,
+        status: 'failed',
+        progress: durableJob.progress,
+        total: durableJob.total,
+        error: durableJob.error || 'Worker yeniden basladi ve job plani kurtarilamadi.'
+      };
     }
-    if (job.userId && job.userId !== userContext.profileId) {
-      return res.status(403).json({ error: 'Bu job bu kullaniciya ait degil.' });
-    }
-    res.json(publicJob(job));
+  }
+  if (job.userId && job.userId !== userContext.profileId) {
+    const error = new Error('Bu job bu kullaniciya ait degil.');
+    error.statusCode = 403;
+    throw error;
+  }
+  return publicJob(job);
+}
+
+app.get('/api/jobs/:id', async (req, res, next) => {
+  try {
+    const userContext = await resolveRequestUser(req);
+    res.json(await getJobStatusPayloadForUser(req.params.id, userContext));
   } catch (error) {
     next(error);
   }
@@ -5261,6 +5299,194 @@ async function authenticateKaraLiveSocket(authMessage) {
   }
   return { userId, lessonId, detail };
 }
+
+// -- MCP server -------------------------------------------------------
+// Exposes generate_lesson_video / check_lesson_status / generate_cards as
+// MCP tools, calling the same internal functions the HTTP routes use
+// (createQuestionPlanForUser, createTraditionalLessonPlan,
+// queueTraditionalVideoJob, getJobStatusPayloadForUser, generateCardsStream)
+// directly -- no self-HTTP loopback, unlike an external worker calling this
+// API over the network (see marketing-agent-assets/mcp_worker for that
+// standalone version, which talks to this same contract from outside).
+function mcpUserContext() {
+  return { profileId: mcpUserId, profile: null, mode: 'mcp' };
+}
+
+function mcpToolResult(payload) {
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+}
+
+function buildMcpServer() {
+  const server = new McpServer({ name: 'karatahta-mcp', version: '1.0.0' });
+
+  server.registerTool('generate_lesson_video', {
+    title: 'Generate lesson video',
+    description: 'Creates a full narrated + animated lesson video for a topic, or a step-by-step solution video for a specific question. Waits for the render to finish (up to a few minutes) and returns the video URL; if it takes longer, returns a jobId to check later with check_lesson_status.',
+    inputSchema: {
+      topic: z.string().min(1).optional().describe('General subject to teach. Omit if using `question`.'),
+      question: z.string().min(1).optional().describe('A specific question to solve step by step. Omit if using `topic`.'),
+      student_level: z.enum(['beginner', 'intermediate', 'advanced']).optional(),
+      target_video_minutes: z.number().min(0.5).max(20).optional().describe('Only used with `topic`.'),
+      target_segment_count: z.number().int().min(1).max(12).optional().describe('Only used with `topic`.')
+    }
+  }, async ({ topic, question, student_level: studentLevel, target_video_minutes: targetVideoMinutes, target_segment_count: targetSegmentCount }) => {
+    if (!mcpUserId) {
+      return mcpToolResult({ status: 'failed', error: 'MCP_USER_ID / SCHEDULER_USER_ID tanimli degil.' });
+    }
+    if (!topic && !question) {
+      return mcpToolResult({ status: 'failed', error: 'topic veya question alanlarindan biri gerekli.' });
+    }
+    const userContext = mcpUserContext();
+    let job;
+    try {
+      if (question) {
+        const { plan, lessonId } = await createQuestionPlanForUser({ note: question, studentLevel }, userContext);
+        job = await queueTraditionalVideoJob({ plan, lessonId, userContext });
+      } else {
+        const { plan, lessonId, orientation } = await createTraditionalLessonPlan({
+          topic,
+          student_level: studentLevel,
+          duration_touched: Boolean(targetVideoMinutes || targetSegmentCount),
+          target_video_minutes: targetVideoMinutes,
+          target_segment_count: targetSegmentCount
+        }, userContext);
+        job = await queueTraditionalVideoJob({ plan, lessonId, userContext, orientation });
+      }
+    } catch (error) {
+      return mcpToolResult({ status: 'failed', error: error.message });
+    }
+
+    const deadline = Date.now() + mcpLessonWaitMs;
+    while (Date.now() < deadline) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      let status;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        status = await getJobStatusPayloadForUser(job.id, userContext);
+      } catch (error) {
+        return mcpToolResult({ status: 'failed', jobId: job.id, lessonId: job.lessonId, error: error.message });
+      }
+      if (status.status === 'done') {
+        return mcpToolResult({
+          status: 'done',
+          jobId: job.id,
+          lessonId: job.lessonId,
+          videoUrl: status.result?.videoUrl || null
+        });
+      }
+      if (status.status === 'failed') {
+        return mcpToolResult({ status: 'failed', jobId: job.id, lessonId: job.lessonId, error: status.error || 'Video uretimi basarisiz oldu.' });
+      }
+    }
+    return mcpToolResult({
+      status: 'running',
+      jobId: job.id,
+      lessonId: job.lessonId,
+      message: 'Video hala render ediliyor. check_lesson_status ile jobId kullanarak takip et.'
+    });
+  });
+
+  server.registerTool('check_lesson_status', {
+    title: 'Check lesson video status',
+    description: 'Checks the current status/progress of a lesson video job started by generate_lesson_video, using the jobId it returned.',
+    inputSchema: { job_id: z.string().min(1) }
+  }, async ({ job_id: jobId }) => {
+    if (!mcpUserId) {
+      return mcpToolResult({ status: 'failed', error: 'MCP_USER_ID / SCHEDULER_USER_ID tanimli degil.' });
+    }
+    try {
+      const status = await getJobStatusPayloadForUser(jobId, mcpUserContext());
+      return mcpToolResult({
+        status: status.status,
+        progress: status.progress,
+        total: status.total,
+        message: status.message,
+        error: status.error,
+        videoUrl: status.result?.videoUrl || null
+      });
+    } catch (error) {
+      return mcpToolResult({ status: 'failed', error: error.message });
+    }
+  });
+
+  server.registerTool('generate_cards', {
+    title: 'Generate teaching cards',
+    description: 'Creates a short sequence (1-4) of teaching card images with explanations, for a general topic or a specific question. Fast (seconds); not job-based like lesson videos.',
+    inputSchema: {
+      topic: z.string().min(1).optional().describe('General subject. Omit if using `question`.'),
+      question: z.string().min(1).optional().describe('A specific question to solve card by card. Omit if using `topic`.'),
+      include_images: z.boolean().optional().describe('Include each card\'s base64 PNG data URL. Defaults to false to keep the response small.')
+    }
+  }, async ({ topic, question, include_images: includeImages }) => {
+    if (!topic && !question) {
+      return mcpToolResult({ status: 'failed', error: 'topic veya question alanlarindan biri gerekli.' });
+    }
+    try {
+      const cards = [];
+      for await (const card of generateCardsStream({ topic, question })) {
+        cards.push(card);
+      }
+      return mcpToolResult({
+        status: 'done',
+        cards: cards.map((card) => ({
+          index: card.index,
+          title: card.title,
+          explanation: card.explanation,
+          ...(includeImages ? { imageDataUrl: card.imageDataUrl } : {})
+        }))
+      });
+    } catch (error) {
+      return mcpToolResult({ status: 'failed', error: error.message });
+    }
+  });
+
+  return server;
+}
+
+function requireMcpAccessToken(req, res, next) {
+  if (!mcpAccessToken) {
+    res.status(500).json({ error: 'MCP_ACCESS_TOKEN tanimli degil.' });
+    return;
+  }
+  const header = String(req.headers.authorization || '');
+  const provided = header.match(/^Bearer\s+(.+)$/i)?.[1] || '';
+  const providedBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(mcpAccessToken);
+  const matches = providedBuffer.length === expectedBuffer.length
+    && timingSafeEqual(providedBuffer, expectedBuffer);
+  if (!matches) {
+    res.status(401).json({ error: 'Gecersiz veya eksik Authorization: Bearer <token>.' });
+    return;
+  }
+  next();
+}
+
+// Stateless mode: a fresh McpServer + transport per request. Each tool call
+// is independent anyway (generate_lesson_video's jobId is the only
+// cross-call state, and that lives in fullVideoJobs/Supabase, not here).
+app.post('/mcp', requireMcpAccessToken, async (req, res, next) => {
+  try {
+    const mcpServer = buildMcpServer();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on('close', () => {
+      transport.close();
+      mcpServer.close();
+    });
+    await mcpServer.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/mcp', requireMcpAccessToken, (req, res) => {
+  res.status(405).json({
+    jsonrpc: '2.0',
+    error: { code: -32000, message: 'Method not allowed. Stateless server -- POST only.' },
+    id: null
+  });
+});
 
 const httpServer = app.listen(port, () => {
   logInfo(`Kara Tahta calisiyor: http://localhost:${port}`, {

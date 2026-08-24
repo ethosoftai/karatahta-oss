@@ -500,6 +500,9 @@ yer alır.
 | `TARGET_VIDEO_MINUTES` | Varsayılan hedef ders süresi |
 | `TARGET_SEGMENT_COUNT` | Varsayılan plan segment sayısı |
 | `SEGMENT_END_TRIM_SECONDS=2` | Her segmentin (mux sonrası) sonundan mekanik olarak kırpılan süre; `0` ile kapatılır |
+| `MCP_ACCESS_TOKEN` | `POST /mcp` endpoint'ine erişim için zorunlu Bearer token; tanımsızsa endpoint tüm istekleri reddeder |
+| `MCP_USER_ID` | MCP tool çağrılarının hangi profile atfedileceği; boşsa `SCHEDULER_USER_ID` kullanılır |
+| `MCP_LESSON_WAIT_MS=240000` | `generate_lesson_video` tool'unun sonucu beklerken en fazla bloklanacağı süre; aşılırsa `jobId` ile erken döner |
 | `SPEECH_VOLUME` | Final mux içindeki konuşma sesi seviyesi |
 | `BACKGROUND_MUSIC_VOLUME` | Arka plan müziği seviyesi |
 | `BACKGROUND_MUSIC_FADE_SECONDS` | Müzik giriş/çıkış fade süresi |
@@ -624,6 +627,7 @@ node scripts/migrate_supabase_media_to_railway.js --delete-source --delete-bucke
 | `GET /api/jobs/:id/partials/:sequence` | Authenticated fMP4 partial |
 | `POST /api/ask-kara` | Timestamp, ders planı ve chat bağlamıyla soru-cevap |
 | `WS /api/kara-live` | Gemini Live API ile canlı sesli sohbet; get_frame/web_search/generate_manim araçları |
+| `POST /mcp` | MCP (Model Context Protocol) sunucusu — `generate_lesson_video`, `check_lesson_status`, `generate_cards` tool'ları; `Authorization: Bearer <MCP_ACCESS_TOKEN>` gerekir, stateless Streamable HTTP |
 | `GET /api/auth/oauth/google-drive` | drive.file scope + offline access isteyen ek Google OAuth turu başlatır |
 | `POST /api/auth/google-drive-token` | Dönen provider refresh token'ı kaydeder |
 | `POST /api/lessons/:id/save-to-drive` | Ders videosunu kullanıcının Google Drive'ına yükler |
