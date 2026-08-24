@@ -68,7 +68,13 @@ function requireRailwayMedia() {
       credentials: {
         accessKeyId: railwayAccessKeyId,
         secretAccessKey: railwaySecretAccessKey
-      }
+      },
+      // SlowDown/throttling responses under bursty segment uploads (e.g. a
+      // full lesson's segments finishing render around the same time) need
+      // more headroom than the SDK's default of 3 attempts -- 'adaptive'
+      // backs off further when it keeps seeing throttling errors.
+      maxAttempts: 8,
+      retryMode: 'adaptive'
     });
   }
   return s3Client;
