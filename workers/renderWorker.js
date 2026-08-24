@@ -100,9 +100,21 @@ const worker = createRenderWorker(async (task, queueJob) => {
     await updateRenderWorkerJob({ id: task.workerJobId, status: 'done', workerId, queueJobId: String(queueJob.id), output });
     return output;
   } catch (error) {
+    // error.message alone ("Manim render basarisiz oldu.") tells us nothing
+    // about *why* -- the actual reason lives in the subprocess's stderr,
+    // attached to the error object in workerManimRenderer.js but otherwise
+    // dropped on failure (it's only persisted on the success path). Fold
+    // the tail of it into both the log line and the DB record.
+    const diagnosticStderr = error.manim?.stderr || error.mux?.stderr || null;
+    if (diagnosticStderr) {
+      log('Render hata detayi', { queueJobId: String(queueJob.id), stderr: diagnosticStderr.slice(-4000) });
+    }
+    const errorMessage = diagnosticStderr
+      ? `${error.message || 'Worker render basarisiz oldu.'}\n${diagnosticStderr.slice(-1500)}`
+      : (error.message || 'Worker render basarisiz oldu.');
     await updateRenderWorkerJob({
       id: task.workerJobId, status: 'failed', workerId, queueJobId: String(queueJob.id),
-      error: error.message || 'Worker render basarisiz oldu.'
+      error: errorMessage
     }).catch((updateError) => log('Worker hata kaydi yazilamadi', { error: updateError.message }));
     throw error;
   } finally {
