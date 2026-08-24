@@ -11,8 +11,24 @@ const POOL_PATH = 'content_pool.txt';
 // can never replay an idea that was already produced.
 const DONE_PREFIX = '✓ ';
 
+// A line prefixed "SORU: " (any case) is routed through the app's dedicated
+// question-solving pathway instead of plain topic mode -- see scheduler.js's
+// startQuestionLessonJob/runCardsCarousel. Without this, every content-pool
+// idea (even one that IS a question) gets treated as a bare topic and never
+// loads skill/question/*.md or skill/cards/question_solving.md.
+const QUESTION_PREFIX_RE = /^soru\s*:\s*/i;
+
 function isDoneLine(line) {
   return line.startsWith(DONE_PREFIX);
+}
+
+function parsePoolLine(line) {
+  const done = isDoneLine(line);
+  const rest = done ? line.slice(DONE_PREFIX.length) : line;
+  const questionMatch = rest.match(QUESTION_PREFIX_RE);
+  const isQuestion = Boolean(questionMatch);
+  const text = (isQuestion ? rest.slice(questionMatch[0].length) : rest).trim();
+  return { done, isQuestion, text };
 }
 
 function requireRailway() {
@@ -60,7 +76,8 @@ export async function pickNextContentPoolItem() {
     error.statusCode = 422;
     throw error;
   }
-  return { idea: lines[pendingIndex], lineIndex: pendingIndex, poolSize: lines.length };
+  const { isQuestion, text } = parsePoolLine(lines[pendingIndex]);
+  return { idea: text, lineIndex: pendingIndex, poolSize: lines.length, isQuestion };
 }
 
 // Marks one line done by its position in the raw line list (as returned by

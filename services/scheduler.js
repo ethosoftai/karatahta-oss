@@ -58,10 +58,10 @@ async function* readNdjson(response) {
   if (buffer.trim()) yield JSON.parse(buffer);
 }
 
-async function runCardsCarousel(idea) {
+async function runCardsCarousel(idea, isQuestion) {
   const genResponse = await internalFetch('/api/cards/generate', {
     method: 'POST',
-    body: JSON.stringify({ prompt: idea })
+    body: JSON.stringify(isQuestion ? { question: idea } : { prompt: idea })
   });
   if (!genResponse.ok) {
     throw new Error(`cards/generate basarisiz (${genResponse.status})`);
@@ -100,7 +100,9 @@ async function runCardsCarousel(idea) {
 const SCHEDULED_VIDEO_SEGMENT_COUNT = Math.max(1, Number(process.env.SCHEDULER_VIDEO_SEGMENT_COUNT) || 8);
 const SCHEDULED_VIDEO_MINUTES = Math.max(1, Number(process.env.SCHEDULER_VIDEO_MINUTES) || 10);
 
-async function runLessonVideo(idea) {
+// Plain "konu anlat" lesson: /api/generate-lesson plans and queues the
+// render job in one call.
+async function startTopicLessonJob(idea) {
   const genResponse = await internalFetch('/api/generate-lesson', {
     method: 'POST',
     body: JSON.stringify({
@@ -114,11 +116,45 @@ async function runLessonVideo(idea) {
   if (!genResponse.ok) {
     throw new Error(genData?.error || `generate-lesson basarisiz (${genResponse.status})`);
   }
-  const jobId = genData.id;
-  const lessonId = genData.lessonId;
-  if (!jobId || !lessonId) {
+  if (!genData.id || !genData.lessonId) {
     throw new Error('generate-lesson beklenen id/lessonId dondurmedi.');
   }
+  return { jobId: genData.id, lessonId: genData.lessonId };
+}
+
+// "Soru coz" lesson: a completely separate pathway from topic mode (loads
+// skill/question/*.md instead of the generic skill set) -- /api/question-plan
+// builds the plan synchronously, then /api/full-video queues the same render
+// job type generate-lesson uses, just from a client-supplied plan.
+async function startQuestionLessonJob(idea) {
+  const planResponse = await internalFetch('/api/question-plan', {
+    method: 'POST',
+    body: JSON.stringify({ note: idea, student_level: 'beginner' })
+  });
+  const planData = await planResponse.json();
+  if (!planResponse.ok) {
+    throw new Error(planData?.error || `question-plan basarisiz (${planResponse.status})`);
+  }
+  if (!planData.plan || !planData.lessonId) {
+    throw new Error('question-plan beklenen plan/lessonId dondurmedi.');
+  }
+
+  const genResponse = await internalFetch('/api/full-video', {
+    method: 'POST',
+    body: JSON.stringify({ plan: planData.plan, lesson_id: planData.lessonId })
+  });
+  const genData = await genResponse.json();
+  if (!genResponse.ok) {
+    throw new Error(genData?.error || `full-video basarisiz (${genResponse.status})`);
+  }
+  if (!genData.id) {
+    throw new Error('full-video beklenen id dondurmedi.');
+  }
+  return { jobId: genData.id, lessonId: planData.lessonId };
+}
+
+async function runLessonVideo(idea, isQuestion) {
+  const { jobId, lessonId } = isQuestion ? await startQuestionLessonJob(idea) : await startTopicLessonJob(idea);
 
   const deadline = Date.now() + JOB_TIMEOUT_MS;
   let finalStatus = null;
@@ -163,11 +199,11 @@ async function runLessonVideo(idea) {
 // Same idea, two posts in sequence: full lesson video first (YouTube +
 // Instagram Reel), then -- once it's had a few minutes to actually appear --
 // a second Instagram post as a kart carousel of the same topic.
-async function runCombo(idea) {
-  const lesson = await runLessonVideo(idea);
+async function runCombo(idea, isQuestion) {
+  const lesson = await runLessonVideo(idea, isQuestion);
   log('Combo: video adimi bitti, carousel icin bekleniyor', { idea, gapMs: COMBO_GAP_MS });
   await sleep(COMBO_GAP_MS);
-  const cards = await runCardsCarousel(idea);
+  const cards = await runCardsCarousel(idea, isQuestion);
   return { lesson, cards };
 }
 
@@ -177,9 +213,9 @@ async function runJob(jobType) {
   if (runningLock.has(jobType)) return;
   runningLock.add(jobType);
   try {
-    const { idea, lineIndex, poolSize } = await pickNextContentPoolItem();
-    log('Zamanlanmis is basliyor', { jobType, idea, poolSize });
-    const result = await RUNNERS[jobType](idea);
+    const { idea, lineIndex, poolSize, isQuestion } = await pickNextContentPoolItem();
+    log('Zamanlanmis is basliyor', { jobType, idea, poolSize, isQuestion });
+    const result = await RUNNERS[jobType](idea, isQuestion);
     // Marked only after the runner actually succeeds, and shared across every
     // job_type, so a failed attempt retries the same idea next time and a
     // published idea is never picked again by any job_type.
