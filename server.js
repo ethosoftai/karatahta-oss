@@ -4881,11 +4881,17 @@ async function queueTraditionalVideoJob({
     error.statusCode = 400;
     throw error;
   }
-  const videoQuota = await consumeUserPlanQuota(userContext.profileId, 'video');
-  if (!videoQuota.allowed) {
-    const error = new Error('Ücretsiz deneme video üretim hakkınız doldu.');
-    error.statusCode = 402;
-    throw error;
+  // The content-pool scheduler runs as a fixed internal service account
+  // (mode 'scheduler', see services/requestAuth.js), not a real trial user
+  // -- it must never be blocked by the free-trial quota meant for people
+  // signing up.
+  if (userContext.mode !== 'scheduler') {
+    const videoQuota = await consumeUserPlanQuota(userContext.profileId, 'video');
+    if (!videoQuota.allowed) {
+      const error = new Error('Ücretsiz deneme video üretim hakkınız doldu.');
+      error.statusCode = 402;
+      throw error;
+    }
   }
   plan = normalizeLessonContinuity(plan);
   if (!plan.subject) {

@@ -41,7 +41,12 @@ cardsRouter.post('/api/cards/generate', async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   try {
     const userContext = await resolveRequestUser(req);
-    const cardQuota = await consumeUserPlanQuota(userContext.profileId, 'card');
+    // The content-pool scheduler runs as a fixed internal service account
+    // (mode 'scheduler'), not a real trial user -- exempt it from the
+    // free-trial quota the same way queueTraditionalVideoJob does.
+    const cardQuota = userContext.mode === 'scheduler'
+      ? { allowed: true }
+      : await consumeUserPlanQuota(userContext.profileId, 'card');
     if (!cardQuota.allowed) {
       res.write(`${JSON.stringify({ type: 'error', error: 'Ücretsiz deneme kart üretim hakkınız doldu.' })}\n`);
       res.end();
