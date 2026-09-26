@@ -35,6 +35,7 @@ import { searchWeb } from './services/webSearch.js';
 import { cardsRouter } from './routes/cards.js';
 import { schedulerRouter } from './routes/scheduler.js';
 import { plansRouter } from './routes/plans.js';
+import { assetPoolHandler, videoRequestHandler } from './routes/assetPool.js';
 import { resolveRequestUser, bearerTokenFromRequest } from './services/requestAuth.js';
 import { generateCardsStream } from './services/cardsEngine.js';
 // Canlı öğretmen bölümü devre dışı bırakıldı; routes/liveTeacher.js ve
@@ -374,6 +375,11 @@ app.use(express.static(publicDir));
 app.use(cardsRouter);
 app.use(schedulerRouter);
 app.use(plansRouter);
+// marketing-agent-assets asset-pool contract: exposes approved lesson
+// videos/posters (collect_assets, prepare_media) and lesson generation
+// (request_video_generation) to a marketing agent. See routes/assetPool.js.
+app.use(assetPoolHandler);
+if (videoRequestHandler) app.use(videoRequestHandler);
 app.get('/media/*mediaPath', async (req, res, next) => {
   try {
     const objectKey = Array.isArray(req.params.mediaPath)
