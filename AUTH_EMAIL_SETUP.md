@@ -25,16 +25,16 @@ sağlayıcısını etkinleştirin.
 
 Supabase **Authentication → URL Configuration**:
 
-- Site URL: `https://karatahta.ethosoft.org`
+- Site URL: `https://<FRONTEND_DOMAIN>`
 - Redirect URLs:
-  - `https://karatahta.ethosoft.org/**`
+  - `https://<FRONTEND_DOMAIN>/**`
   - `http://localhost:3001/**`
   - `http://127.0.0.1:3001/**`
 
 Railway production değişkeni:
 
 ```env
-AUTH_REDIRECT_URL=https://karatahta.ethosoft.org/
+AUTH_REDIRECT_URL=https://<FRONTEND_DOMAIN>/
 GOOGLE_OAUTH_ENABLED=true
 ```
 
@@ -47,16 +47,16 @@ etkinleştirildikten sonra `true` yapın.
 ## 2. Supabase Custom SMTP
 
 Supabase Dashboard'da **Authentication → Emails → SMTP Settings** bölümünde
-mevcut hosting SMTP ayarları kullanılabilir:
+kendi SMTP sağlayıcınızın bilgilerini girin:
 
 - Sender name: `Kara Tahta`
-- Sender email: `no-reply@karatahta.ethosoft.org`
-- Host: `mail.karatahta.ethosoft.org`
+- Sender email: `no-reply@<DOMAIN>`
+- Host: `<SMTP_HOST>`
 - Port: `587`
-- Username: `no-reply@karatahta.ethosoft.org`
-- Password: cPanel'deki posta hesabının parolası
+- Username: `no-reply@<DOMAIN>`
+- Password: posta hesabının parolası
 
-E-posta gönderilemezse hosting/cPanel **Email Deliverability** ekranından SPF,
+E-posta gönderilemezse alan adınızın SPF,
 DKIM ve DMARC durumlarını kontrol edin. SMTP parolasını `.env`, frontend veya
 GitHub'a yazmayın.
 

@@ -1,18 +1,9 @@
 # Railway Deployment
 
-## Mevcut production
+## Genel bakış
 
-```text
-Project: <railway-project>
-Environment: production
-Service: karatahta-backend
-Domain: https://api.example.com
-Port: 8080
-Source: ethosoftai/karatahta-backend (railway)
-```
-
-GitHub `railway` branch'ine yapılan push'lar normalde otomatik deployment
-başlatır.
+Railway servisini bu repoya ve bir branch'e bağladığınızda, o branch'e yapılan
+push'lar otomatik deployment başlatır. Express `PORT=8080` üzerinde dinler.
 
 ## Progressive Manim rollout
 
@@ -41,7 +32,7 @@ bekleyen eski akışa kod değişikliği olmadan dönülebilir.
 
 ```env
 PORT=8080
-CORS_ORIGIN=https://karatahta.ethosoft.org
+CORS_ORIGIN=https://frontend.example.com
 AUTH_REQUIRED=false
 
 LLM_PROVIDER=deepseek
@@ -105,7 +96,7 @@ railway deployment list
 railway logs --lines 100
 ```
 
-CLI deployment GitHub bağlantısını kaldırmaz. Daha sonra `main` branch'ine
+CLI deployment GitHub bağlantısını kaldırmaz. Daha sonra izlenen branch'e
 yeni bir commit pushlanırsa GitHub auto-deploy yeniden çalışır. Bu nedenle
 production'a gönderilen kod önce GitHub'a pushlanmalı, CLI aynı commit için
 yalnız yedek deploy yöntemi olarak kullanılmalıdır.
@@ -113,20 +104,20 @@ yalnız yedek deploy yöntemi olarak kullanılmalıdır.
 ## Doğrulama
 
 ```bash
-curl https://api.example.com/api/config
+curl $API_URL/api/config
 ```
 
 CORS kontrolü:
 
 ```bash
 curl -i -X OPTIONS \
-  https://api.example.com/api/config \
-  -H 'Origin: https://karatahta.ethosoft.org' \
+  $API_URL/api/config \
+  -H 'Origin: https://frontend.example.com' \
   -H 'Access-Control-Request-Method: GET'
 ```
 
 Yanıtta şu başlık bulunmalıdır:
 
 ```text
-Access-Control-Allow-Origin: https://karatahta.ethosoft.org
+Access-Control-Allow-Origin: https://frontend.example.com
 ```

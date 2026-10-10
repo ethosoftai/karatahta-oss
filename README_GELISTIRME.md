@@ -1,6 +1,6 @@
 # Kara Tahta — Geliştirme Yol Haritası ve Mimari Öneriler
 
-> Bu doküman, **Kara Tahta `checkpoint-9`** sürümü ile benzer açık kaynak AI + Manim eğitim projelerinin karşılaştırılması sonucunda oluşturulmuş geliştirme yol haritasıdır.
+> Bu doküman, **Kara Tahta** ile benzer açık kaynak AI + Manim eğitim projelerinin karşılaştırılması sonucunda oluşturulmuş geliştirme yol haritasıdır.
 >
 > Amaç: Kara Tahta'nın mevcut **progressive Manim streaming** avantajını koruyarak; render güvenilirliği, video kalitesi, hata düzeltme, TTS senkronizasyonu, ölçeklenebilirlik ve eğitim ürün özelliklerini ciddi biçimde geliştirmek.
 
@@ -75,7 +75,7 @@ Segment 2 render edilir
 Final MP4 oluşturulur
 ```
 
-`checkpoint-9` içindeki `progressiveManimPlayer` yapısı:
+Kara Tahta içindeki `progressiveManimPlayer` yapısı:
 
 - fragmented MP4 parçalarını ayrıştırıyor,
 - `MediaSource` API kullanıyor,

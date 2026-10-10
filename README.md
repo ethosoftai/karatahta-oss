@@ -5,44 +5,20 @@ servisidir. DeepSeek ile plan ve Manim kodu üretir, Edge/Google TTS ile
 seslendirir, Manim + FFmpeg ile videoyu oluşturur ve kalıcı medyayı private
 Railway Bucket'a yazar.
 
-## Canlı sistem ve repolar
+## Bileşenler
 
-| Parça | Adres / repo |
+| Parça | Teknoloji |
 | --- | --- |
-| Production API | `https://api.example.com` |
-| Backend repo | `https://github.com/ethosoftai/karatahta-backend` |
-| Production branch | `feature/redis-render-workers` (13 Ağustos 2026 itibarıyla) |
-| Railway project | `<railway-project>` |
-| Railway services | `karatahta-backend`, `karatahta-render-worker-2`, `karatahta-social-publisher`, `Redis` |
-| Railway region | `europe-west4-drams3a` (Amsterdam), 1 replica |
-| Frontend | `https://frontend.example.com` (Cloudflare Workers) |
-| Frontend repo | `https://github.com/ethosoftai/karatahta-frontend` (`checkpoint-9`) |
-| Frontend (legacy) | `https://karatahta.ethosoft.org` (hosting/cPanel; Google OAuth artık bu domaine dönmüyor, bkz. `AUTH_REDIRECT_URL`) |
+| API | Node.js + Express (`server.js`) |
+| Render kuyruğu | Redis + BullMQ, ayrı `render-worker` süreçleri |
+| Frontend | Vite tabanlı ayrı bir uygulama (bu repoda değil) |
 | Auth ve ilişkisel veri | Supabase |
-| Kalıcı binary medya | Private Railway Bucket, S3-compatible API |
-
-**Railway servisinin deploy ettiği branch sabit değildir** — Railway proje
-geçmişinde birden fazla `checkpoint-N` branch'i var (bazıları bu reponun farklı
-soylarına ait, ör. HTML/Remotion render motoru denemeleri) ve hangisinin
-deploy edildiği zamanla değişti (`checkpoint-4` → `checkpoint-5` →
-`checkpoint-9` bu session içinde). **Varsayım yapmadan önce her zaman**
-`railway deployment list --service <service> --json` ile Railway'in şu an gerçekten hangi
-branch'i deploy ettiğini doğrulayın; bu README'deki tablo değeri elle
-güncellenir ve eskiyebilir. Branch'i değiştirmek için:
-
-```bash
-railway service source connect --repo ethosoftai/karatahta-backend --branch <branch> --service karatahta-backend
-```
-
-Değişiklikleri push etmeden önce hedef branch'in gerçekten Railway'in şu an
-deploy ettiği branch'in atası olduğunu (`git merge-base` ile) doğrulayın;
-aksi halde push edilen kod hiç deploy olmaz veya farklı bir kod ailesine
-karışır.
+| Kalıcı binary medya | S3 uyumlu private bucket (ör. Railway Bucket) |
 
 ## Üst seviye mimari
 
 ```text
-hosting/cPanel Vite frontend
+Vite frontend
   │
   └─ HTTPS + Bearer token
        ↓
@@ -204,11 +180,11 @@ Varsayılan olarak iki iş de kapalıdır (`enabled=false`). Açmak/kapatmak ve
 sıklığı değiştirmek için:
 
 ```bash
-curl -X POST https://api.example.com/api/scheduler/start \
+curl -X POST $API_URL/api/scheduler/start \
   -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
   -d '{"job_type":"cards_carousel","interval_minutes":1440}'
 
-curl -X POST https://api.example.com/api/scheduler/stop \
+curl -X POST $API_URL/api/scheduler/stop \
   -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
   -d '{"job_type":"lesson_video"}'
 ```
@@ -253,9 +229,9 @@ alanlarını döner.
 - Railway filesystem kalıcı depolama olarak kullanılmaz. Yalnız geçici
   render/work dosyaları burada kalabilir; final sonuç bucket'a yazılmalıdır.
 
-## Dağıtık render worker (canlı)
+## Dağıtık render worker
 
-`feature/redis-render-workers` branch'i production'da aktiftir. Mimari API →
+Mimari API →
 Redis/BullMQ → 1..N private `render-worker` service → Railway Bucket +
 Supabase'dir. Her worker `PROCESS_ROLE=render-worker` ve
 `RENDER_CONCURRENCY=1` ile yalnız bir ağır render çalıştırmalıdır.
@@ -290,14 +266,12 @@ bu projede tek render worker service'i ile sınırlı kaldı; plan yükseltilirs
 ayrı service eklemek yerine aynı `render-worker` service'ini 2--4 replica'ya
 ölçeklemek tercih edilir.
 
-### Doğrulanmış production ölçümü
+### Örnek ölçüm
 
-13 Ağustos 2026 smoke testinde Pisagor Teoremi için hedefi 1.5 dakika olan
-video 91.9 saniye çıktı ve yaklaşık 1 dakika 40 saniyede üretildi. İki worker
-segmenti tek worker üzerinde sırayla 23.3 sn ve 26.1 sn sürdü; final
-birleştirme/Bucket aşaması yaklaşık 24 sn sürdü. Aynı iş iki worker replica ile
-render bölümü paralelleşir. Worker audit kayıtları `render_worker_jobs`
-tablosundan takip edilir.
+Pisagor Teoremi için hedefi 1.5 dakika olan bir video tek worker ile yaklaşık
+1 dakika 40 saniyede üretildi (iki segment ~23 sn ve ~26 sn, final birleştirme
+~24 sn). Worker sayısı arttıkça render bölümü paralelleşir. Worker audit
+kayıtları `render_worker_jobs` tablosundan takip edilir.
 
 ## Repo haritası
 
@@ -415,17 +389,14 @@ içermez). `POST /api/lessons/:id/save-to-drive` bu refresh token'ı Google'ın
 token endpoint'iyle değiştirip dersin final videosunu kullanıcının Drive'ına
 yükler.
 
-Önerilen CORS (production'da güncel değer -- `railway variables` ile
-doğrulayın):
+Örnek CORS:
 
 ```env
-CORS_ORIGIN=https://karatahta.ethosoft.org,http://localhost:3001,http://127.0.0.1:3001,https://frontend.example.com
+CORS_ORIGIN=https://frontend.example.com,http://localhost:3001,http://127.0.0.1:3001
 ```
 
-`AUTH_REDIRECT_URL` şu an yalnız yeni frontend'i işaret eder
-(`https://frontend.example.com/`) — Google OAuth/
-şifre sıfırlama/e-posta onayı dönüşleri artık `karatahta.ethosoft.org`'a
-gitmez. Bu tek bir sabit URL olduğundan aynı anda yalnız bir frontend OAuth
+`AUTH_REDIRECT_URL` Google OAuth/şifre sıfırlama/e-posta onayı dönüşlerinin
+gideceği frontend adresidir. Bu tek bir sabit URL olduğundan aynı anda yalnız bir frontend OAuth
 dönüşünü doğru alabilir; iki frontend'in aynı anda OAuth'u desteklemesi
 gerekirse `authCallbackUrl` (`server.js`) isteğin `Origin` header'ını
 `CORS_ORIGIN` allowlist'ine karşı doğrulayıp dinamik seçecek şekilde
@@ -652,10 +623,10 @@ git diff --check
 docker build -t karatahta-backend .
 ```
 
-Local veya production smoke test:
+Smoke test (`API_URL` local veya deploy edilmiş adres):
 
 ```bash
-curl https://api.example.com/api/config
+curl $API_URL/api/config
 ```
 
 Birkac ders uretiminden sonra tekrarlayan Manim hatalarini taramak icin
@@ -671,7 +642,7 @@ CORS preflight:
 
 ```bash
 curl -i -X OPTIONS \
-  https://api.example.com/api/config \
+  $API_URL/api/config \
   -H 'Origin: https://frontend.example.com' \
   -H 'Access-Control-Request-Method: GET'
 ```
@@ -681,61 +652,31 @@ https://frontend.example.com` bulunmalıdır.
 
 ## Railway deployment
 
-Bu proje için Railway CLI birincil operasyon aracıdır (`railway login` +
-`railway link` bir kere yapılır; bu repoda zaten linklidir).
-
-**Önce hangi branch'in deploy edildiğini doğrulayın** — README'deki tablo
-değeri elle güncellenir ve eskiyebilir:
+Railway CLI ile (`railway login` + `railway link`) projeyi bağladıktan sonra,
+Railway'in GitHub entegrasyonu push edilen branch'i otomatik build/deploy eder.
+Önce Railway'in hangi branch'i izlediğini doğrulayın:
 
 ```bash
 railway status --json | grep -A5 '"branch"'
 ```
 
-Normal production akışı (doğrulanan branch üzerinde):
+Takip:
 
 ```bash
-git switch <dogrulanan-branch>       # ör. checkpoint-9
-git pull --ff-only origin <branch>
-npm test
-git add <degisen-dosyalar>
-git commit -m "..."
-git push origin <branch>
-```
-
-Push, Railway'in GitHub entegrasyonu üzerinden otomatik build/deploy tetikler.
-Takip edin:
-
-```bash
-railway status                       # Building -> Online, deployment ID degisir
+railway status                       # Building -> Online
 railway logs -d --lines 200          # canli log
 ```
-
-`railway status --json` çıktısındaki `meta.branch` ve `meta.commitHash`
-değerlerinin push ettiğiniz branch/commit ile eştiğini doğrulayın — Railway
-farklı bir branch'e bağlıysa push hiç deploy tetiklemez ve fark edilmeden
-eski kod çalışmaya devam eder (bu session'da tam olarak bu yaşandı:
-`checkpoint-5`'e yapılan push'lar aslında deploy edilen `checkpoint-4`'ü hiç
-etkilemedi, ta ki `railway status --json` ile fark edilene kadar).
 
 Environment değişkeni değiştirmek için (otomatik redeploy tetikler):
 
 ```bash
-railway variables --service karatahta-backend --environment production --set "KEY=value"
+railway variables --service <service> --environment production --set "KEY=value"
 ```
 
-Deploy edilen branch'i değiştirmek için:
-
-```bash
-railway service source connect --repo ethosoftai/karatahta-backend --branch <branch> --service karatahta-backend
-```
-
-GitHub source kuyruğu takılırsa CLI'dan doğrudan deploy edin (yalnız yedek
-yöntem — önce aynı kodu GitHub'daki deploy edilen branch'e commit/push edin,
-aksi halde production ile repo source of truth ayrışır):
+GitHub kaynağı kullanılamıyorsa CLI'dan doğrudan deploy edilebilir:
 
 ```bash
 railway up . --path-as-root
-railway deployment list
 ```
 
 ## VPS deployment (hibrit backend)
@@ -764,51 +705,28 @@ Live) VPS `.env` dosyasina uygular, VPS'e ozgu ayarlari (MEDIA_STORAGE_PROVIDER=
 CORS_ORIGIN, kendi DEEPSEEK_API_KEY'i, concurrency degerleri) degistirmeden
 birakir ve container'i yeniden olusturur. Idempotent'tir, guvenle tekrar
 calistirilabilir. `railway` CLI'nin login/link olmasi ve VPS SSH erisiminin
-(`VPS_SSH_KEY`, varsayilan yol) hazir olmasi gerekir.
+(`VPS_HOST`, `VPS_SSH_KEY`) hazir olmasi gerekir.
 
 ## Frontend ile birlikte deployment
 
-Backend deploy edilince frontend(ler) otomatik olarak yeniden build olmaz.
-API sözleşmesini etkileyen değişikliklerde `ethosoftai/karatahta-frontend`
-reposu da güncellenmelidir (bkz. o repodaki README) — çalışma branch'i şu an
-`checkpoint-9`.
+Backend deploy edilince frontend otomatik olarak yeniden build olmaz. API
+sözleşmesini etkileyen değişikliklerde frontend de güncellenmelidir. Frontend'in
+origin'i `CORS_ORIGIN` listesinde, OAuth dönüş adresi `AUTH_REDIRECT_URL`
+değişkeninde yer almalıdır.
 
-İki ayrı frontend deployment'ı var:
+## Geliştirici notları
 
-- **Cloudflare Workers** (`frontend.example.com`,
-  güncel/birincil): build/deploy mekanizması bu repo içinde değil, ayrı bir
-  Cloudflare hesabından yönetiliyor (repoda `wrangler.toml` yok). Hangi
-  branch'i izlediği veya nasıl tetiklendiği bu README'de doğrulanmadı — o
-  Cloudflare projesine erişimi olan kişiye sorun.
-- **hosting/cPanel** (`karatahta.ethosoft.org`, legacy): `main` branch'inden
-  commitlenmiş `dist/` klasörünü manuel "Update from Remote" + "Deploy HEAD
-  Commit" adımlarıyla yayınlar. Google OAuth artık bu domaine dönmüyor (bkz.
-  yukarıdaki `AUTH_REDIRECT_URL` notu), ama statik arayüz hâlâ buradan
-  erişilebilir olabilir.
-
-## Sonraki geliştirici/LLM için teslim kontrol listesi
-
-- Başlamadan `git status -sb`, `git remote -v`, `git branch -vv` ve son
-  commitleri kontrol et.
-- **Varsayım yapma**: `railway status --json | grep branch` ile Railway'in şu
-  an gerçekten hangi branch/commit'i deploy ettiğini doğrula. Bu repoda birden
-  fazla `checkpoint-N` branch'i var ve bazıları birbirinin devamı değil, farklı
-  soylardan (ör. HTML/Remotion render motoru denemeleri) — README'deki tablo
-  değeri güncel olmayabilir.
-- Production backend değişikliği, doğrulanmış deploy branch'ine gitmelidir.
-- `.env` veya credential JSON dosyalarını okuma çıktısında/gitte ifşa etme.
-- Supabase'i binary depolama olarak geri ekleme; Auth + Postgres olarak tut.
-- Kalıcı video/ses/ekleri Railway Bucket'a yaz; local `/renders` yalnız geçici
+- `.env` veya credential JSON dosyalarını loglarda/gitte ifşa etme.
+- Supabase'i binary depolama olarak kullanma; Auth + Postgres olarak tut.
+- Kalıcı video/ses/ekleri bucket'a yaz; local `/renders` yalnız geçici
   fallback'tir.
 - In-memory job/SSE/partial tasarımını dikkate almadan replica artırma.
 - Pipeline değişikliğinde final-video fallback ve lesson ownership
   kontrollerini koru.
-- Yeni env değişkeni eklenirse `.env.example`, README ve Railway Variables
+- Yeni env değişkeni eklenirse `.env.example`, `railway.env.example` ve README
   birlikte güncellenmelidir.
-- Endpoint sözleşmesi değişirse frontend kaynak + `dist` commitini ve cPanel
-  remote/HEAD deploy akışını da tamamla.
-- Teslimden önce test, Docker build (mümkünse), `/api/config`, CORS ve Railway
-  deployment source SHA'sını doğrula.
+- Göndermeden önce testleri, Docker build'i (mümkünse), `/api/config` ve CORS'u
+  doğrula.
 
 ## Lisans
 

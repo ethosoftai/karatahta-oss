@@ -12,9 +12,9 @@ gereken adımları anlatır.
 - **Description** (≤120 karakter):
   `AI turns any topic into a short animated lesson video, published automatically to TikTok.`
 - **Terms of Service URL**:
-  `https://api.example.com/terms`
+  `https://<API_DOMAIN>/terms`
 - **Privacy Policy URL**:
-  `https://api.example.com/privacy`
+  `https://<API_DOMAIN>/privacy`
 
 Bu iki sayfa zaten backend'de canlı (server.js'e eklendi), doğrudan
 kopyalayıp forma yapıştırabilirsin.
@@ -55,7 +55,7 @@ Yukarıdaki 3 değişken Railway'e eklenip servis yeniden deploy edildikten sonr
 
 1. Şu linki tarayıcında aç (setup_token'ı kendi belirlediğin değerle değiştir):
    ```
-   https://api.example.com/api/oauth/tiktok/start?setup_token=SENIN_SETUP_TOKEN_DEGERIN
+   https://<API_DOMAIN>/api/oauth/tiktok/start?setup_token=SENIN_SETUP_TOKEN_DEGERIN
    ```
 2. TikTok'un giriş/izin ekranı açılır — **işletme hesabınla** giriş yapıp izin ver.
 3. Yönlendirildiğin sayfada bir JSON görünür, içinde `refresh_token` alanı olur.
@@ -87,7 +87,7 @@ Client key/secret/refresh token Railway'e eklendikten sonra, şu şekilde
 manuel test edilebilir:
 
 ```
-POST https://api.example.com/api/publish-tiktok
+POST https://<API_DOMAIN>/api/publish-tiktok
 Body: { "lesson_id": "<bir ders id'si>", "title": "Test" }
 ```
 
