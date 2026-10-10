@@ -809,3 +809,9 @@ reposu da güncellenmelidir (bkz. o repodaki README) — çalışma branch'i şu
   remote/HEAD deploy akışını da tamamla.
 - Teslimden önce test, Docker build (mümkünse), `/api/config`, CORS ve Railway
   deployment source SHA'sını doğrula.
+
+## Lisans
+
+Bu proje [GNU Affero General Public License v3.0](LICENSE) ile lisanslanmıştır.
+Katkı vermek için [CONTRIBUTING.md](CONTRIBUTING.md), güvenlik bildirimleri için
+[SECURITY.md](SECURITY.md) dosyasına bakın.

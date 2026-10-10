@@ -16,9 +16,9 @@ set -euo pipefail
 # Requires: `railway` CLI logged in and linked to the karatahta-backend
 # service (for reading current Railway values), SSH access to the VPS.
 
-VPS_HOST=${VPS_HOST:-VPS_HOST}
+VPS_HOST=${VPS_HOST:?VPS_HOST must be set}
 VPS_USER=${VPS_USER:-ubuntu}
-VPS_SSH_KEY=${VPS_SSH_KEY:-/path/to/vps-key.pem}
+VPS_SSH_KEY=${VPS_SSH_KEY:?VPS_SSH_KEY must be set}
 VPS_ENV_FILE=${VPS_ENV_FILE:-/etc/karatahta-backend.env}
 VPS_DOMAIN=${VPS_DOMAIN:-api.karatahta.ethosoft.org}
 CONTAINER_NAME=${CONTAINER_NAME:-karatahta-backend}

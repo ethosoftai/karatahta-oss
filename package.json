@@ -2,6 +2,11 @@
   "name": "kara-tahta-deepseek-manim",
   "version": "1.0.0",
   "private": true,
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ethosoftai/karatahta.git"
+  },
   "type": "module",
   "scripts": {
     "start": "node server.js",
