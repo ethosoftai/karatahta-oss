@@ -326,8 +326,8 @@ En tutarlı yöntem Docker'dır; image gerekli Node, Python, Manim, LaTeX,
 Edge TTS ve FFmpeg bağımlılıklarını içerir.
 
 ```bash
-git clone --branch railway https://github.com/ethosoftai/karatahta-backend.git
-cd karatahta-backend
+git clone https://github.com/ethosoftai/karatahta-oss.git
+cd karatahta-oss
 cp .env.example .env
 # En az LLM ve local auth/depolama değerlerini doldur.
 docker build -t karatahta-backend .

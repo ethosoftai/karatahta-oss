@@ -5,7 +5,7 @@
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ethosoftai/karatahta.git"
+    "url": "https://github.com/ethosoftai/karatahta-oss.git"
   },
   "type": "module",
   "scripts": {
