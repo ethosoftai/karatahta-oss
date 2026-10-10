@@ -121,3 +121,67 @@ Yanıtta şu başlık bulunmalıdır:
 ```text
 Access-Control-Allow-Origin: https://frontend.example.com
 ```
+
+## Railway CLI ile günlük işlemler
+
+Railway CLI ile (`railway login` + `railway link`) projeyi bağladıktan sonra,
+Railway'in GitHub entegrasyonu push edilen branch'i otomatik build/deploy eder.
+Önce Railway'in hangi branch'i izlediğini doğrulayın:
+
+```bash
+railway status --json | grep -A5 '"branch"'
+```
+
+Takip:
+
+```bash
+railway status                       # Building -> Online
+railway logs -d --lines 200          # canli log
+```
+
+Environment değişkeni değiştirmek için (otomatik redeploy tetikler):
+
+```bash
+railway variables --service <service> --environment production --set "KEY=value"
+```
+
+GitHub kaynağı kullanılamıyorsa CLI'dan doğrudan deploy edilebilir:
+
+```bash
+railway up . --path-as-root
+```
+
+## VPS deployment (hibrit backend)
+
+Hibrit backend altyapısının VPS tarafı `scripts/deploy_vps.sh` ile deploy
+edilir (kod testleri, Docker build, smoke test, üretime geçiş, rollback
+imajı):
+
+```bash
+bash scripts/deploy_vps.sh
+```
+
+VPS ve Railway aynı kod tabanini calistirir ama `/etc/karatahta-backend.env`
+ayri bir dosyadir ve otomatik senkronize olmaz. Railway'e yeni bir feature
+flag, timeout veya Google/Media credential eklendiginde VPS'in de ayni
+degerleri almasi icin:
+
+```bash
+npm run vps:sync-env
+```
+
+Bu script `railway variables --json` ile Railway'in guncel degerlerini okur,
+yalnizca iki backend arasinda ayni olmasi gereken ayarlari (feature flag'ler,
+paylasilan timeout'lar, Railway Bucket okuma bilgileri, Google OAuth/Drive/
+Live) VPS `.env` dosyasina uygular, VPS'e ozgu ayarlari (MEDIA_STORAGE_PROVIDER=local,
+CORS_ORIGIN, kendi DEEPSEEK_API_KEY'i, concurrency degerleri) degistirmeden
+birakir ve container'i yeniden olusturur. Idempotent'tir, guvenle tekrar
+calistirilabilir. `railway` CLI'nin login/link olmasi ve VPS SSH erisiminin
+(`VPS_HOST`, `VPS_SSH_KEY`) hazir olmasi gerekir.
+
+## Frontend ile birlikte deployment
+
+Backend deploy edilince frontend otomatik olarak yeniden build olmaz. API
+sözleşmesini etkileyen değişikliklerde frontend de güncellenmelidir. Frontend'in
+origin'i `CORS_ORIGIN` listesinde, OAuth dönüş adresi `AUTH_REDIRECT_URL`
+değişkeninde yer almalıdır.
