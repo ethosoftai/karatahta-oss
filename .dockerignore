@@ -16,3 +16,4 @@ __pycache__/
 *.wav
 *.webm
 .DS_Store
+frontend/

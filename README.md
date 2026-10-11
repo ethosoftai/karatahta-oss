@@ -7,13 +7,14 @@
 
 <p align="center">
   <strong>Bir konu yaz, anlatımlı bir ders videosu al.</strong><br>
-  DeepSeek + Manim + TTS ile yapay zekâ destekli eğitim videosu üreten açık kaynak backend.
+  DeepSeek + Manim + TTS ile yapay zekâ destekli eğitim videosu üreten açık kaynak uygulama.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/lisans-AGPL--3.0-blue" alt="Lisans: AGPL-3.0"></a>
   <img src="https://img.shields.io/badge/node-22-339933?logo=node.js&logoColor=white" alt="Node 22">
   <img src="https://img.shields.io/badge/manim-0.20.1-ECB22E" alt="Manim 0.20.1">
+  <img src="https://img.shields.io/badge/react-19-61DAFB?logo=react&logoColor=black" alt="React 19">
   <img src="https://img.shields.io/badge/docker-hazır-2496ED?logo=docker&logoColor=white" alt="Docker">
 </p>
 
@@ -21,8 +22,12 @@
 
 Kara Tahta, öğrencinin yazdığı bir konuyu ya da sorunun fotoğrafını
 3Blue1Brown tarzı, seslendirilmiş bir matematik/fen ders videosuna dönüştürür.
-Bu repo uygulamanın **backend**'idir: Express API, kullanıcı/veri katmanı ve
-video üretim pipeline'ı.
+Bu repo uygulamanın tamamını içerir:
+
+- **Backend** (repo kökü): Express API, kullanıcı/veri katmanı ve video üretim
+  pipeline'ı.
+- **Frontend** ([`frontend/`](frontend/)): Vite + React arayüzü, canlı video
+  oynatıcı ve Kara asistan. Ayrıntılar için [frontend/README.md](frontend/README.md).
 
 ## Özellikler
 
@@ -119,10 +124,23 @@ pip install manim==0.20.1 edge-tts==7.2.8
 npm run dev
 ```
 
-Backend `http://localhost:8080` adresinde çalışır. Frontend'in varsayılan
-origin'i `http://localhost:3001`'dir.
+Backend `http://localhost:8080` adresinde çalışır.
 
 </details>
+
+### Arayüzü çalıştırma
+
+Backend çalışırken ikinci bir terminalde:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Arayüz `http://localhost:3001` adresinde açılır ve API isteklerini
+`localhost:8080`'e yönlendirir. Yapılandırma, yayınlama ve geliştirici portalı
+için [frontend/README.md](frontend/README.md).
 
 ### Süreç rolleri
 
@@ -141,6 +159,7 @@ Kuyruk kapalıyken API render'ı kendi içinde yapar.
 
 | Belge | İçerik |
 | --- | --- |
+| [frontend/README.md](frontend/README.md) | Arayüz: kurulum, yapılandırma, geliştirici portalı, yayınlama |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Mimari, pipeline, render worker'lar, çalışma zamanı sınırları, repo haritası |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Tüm ortam değişkenleri, Supabase migration'ları, bucket kurulumu |
 | [docs/API.md](docs/API.md) | HTTP, WebSocket ve MCP uç noktaları |
@@ -157,7 +176,8 @@ Katkılara açığız! Başlamadan önce [CONTRIBUTING.md](CONTRIBUTING.md) dosy
 okuyun. Değişiklik göndermeden önce testleri çalıştırın:
 
 ```bash
-npm test
+npm test                                   # backend
+cd frontend && npm test && npm run build   # frontend
 ```
 
 Güvenlik açıklarını herkese açık issue yerine [SECURITY.md](SECURITY.md)
