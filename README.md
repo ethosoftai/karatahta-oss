@@ -47,6 +47,9 @@ Bu repo uygulamanın tamamını içerir:
   yayını, Google Drive'a kaydetme ve zamanlanmış otomatik içerik üretimi.
 - **MCP sunucusu:** `POST /mcp` üzerinden ders ve kart üretimini başka
   yapay zekâ ajanlarına araç olarak sunar.
+- **Pazarlama agent'ı için asset pool:** Onaylı (herkese açık) ders videolarını ve kapak
+  görsellerini bir agent'a imzalı URL'lerle sunar; agent uygulamanın veritabanı anahtarını görmez.
+  Ayrıntılar: [docs/API.md](docs/API.md#asset-pool-pazarlama-agentı-için).
 
 ## Nasıl çalışır
 

@@ -37,3 +37,40 @@ HTTP, WebSocket ve MCP uç noktaları.
 
 Auth açıkken kullanıcıya ait endpointler Bearer token ister. Job ve lesson
 sahiplik kontrollerini kaldırmayın.
+
+## Asset pool (pazarlama agent'ı için)
+
+Kara Tahta, [marketing-agent-assets](https://github.com/Ahmet2001/MarketingPool/tree/main/marketing-agent-assets)
+projesindeki **asset-pool sözleşmesini** uygular. Bir pazarlama agent'ı (Ethgent), uygulamanın
+**onayladığı** ders videolarını ve kapak görsellerini bu uç noktalardan okur. Agent, uygulamanın
+veritabanı anahtarını veya medya depolama sırlarını görmez; sadece bu sözleşmeyi ve bir token'ı bilir.
+
+| Endpoint | İşlev |
+| --- | --- |
+| `GET /api/assets?kind=&tag=&limit=` | Onaylı varlık listesi: `{ "assets": [...] }`. `kind`: `video` veya `image`. `limit` varsayılan 20, en çok 100 |
+| `GET /api/assets/:id` | Tek varlık. Yok **veya onaylı değilse** `404` |
+| `POST /api/assets/:id/prepare` | Varlığı bir yayın hedefi için yeniden imzalar (`{ "target": { "platform", "action" }, "ttlSeconds" }`) |
+| `/api/video-requests` | İsteğe bağlı: agent'ın ders üretimi istemesi. Sadece `SCHEDULER_INTERNAL_TOKEN` ve `SCHEDULER_USER_ID` tanımlıysa açılır |
+
+**Kimlik doğrulama.** Kullanıcı oturumu değil, paylaşılan bir token: `Authorization: Bearer $ASSET_POOL_TOKEN`.
+Aynı değeri agent'ın `APP_INTERNAL_TOKEN` değişkenine koyun. `ASSET_POOL_TOKEN` boşsa tüm istekler
+`500` ile reddedilir; havuz yanlışlıkla açık kalmaz.
+
+**Neyin "onaylı" sayıldığı.** `lessons.is_public = true` olan ve bitmiş (`status = done`) bir videosu bulunan
+dersler. YouTube'dan içe aktarılan, hâlâ render edilen ve özel dersler hiçbir zaman listelenmez ve id ile
+istenirse `404` döner. Kimlikler `video:<lessonId>` ve `poster:<lessonId>` biçimindedir.
+
+**Medya URL'leri.** Her varlık imzalı bir `https://` URL'si taşır; ömrü `SOCIAL_PUBLISH_VIDEO_URL_TTL_SECONDS`
+(varsayılan 86400, en çok 24 saat). Sözleşme `http://` URL'lerini kabul etmez: böyle bir varlık sessizce elenir
+ve sayısı `X-Asset-Pool-Dropped` yanıt başlığında bildirilir. Yerelde `MEDIA_STORAGE_PROVIDER=local` ile
+deniyorsanız `MEDIA_PUBLIC_BASE_URL` değerinin `https://` olması gerekir (listeniz boş geliyorsa ilk bakılacak yer burası).
+
+**Doğrulama.** Sözleşme uyumunu marketing-agent-assets deposundaki denetleyici ile sınayın:
+
+```bash
+node asset-pool/bin/check.js http://127.0.0.1:3000 --token "$ASSET_POOL_TOKEN" --prepare
+```
+
+Bu depodaki kodla temiz bir ortamda çalıştırıldığında 19 kontrolün 19'u geçti (video üretimi kapalıyken
+isteğe bağlı bölüm atlanır). Uygulama kodu `routes/assetPool.js` ve `services/assetPool/` altındadır.
+
